@@ -195,7 +195,40 @@ if os.getenv("TAURI_SECURITY_TEST") == "1" and not __IS_ISOLATE_WORKER__ then
 
     app.clipboard:clear()
 
-    print("[CYBERSECURITY, LIFECYCLE, NOTIFICATIONS, SINGLE-INSTANCE, THEME, FILE-DROP & CLIPBOARD ALL TESTS PASSED]")
+    -- Plugin Architecture Test
+    local plugin_setup_called = false
+    local plugin_theme_received = false
+    local demo_plugin = Tauri.plugin("test-plugin", {
+        setup = function(app_inst, self_plugin)
+            plugin_setup_called = true
+            app_inst:register("plugin:test-plugin|echo", function(args)
+                return "plugin_echo: " .. tostring(args and args.text or "")
+            end)
+        end,
+        on_theme_changed = function(app_inst, theme)
+            plugin_theme_received = true
+        end
+    })
+
+    app:plugin(demo_plugin)
+
+    if not plugin_setup_called then
+        error("[PLUGIN FAILURE] Plugin setup hook was not invoked!")
+    end
+    if not (app.plugins["test-plugin"] and app.commands["plugin:test-plugin|echo"]) then
+        error("[PLUGIN FAILURE] Plugin or command not registered!")
+    end
+    local plugin_res = app.commands["plugin:test-plugin|echo"]({ text = "Antigravity" })
+    if plugin_res ~= "plugin_echo: Antigravity" then
+        error("[PLUGIN FAILURE] Plugin command result mismatch: " .. tostring(plugin_res))
+    end
+    __TAURI_DISPATCH_THEME__("light")
+    if not plugin_theme_received then
+        error("[PLUGIN FAILURE] Plugin theme event hook was not invoked!")
+    end
+    print("[PLUGIN ARCHITECTURE TEST PASSED]")
+
+    print("[CYBERSECURITY, LIFECYCLE, PLUGINS, NOTIFICATIONS, SINGLE-INSTANCE, THEME, FILE-DROP & CLIPBOARD ALL TESTS PASSED]")
     os.exit(0)
 end
 

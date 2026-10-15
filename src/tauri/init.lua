@@ -1,5 +1,56 @@
 local ffi = require("ffi")
 
+-- ============================================================================
+-- Module & Plugin Search Paths (Auto-Discovery)
+-- ============================================================================
+local function setup_module_search_paths()
+    local extra_lua_paths = {
+        "./?.lua",
+        "./?/init.lua",
+        "./plugins/?.lua",
+        "./plugins/?/init.lua",
+        "./plugins/?/src/?.lua",
+        "../lua-tauri-plugins/plugins/?.lua",
+        "../lua-tauri-plugins/plugins/?/init.lua",
+        "../lua-tauri-plugins/plugins/?/src/?.lua",
+        "../plugins/?.lua",
+        "../plugins/?/init.lua",
+        "./node_modules/?/init.lua",
+        "./node_modules/@tauri-apps/plugin-?/init.lua",
+        "./node_modules/lua-tauri-plugin-?/init.lua"
+    }
+
+    local extra_c_paths = {
+        "./?.so",
+        "./?.dylib",
+        "./?.dll",
+        "./plugins/?.so",
+        "./plugins/?.dylib",
+        "./plugins/?.dll",
+        "../lua-tauri-plugins/plugins/?/?.so",
+        "../lua-tauri-plugins/plugins/?/?.dylib",
+        "../lua-tauri-plugins/plugins/?/?.dll"
+    }
+
+    local current_path = package.path or ""
+    for _, p in ipairs(extra_lua_paths) do
+        if not current_path:find(p, 1, true) then
+            current_path = current_path .. ";" .. p
+        end
+    end
+    package.path = current_path
+
+    local current_cpath = package.cpath or ""
+    for _, cp in ipairs(extra_c_paths) do
+        if not current_cpath:find(cp, 1, true) then
+            current_cpath = current_cpath .. ";" .. cp
+        end
+    end
+    package.cpath = current_cpath
+end
+
+setup_module_search_paths()
+
 ffi.cdef[[
 typedef void (*ipc_callback_fn)(const char *window_label, const char *seq, const char *req);
 typedef void (*tray_callback_fn)(int id);
@@ -941,12 +992,15 @@ function Tauri.new(config)
     self.commands = {}
     self.listeners = {}
     self.windows = {}
+    self.plugins = {}
+    self.plugin_list = {}
     self.menu_listeners = {}
     self.window_listeners = {}
     self.single_instance_listeners = {}
     self.theme_listeners = {}
     self.file_drop_listeners = {}
-    self._current_theme = ffi.string(clib.platform_get_theme())
+    local ok_theme, theme_val = pcall(function() return ffi.string(clib.platform_get_theme()) end)
+    self._current_theme = ok_theme and theme_val or "light"
     self.state = State.new(json)
 
     self.clipboard = {
@@ -1547,6 +1601,33 @@ function Tauri:register(cmd_name, handler)
     self.commands[cmd_name] = handler
 end
 
+function Tauri:plugin(plugin)
+    if type(plugin) == "function" then
+        plugin = plugin(self)
+    end
+    if type(plugin) ~= "table" then
+        error("app:plugin expects a plugin table or a factory function returning a table")
+    end
+
+    local name = plugin.name or string.format("plugin_%d", #self.plugin_list + 1)
+    if self.plugins[name] then
+        error(string.format("Plugin '%s' is already registered", name))
+    end
+
+    plugin.app = self
+    self.plugins[name] = plugin
+    table.insert(self.plugin_list, plugin)
+
+    if type(plugin.setup) == "function" then
+        local ok, err = pcall(plugin.setup, self, plugin)
+        if not ok then
+            error(string.format("Failed to initialize plugin '%s': %s", name, tostring(err)))
+        end
+    end
+
+    return self
+end
+
 function Tauri:listen(event_name, handler)
     if not self.listeners[event_name] then
         self.listeners[event_name] = {}
@@ -1597,6 +1678,11 @@ function Tauri:create_main_window()
 
     clib.platform_window_create("main", title, url, width, height, resizable, decorations, transparent)
     clib.platform_window_eval("main", TAURI_CLIENT_SCRIPT)
+    for _, p in ipairs(self.plugin_list or {}) do
+        if type(p.js) == "string" and p.js ~= "" then
+            clib.platform_window_eval("main", p.js)
+        end
+    end
     self.windows["main"] = true
 end
 
@@ -1699,6 +1785,15 @@ function __TAURI_DISPATCH_WINDOW_CLOSE__(label)
         end
     }
 
+    for _, p in ipairs(g_tauri_instance.plugin_list or {}) do
+        if type(p.on_window_close) == "function" then
+            pcall(p.on_window_close, g_tauri_instance, event)
+        end
+        if type(p.on_event) == "function" then
+            pcall(p.on_event, g_tauri_instance, "window_close", event)
+        end
+    end
+
     for _, cb in ipairs(g_tauri_instance.window_listeners or {}) do
         pcall(cb, event)
     end
@@ -1711,6 +1806,14 @@ end
 function __TAURI_DISPATCH_SINGLE_INSTANCE__(payload_json)
     if not g_tauri_instance then return end
     local data = json.decode(payload_json) or {}
+    for _, p in ipairs(g_tauri_instance.plugin_list or {}) do
+        if type(p.on_single_instance) == "function" then
+            pcall(p.on_single_instance, g_tauri_instance, data)
+        end
+        if type(p.on_event) == "function" then
+            pcall(p.on_event, g_tauri_instance, "single_instance", data)
+        end
+    end
     for _, cb in ipairs(g_tauri_instance.single_instance_listeners or {}) do
         pcall(cb, data)
     end
@@ -1720,6 +1823,14 @@ end
 function __TAURI_DISPATCH_THEME__(theme)
     if not g_tauri_instance then return end
     g_tauri_instance._current_theme = theme
+    for _, p in ipairs(g_tauri_instance.plugin_list or {}) do
+        if type(p.on_theme_changed) == "function" then
+            pcall(p.on_theme_changed, g_tauri_instance, theme)
+        end
+        if type(p.on_event) == "function" then
+            pcall(p.on_event, g_tauri_instance, "theme_changed", { theme = theme })
+        end
+    end
     for _, cb in ipairs(g_tauri_instance.theme_listeners or {}) do
         pcall(cb, theme)
     end
@@ -1731,6 +1842,14 @@ function __TAURI_DISPATCH_FILE_DROP__(label, event_type, payload_json)
     local data = json.decode(payload_json) or {}
     data.label = label
     data.type = event_type
+    for _, p in ipairs(g_tauri_instance.plugin_list or {}) do
+        if type(p.on_file_drop) == "function" then
+            pcall(p.on_file_drop, g_tauri_instance, data)
+        end
+        if type(p.on_event) == "function" then
+            pcall(p.on_event, g_tauri_instance, "file_drop", data)
+        end
+    end
     for _, cb in ipairs(g_tauri_instance.file_drop_listeners or {}) do
         pcall(cb, data)
     end
@@ -1762,6 +1881,15 @@ return {
             clib.platform_notification_send(tostring(title or "App"), tostring(body or ""))
         end
     },
+    plugin = function(name, def)
+        if type(name) == "table" and not def then
+            def = name
+            name = def.name or "anonymous"
+        end
+        def = def or {}
+        def.name = name
+        return def
+    end,
     Menu = Menu,
     Submenu = Submenu,
     MenuItem = MenuItem,

@@ -188,7 +188,7 @@ end
 
 local function find_watched_files()
     local files = {}
-    local p = io.popen("find src-tauri/src src/ tauri.conf.json src-tauri/tauri.conf.json -name '*.lua' -o -name 'tauri.conf.json' 2>/dev/null")
+    local p = io.popen("find src-tauri/src src/ plugins/ ../lua-tauri-plugins/plugins/ tauri.conf.json src-tauri/tauri.conf.json -name '*.lua' -o -name 'tauri.conf.json' 2>/dev/null")
     if p then
         for line in p:lines() do
             if line ~= "" then
