@@ -97,6 +97,7 @@ Tauri-Lua maintains a strict, decoupled boundary between the **Core Framework En
 2. **Internal Enterprise Tools:** Operations dashboards, hardware interfaces, and rapid proof-of-concept enterprise applications.
 3. **High-Performance Micro-Apps:** Native desktop clients that need to start in under 200ms and run persistently in the system tray with negligible RAM usage.
 4. **Embedded & Resource-Constrained Environments:** Embedded Linux devices (Raspberry Pi, industrial tablets) where LLVM/Rust toolchains are too resource-heavy to maintain on-device.
+5. **Game Engine & Host Software Embedding (`libtaurilua`):** Providing in-game configuration windows, web overlays, debug inspectors, or modding GUIs directly from C/C++, Godot, Unreal Engine, or SDL2/GLFW with a lightweight shared library.
 
 ### When to Stick with Tauri (Rust) or Electron
 * **Complex Multi-Threaded Memory Ownership:** If you require compile-time memory safety proofs and strictly typed shared-memory structures across dozens of concurrent native threads.
@@ -127,7 +128,9 @@ my-app/
 │       ├── dmg/              # Mountable .dmg installer
 │       └── deb/              # Debian / Ubuntu package
 ├── lua-tauri                 # Unified CLI executable
-└── src/                      # Tauri-Lua C++ Core Engine (Shared Runtime)
+├── include/                  # Public C Embedding API (taurilua.h)
+├── examples/                 # Host embedding examples (C, Game Engines)
+└── src/                      # Tauri-Lua C++ Core Engine (libtaurilua shared library)
 ```
 
 ---
@@ -1087,6 +1090,154 @@ print("Backend socket version:", socket._VERSION)
 - **Command Injection Prevention (CWE-78):** Every rock name, version, and server URL parsed from configuration or CLI arguments is validated against strict alphanumeric whitelists. Any forbidden characters (`;`, `&`, `|`, `$`, backticks, newlines) are rejected immediately prior to command construction.
 - **Hermetic Isolation (CWE-829 / CWE-427):** Uses `--tree src-tauri/.rocks` to isolate third-party dependencies from the host environment, completely preventing global system pollution, permission escalation risks, and DLL search-order hijacking.
 - **Diagnostic Guidance:** If `luarocks` is not found on the developer's system, Tauri-Lua gracefully prints platform-specific installation instructions (`brew install luarocks`, `apt install luarocks`, etc.) rather than crashing with unhandled shell errors.
+
+---
+
+## Scripting Engine Host & C/C++ Embedding (`libtaurilua`)
+
+Tauri-Lua is not only an application runtime—it is also an **embeddable shared library** (`libtaurilua.dylib` on macOS, `libtaurilua.so` on Linux, `taurilua.dll` on Windows) exposing a clean, zero-overhead **Pure-C API** ([include/taurilua.h](file:///Users/manuellanzani/Desktop/xx/lua-tauri/include/taurilua.h)).
+
+This empowers existing C/C++ software, native desktop applications, internal enterprise tools, and game engines (**Godot, Unreal Engine, SDL2, GLFW**) to summon modern web frontends on the fly for:
+* In-game configuration windows and HUD overlays
+* Modding tools, visual inspectors, and script debuggers
+* Launcher screens and account authentication flows
+* Native tools needing an elegant webview UI without Electron bloat
+
+```text
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Host Application (C / C++ / Game Engine / SDL / Godot / UE)  │
+  └──────────────────────────────┬──────────────────────────────┘
+                                 │
+                     #include <taurilua.h>
+                                 │
+                                 ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  libtaurilua (.dylib / .so / .dll) Shared Engine Library    │
+  │  ├── Pure C ABI (Zero C++ Mangling, Binary Stable)          │
+  │  ├── Embedded LuaJIT 2.1 VM + Preloaded `tauri` Core        │
+  │  ├── Worker Isolate Pool (Multi-threaded background tasks)   │
+  │  └── OS Native Webview Bridge (Cocoa / GTK3 / WebView2)     │
+  └──────────────────────────────┬──────────────────────────────┘
+                                 │
+                                 ▼
+                   Native OS Window & Webview UI
+```
+
+### 1. Pure C API Header Reference (`include/taurilua.h`)
+
+The header uses standard C99 ABI conventions with exported symbols (`TAURILUA_API`):
+
+```c
+#include "taurilua.h"
+
+// 1. Struct configuration
+typedef struct taurilua_config {
+    const char *app_name;         // App name identifier (default: "tauri-lua-app")
+    const char *title;            // Window title (default: "Tauri-Lua Host")
+    const char *url;              // Webview URL or relative dist path
+    int width;                    // Initial width (default: 1024)
+    int height;                   // Initial height (default: 720)
+    int resizable;                // 1 if resizable, 0 otherwise (default: 1)
+    int dev_mode;                 // 1 for Vite dev server, 0 for production
+    const char *config_json;      // Optional JSON configuration string
+    const char *custom_script;    // Optional path to .lua backend script
+} taurilua_config_t;
+
+// 2. Lifecycle management
+void taurilua_config_init(taurilua_config_t *config);
+taurilua_app_t *taurilua_create(const taurilua_config_t *config);
+taurilua_app_t *taurilua_create_from_file(const char *script_path, const char *config_json);
+taurilua_app_t *taurilua_create_from_string(const char *lua_source, const char *config_json);
+
+int  taurilua_run(taurilua_app_t *app);
+void taurilua_terminate(taurilua_app_t *app);
+void taurilua_destroy(taurilua_app_t *app);
+
+// 3. Interoperability & Host-Engine Dispatch
+struct lua_State *taurilua_get_lua_state(taurilua_app_t *app);
+int  taurilua_eval_lua(taurilua_app_t *app, const char *lua_code);
+void taurilua_eval_js(taurilua_app_t *app, const char *window_label, const char *javascript);
+void taurilua_emit(taurilua_app_t *app, const char *event_name, const char *payload_json);
+
+// 4. One-Liner Modal Window Launcher
+int taurilua_open_window(const char *title, const char *url, int width, int height);
+```
+
+### 2. High-Level Modal Helper (`taurilua_open_window`)
+
+If your game or C++ tool only needs to pop up a settings or config dialog and block until closed:
+
+```c
+#include "taurilua.h"
+
+int main() {
+    // Spawns a native webview window, runs the event loop, and blocks until closed
+    taurilua_open_window("Game Settings", "dist/settings.html", 800, 600);
+    return 0;
+}
+```
+
+### 3. Full Engine Embedding Example (`examples/host_c/main.c`)
+
+For applications that need custom Lua scripts, bi-directional IPC, or direct `lua_State*` manipulation:
+
+```c
+#include <stdio.h>
+#include "taurilua.h"
+
+int main(int argc, char **argv) {
+    // 1. Initialize configuration struct
+    taurilua_config_t cfg;
+    taurilua_config_init(&cfg);
+    cfg.title = "Custom Host Launcher";
+    cfg.width = 1024;
+    cfg.height = 768;
+
+    // 2. Instantiate embedded engine
+    taurilua_app_t *app = taurilua_create(&cfg);
+    if (!app) return 1;
+
+    // 3. Execute Lua logic within the runtime
+    taurilua_eval_lua(app, "print('Host initialized backend logic!')");
+
+    // 4. Run the native window loop (blocks until windows close)
+    int exit_code = taurilua_run(app);
+
+    // 5. Cleanup resources and isolate threads
+    taurilua_destroy(app);
+    return exit_code;
+}
+```
+
+### 4. Game Engine Integration (Godot, Unreal, SDL2)
+
+Because `taurilua` is a standard C shared library, you can link it directly into game projects or GDExtension modules:
+
+#### CMake Configuration (`CMakeLists.txt`)
+```cmake
+find_library(TAURILUA_LIB taurilua PATHS "${CMAKE_CURRENT_SOURCE_DIR}/lib")
+target_include_directories(my_game PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(my_game PRIVATE ${TAURILUA_LIB})
+
+# Ensure runtime discovery (macOS / Linux)
+if(APPLE)
+    set_target_properties(my_game PROPERTIES INSTALL_RPATH "@executable_path")
+elseif(UNIX)
+    set_target_properties(my_game PROPERTIES INSTALL_RPATH "$ORIGIN")
+endif()
+```
+
+#### Compilation & Manual Linking
+```bash
+# macOS
+clang -O2 main.c -Iinclude -Lbuild -ltaurilua -Wl,-rpath,@executable_path/build -o host_app
+
+# Linux
+gcc -O2 main.c -Iinclude -Lbuild -ltaurilua -Wl,-rpath,'$ORIGIN/build' -o host_app
+
+# Windows (MSVC)
+cl /O2 main.c /Iinclude /link build\taurilua.lib
+```
 
 ---
 

@@ -815,6 +815,9 @@ local function cmd_build(args)
         exec("mkdir -p " .. dmg_dir)
 
         exec("cp " .. bin_path .. " " .. macos_dir .. "/" .. app_name)
+        if file_exists("build/libtaurilua.dylib") then
+            exec("cp build/libtaurilua.dylib " .. macos_dir .. "/")
+        end
         exec("cp -r " .. frontend_dist .. " " .. res_dir .. "/")
 
         local rocks_tree = get_rocks_tree_dir()
@@ -863,6 +866,9 @@ local function cmd_build(args)
         exec("mkdir -p " .. deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist)
 
         exec("cp " .. bin_path .. " " .. deb_dir .. "/usr/bin/" .. app_name)
+        if file_exists("build/libtaurilua.so") then
+            exec("cp build/libtaurilua.so " .. deb_dir .. "/usr/bin/ 2>/dev/null || true")
+        end
         exec("cp -r " .. frontend_dist .. "/* " .. deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist .. "/")
 
         local rocks_tree = get_rocks_tree_dir()
@@ -889,7 +895,8 @@ Description: %s built with Tauri-Lua
         local win_dir = target_dir .. "\\windows\\" .. app_name .. "-standalone"
         info("Bundling Windows Standalone...")
         exec("mkdir " .. win_dir)
-        exec("copy build\\Release\\tauri_app.exe " .. win_dir .. "\\")
+        exec("copy build\\Release\\tauri_app.exe " .. win_dir .. "\\ 2>NUL || copy build\\tauri_app.exe " .. win_dir .. "\\")
+        exec("copy build\\Release\\taurilua.dll " .. win_dir .. "\\ 2>NUL || copy build\\taurilua.dll " .. win_dir .. "\\ 2>NUL || rem")
         exec("xcopy /E /I " .. frontend_dist .. " " .. win_dir .. "\\" .. frontend_dist)
 
         local rocks_tree = get_rocks_tree_dir()
