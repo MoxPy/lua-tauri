@@ -3,7 +3,6 @@
 > **Ultra-lightweight, memory-efficient desktop runtime combining the modern architecture of Tauri with the raw execution speed and developer ergonomics of LuaJIT.**
 
 [![Platform](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg)](#cross-platform-implementation-details)
-[![Binary Size](https://img.shields.io/badge/Binary%20Size-~175%20KB-brightgreen.svg)](#benchmarks--performance-profile)
 [![Engine](https://img.shields.io/badge/Engine-LuaJIT%202.1%20%2B%20C%2B%2B17-orange.svg)](#architecture-overview)
 [![LuaRocks](https://img.shields.io/badge/LuaRocks-Hermetic%20Ecosystem-blueviolet.svg)](#hermetic-luarocks-integration--dependency-ecosystem)
 [![Host Embedding](https://img.shields.io/badge/Host%20Embedding-libtaurilua%20(C%20ABI)-blue.svg)](#scripting-engine-host--cc-embedding-libtaurilua)
