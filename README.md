@@ -332,9 +332,10 @@ app:register("calculate_fibonacci", function(payload)
         a, b = b, a + b
     end
 
-    -- Update state across workers
-    local count = app.state:get("counter") + 1
-    app.state:set("counter", count)
+    -- Atomic state update across workers and concurrent requests
+    local count = app.state:update("counter", function(current)
+        return (current or 0) + 1
+    end)
 
     return {
         input = n,
@@ -1567,7 +1568,7 @@ When scaling your desktop application with Tauri-Lua, adhere to these principal 
 1. **Leverage the Worker Isolate Pool:** Long-running calculations (compression, crypto, large JSON parsing) should always be delegated to registered commands. They run on the worker thread pool, keeping the main UI thread silky smooth.
 2. **Favor LuaJIT FFI over C Lua API:** When calling native platform libraries directly from Lua, use LuaJIT's `ffi` module. FFI calls are JIT-compiled into raw assembly and avoid Lua stack conversion overhead.
 3. **Respect Sandbox Scopes:** Never bypass `self.security:assert_scope()` in custom filesystem handlers. Always resolve system roots via `$APPDATA`, `$DESKTOP`, or `$HOME`.
-4. **Thread-Safe State Synchronization:** The built-in `app.state` synchronizes individual `get`, `set`, and `delete` operations across worker threads using a C++ reader-writer lock (`std::shared_mutex`). For composite read-modify-write patterns across concurrent isolates, use the functional `app.state:update(key, callback)` helper to avoid race conditions.
+4. **Thread-Safe State Synchronization:** The built-in `app.state` synchronizes individual `get`, `set`, and `delete` operations across worker threads using a native recursive mutex (`std::recursive_mutex`). For composite read-modify-write patterns across concurrent isolates, use the functional `app.state:update(key, callback)` helper to execute atomic, transactional updates without race conditions.
 
 ---
 
