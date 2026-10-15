@@ -1001,6 +1001,7 @@ function Tauri.new(config)
     self.file_drop_listeners = {}
     local ok_theme, theme_val = pcall(function() return ffi.string(clib.platform_get_theme()) end)
     self._current_theme = ok_theme and theme_val or "light"
+    self.json = json
     self.state = State.new(json)
 
     self.clipboard = {
@@ -1182,7 +1183,7 @@ function Tauri:_setup_asset_scheme()
     if dist_dir:sub(1, 3) == "../" then
         dist_dir = dist_dir:sub(4)
     end
-    clib.platform_set_assets_path(dist_dir)
+    pcall(function() clib.platform_set_assets_path(dist_dir) end)
 
     local dev_url = build_conf.devUrl or build_conf.devPath
     if __TAURI_DEV__ and dev_url and dev_url ~= "" then
