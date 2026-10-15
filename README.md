@@ -840,7 +840,7 @@ await window.__TAURI__.clipboard.clear();
 
 ## Plugin System & Extensibility (Tauri v2 Parity)
 
-Tauri-Lua implements a decoupled, first-class **Plugin Architecture** matching the design patterns of [Tauri 2 plugins](https://github.com/tauri-apps/plugins-workspace). The core runtime remains lean and bloat-free, while domain-specific capabilities (e.g. SQLite databases, persistent window state, autostart, biometrics) can be loaded modularly.
+Tauri-Lua implements a decoupled, first-class **Plugin Architecture** matching the design patterns of [Tauri 2 plugins](https://github.com/tauri-apps/plugins-workspace). The core runtime remains lean and bloat-free, while domain-specific capabilities can be loaded modularly from the official [**`lua-tauri-plugins`**](https://github.com/MoxPy/lua-tauri-plugins) workspace.
 
 ```mermaid
 flowchart LR
@@ -849,21 +849,38 @@ flowchart LR
         App -->|app:plugin()| Registry["Plugin Registry"]
     end
 
-    subgraph Plugins["Modular Plugins (lua-tauri-plugins)"]
-        SQL["plugin-sql (SQLite / FFI)"]
+    subgraph Plugins["Official Plugins (lua-tauri-plugins)"]
+        SQL["plugin-sql (SQLite + Migrations)"]
+        HTTP["plugin-http (libcurl + Scopes)"]
+        Autostart["plugin-autostart (LaunchAgent / Registry)"]
         WindowState["plugin-window-state"]
-        Custom["custom-plugin"]
     end
 
     Registry --> SQL
+    Registry --> HTTP
+    Registry --> Autostart
     Registry --> WindowState
-    Registry --> Custom
 
     SQL -->|IPC: plugin:sql|exec| Webview["Client Webview"]
+    HTTP -->|IPC: plugin:http|fetch| Webview
+    Autostart -->|IPC: plugin:autostart|enable| Webview
     WindowState -->|Lifecycle: on_window_close| Webview
 ```
 
-### 1. Module Auto-Discovery (`package.path` & `package.cpath`)
+### 1. Official Plugin Catalog
+
+All official plugins are maintained in the sibling repository [`lua-tauri-plugins`](https://github.com/MoxPy/lua-tauri-plugins):
+
+| Plugin | Features & Security Architecture | Parity Status |
+| :--- | :--- | :---: |
+| [**`sql`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/sql) | **SQLite3 via Native FFI:** Atomic transactional schema migrations (`_sqlx_migrations` table parity), `$1, $2` and `?` parameter binding against SQL injection, and automatic OS `AppData` sandboxing. | ✅ 1:1 Tauri 2 |
+| [**`http`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/http) | **Native `libcurl` Client:** Complete CORS bypass for desktop frontends, native OS SSL/TLS certificate validation, connection pooling, and strict `allow`/`deny` URL scope enforcement. | ✅ 1:1 Tauri 2 |
+| [**`autostart`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/autostart) | **Launch at System Login:** macOS LaunchAgent `.plist` (`~/Library/LaunchAgents`), Linux XDG Autostart (`~/.config/autostart`), and Windows User Registry (`HKCU\...\Run`). | ✅ 1:1 Tauri 2 |
+| [**`window-state`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/window-state) | **Window State Persistence:** Automatically remembers and restores window dimensions, coordinates, and maximize/fullscreen states across restarts via `on_window_close` hook. | ✅ 1:1 Tauri 2 |
+
+---
+
+### 2. Module Auto-Discovery (`package.path` & `package.cpath`)
 
 The runtime automatically configures Lua search paths to locate plugins without tedious relative paths or environment variables:
 
@@ -874,96 +891,78 @@ The runtime automatically configures Lua search paths to locate plugins without 
 | **Node Modules** | `./node_modules/@tauri-apps/plugin-?/init.lua` | Installed via npm/pnpm/yarn |
 | **Native Binaries** | `?.dylib` (macOS), `?.so` (Linux), `?.dll` (Windows) | Compiled C/C++ FFI extensions |
 
-### 2. Registering Plugins (`app:plugin`)
+---
 
-Plugins can be registered fluently on the application instance:
+### 3. Registering & Using Plugins (`app:plugin`)
 
 ```lua
 local tauri = require("tauri")
 local app = tauri.init()
 
--- 1. Using require from external or local plugins
-local sql = require("plugins.sql")
-local window_state = require("plugins.window-state")
+-- 1. Load Plugins by Name (Auto-Discovered)
+local sql = require("sql")
+local http = require("http")
+local autostart = require("autostart")
+local window_state = require("window-state")
 
-app:plugin(sql.init({ db_name = "app.db" }))
+-- 2. Configure SQL with Schema Migrations
+app:plugin(sql.init({
+    default_path = "sqlite:app.db",
+    migrations = {
+        {
+            version = 1,
+            description = "create_users_table",
+            sql = "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT);"
+        }
+    }
+}))
+
+-- 3. Configure HTTP with Security Scopes
+app:plugin(http.init({
+    scopes = {
+        allow = { "https://api.github.com/*", "https://*.myapp.com/*" },
+        deny = { "https://api.github.com/admin/*" }
+    }
+}))
+
+-- 4. Enable Autostart & Window State
+app:plugin(autostart.init())
 app:plugin(window_state.init())
 
 app:run()
 ```
 
-### 3. Plugin Authoring Guide
+---
 
-A Tauri-Lua plugin is a Lua module exposing a `setup(app, plugin)` lifecycle hook, optional client-side JavaScript injection (`js`), and event handlers:
+### 4. Frontend Usage (`JavaScript / TypeScript`)
 
-```lua
--- plugins/window-state/init.lua
-local tauri = require("tauri")
-
-local window_state = {}
-
-function window_state.init(options)
-    options = options or {}
-
-    return tauri.plugin("window-state", {
-        -- 1. Setup hook: Register IPC commands and initialize resources
-        setup = function(app, plugin)
-            app:register("plugin:window-state|save", function(args)
-                print("[WINDOW-STATE] Saving dimensions:", args.width, args.height)
-                app.state:set("window_dimensions", { width = args.width, height = args.height })
-                return { success = true }
-            end)
-
-            app:register("plugin:window-state|restore", function()
-                return app.state:get("window_dimensions") or { width = 960, height = 640 }
-            end)
-        end,
-
-        -- 2. Optional client-side JS auto-injected into all created webviews
-        js = [[
-            window.__TAURI_WINDOW_STATE__ = {
-                save: () => window.__TAURI__.invoke('plugin:window-state|save', {
-                    width: window.innerWidth,
-                    height: window.innerHeight
-                }),
-                restore: () => window.__TAURI__.invoke('plugin:window-state|restore')
-            };
-        ]],
-
-        -- 3. Lifecycle Hooks
-        on_window_close = function(app, event)
-            print("[PLUGIN: window-state] Window closing, auto-saving state...")
-        end,
-
-        on_theme_changed = function(app, theme)
-            print("[PLUGIN: window-state] OS Theme changed:", theme)
-        end,
-
-        on_file_drop = function(app, data)
-            print("[PLUGIN: window-state] Files dropped:", #data.paths)
-        end,
-
-        on_single_instance = function(app, payload)
-            print("[PLUGIN: window-state] Secondary instance launched with args:", #payload.args)
-        end
-    })
-end
-
-return window_state
-```
-
-### 4. Invoking Plugin Commands in Frontend (`JavaScript / TypeScript`)
-
-Frontend code invokes plugin endpoints using the standard Tauri 2 `plugin:<name>|<command>` naming convention:
+Frontend code interacts with plugins using standard Tauri 2 `@tauri-apps/plugin-*` guest APIs or pre-injected globals:
 
 ```javascript
-// Native invoke compatible with @tauri-apps/api
-const state = await window.__TAURI__.invoke('plugin:window-state|restore');
-console.log("Restored Window State:", state);
+// 1. SQL Plugin (@tauri-apps/plugin-sql parity)
+const db = await window.__TAURI__.sql.Database.load('sqlite:app.db');
+await db.execute('INSERT INTO users (name, email) VALUES ($1, $2);', ['Alice', 'alice@company.com']);
+const users = await db.select('SELECT * FROM users WHERE email = $1;', ['alice@company.com']);
+console.table(users);
 
-// Or via the injected helper:
-await window.__TAURI_WINDOW_STATE__.save();
+// 2. HTTP Plugin (@tauri-apps/plugin-http parity - CORS Bypassed!)
+const response = await window.__TAURI__.http.fetch('https://api.github.com/zen');
+if (response.ok) {
+  console.log("GitHub Zen:", await response.text());
+}
+
+// 3. Autostart Plugin (@tauri-apps/plugin-autostart parity)
+const isAuto = await window.__TAURI__.autostart.isEnabled();
+if (!isAuto) {
+  await window.__TAURI__.autostart.enable();
+}
+
+// 4. Window State Plugin (@tauri-apps/plugin-window-state parity)
+const savedState = await window.__TAURI_WINDOW_STATE__.restore('main');
+console.log("Restored dimensions:", savedState.width, savedState.height);
 ```
+
+---
 
 ### 5. CLI Hot-Reload Integration
 
