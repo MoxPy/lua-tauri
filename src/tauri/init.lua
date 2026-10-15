@@ -448,6 +448,20 @@ function State.new(json_codec)
     return self
 end
 
+function State:update(key, callback)
+    if type(callback) ~= "function" then
+        error("State:update requires a function callback")
+    end
+    local current = self:get(key)
+    local next_val = callback(current)
+    if next_val ~= nil then
+        self:set(key, next_val)
+    else
+        self:delete(key)
+    end
+    return next_val
+end
+
 function State:set(key, value)
     local vtype = type(value)
     local skey = tostring(key)
@@ -1106,6 +1120,12 @@ local g_tauri_instance = nil
 
 function Tauri.new(config)
     local self = setmetatable({}, Tauri)
+    if (not config or next(config) == nil) and __EMBEDDED_CONFIG_JSON__ and __EMBEDDED_CONFIG_JSON__ ~= "" then
+        local ok, decoded = pcall(json.decode, __EMBEDDED_CONFIG_JSON__)
+        if ok and type(decoded) == "table" then
+            config = decoded
+        end
+    end
     config = config or {}
     self.config = config
     local app_name = (config.package and config.package.name) or config.productName or "tauri-lua-app"
@@ -1789,9 +1809,10 @@ function Tauri:emit(event_name, payload)
 end
 
 function Tauri:create_main_window()
-    if __IS_ISOLATE_WORKER__ then
+    if __IS_ISOLATE_WORKER__ or self._main_window_created then
         return
     end
+    self._main_window_created = true
 
     local win_conf = {}
     if self.config.app and self.config.app.windows and self.config.app.windows[1] then
@@ -1828,6 +1849,12 @@ function Tauri:create_main_window()
         end
     end
     self.windows["main"] = true
+end
+
+function Tauri:run()
+    if not self._main_window_created and not __IS_ISOLATE_WORKER__ then
+        self:create_main_window()
+    end
 end
 
 function __TAURI_DISPATCH_IPC__(label, seq, req)

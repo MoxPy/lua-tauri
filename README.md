@@ -344,7 +344,7 @@ app:register("calculate_fibonacci", function(payload)
     }
 end)
 
--- 4. Create native window
+-- 4. Create native window & start event loop (or app:run())
 app:create_main_window()
 ```
 
@@ -993,7 +993,7 @@ if (!isAuto) {
 }
 
 // 4. Window State Plugin (@tauri-apps/plugin-window-state parity)
-const savedState = await window.__TAURI_WINDOW_STATE__.restore('main');
+const savedState = await window.__TAURI__.windowState.restore('main');
 console.log("Restored dimensions:", savedState.width, savedState.height);
 ```
 
@@ -1140,7 +1140,7 @@ Development Mode                     Production Bundling
 
 ### 1. Declarative Dependencies (`tauri.conf.json`)
 
-Declare your required rocks directly in `tauri.conf.json`. Both pure Lua packages and compiled native C extensions (e.g. `luasocket`, `lua-cjson`, `inspect`, `lsqlite3`) are fully supported:
+Declare your required rocks directly in `tauri.conf.json` using the `dependencies.luarocks` section (an ergonomic engine extension designed by Tauri-Lua to integrate native Lua packages into the bundle workflow). Both pure Lua packages and compiled native C extensions (e.g. `luasocket`, `lua-cjson`, `inspect`, `lsqlite3`) are fully supported:
 
 ```json
 {
@@ -1299,7 +1299,7 @@ int main() {
 }
 ```
 
-### 3. Full Engine Embedding Example (`examples/host_c/main.c`)
+### 3. Full Engine Embedding Example ([examples/host_c/main.c](examples/host_c/main.c))
 
 For applications that need custom Lua scripts, bi-directional IPC, or direct `lua_State*` manipulation:
 
@@ -1377,11 +1377,11 @@ Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
    - Configurable declaratively in `tauri.conf.json` (`security.csp`) or dynamically via `app:set_csp("...")`.
 3. **Session Isolation Tokens:**
    - A cryptographically random 32-character session token is generated at startup and attached to `window.__TAURI_TOKEN__` as a read-only, non-configurable property.
-   - Injected or unauthorized scripts cannot forge IPC invocation payloads.
+   - Blocks unauthorized iframes, cross-origin web frames, and injected foreign origins from forging IPC commands. (Same-origin script protection is reinforced via strict Content Security Policy).
 4. **Strict Origin Gating:**
    - Every IPC dispatch verifies the native window's current URL origin. Requests originating from unapproved domains or unauthorized external pages are immediately rejected.
 5. **Capability & Program Whitelisting:**
-   - APIs (filesystem, dialogs, clipboard, shell) are rejected at the native boundary unless explicitly enabled in `security.capabilities`.
+   - Tauri-Lua implements an integrated, declarative capability and scope validation engine directly in `tauri.conf.json` (`security.capabilities`). Sensitive native APIs (filesystem, dialogs, clipboard, shell) are rejected at the native boundary unless explicitly enabled in configuration.
    - The shell engine supports an optional `allowed_programs` list to restrict command execution exclusively to approved executables.
 6. **Path Scope Constraint Enforcement:**
    - Filesystem operations resolve path aliases (`$APPDATA`, `$DESKTOP`, `$HOME`) canonically to prevent directory traversal (`../`) attacks.
@@ -1392,7 +1392,7 @@ Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
 
 | Layer | macOS | Linux | Windows |
 | :--- | :--- | :--- | :--- |
-| **Webview Core** | **WKWebView** (WebKit) | **WebKit2GTK** (WebKitGTK-4.0) | **WebView2** (Chromium Edge) |
+| **Webview Core** | **WKWebView** (WebKit) | **WebKit2GTK** (WebKitGTK 4.1 / 4.0 fallback) | **WebView2** (Chromium Edge) |
 | **Window Host** | Cocoa (`NSWindow`) | GTK3 (`GtkWindow`) | Win32 API (`HWND`) |
 | **IPC Mechanism** | `WKScriptMessageHandler` | WebKit User Content Controller | `ICoreWebView2::WebMessageReceived` |
 | **Native Menu Bar** | Cocoa (`NSMenu`, `NSMenuItem`) | GTK3 (`GtkMenuBar`, `GtkMenuItem`) | Win32 API (`HMENU`, `WM_COMMAND`) |
@@ -1565,7 +1565,7 @@ When scaling your desktop application with Tauri-Lua, adhere to these principal 
 1. **Leverage the Worker Isolate Pool:** Long-running calculations (compression, crypto, large JSON parsing) should always be delegated to registered commands. They run on the worker thread pool, keeping the main UI thread silky smooth.
 2. **Favor LuaJIT FFI over C Lua API:** When calling native platform libraries directly from Lua, use LuaJIT's `ffi` module. FFI calls are JIT-compiled into raw assembly and avoid Lua stack conversion overhead.
 3. **Respect Sandbox Scopes:** Never bypass `self.security:assert_scope()` in custom filesystem handlers. Always resolve system roots via `$APPDATA`, `$DESKTOP`, or `$HOME`.
-4. **Keep State Operations Serialized:** The built-in `app.state` provides synchronized atomic access across threads. Store metadata, counters, and cache tables inside `app.state` to ensure multi-isolate consistency.
+4. **Thread-Safe State Synchronization:** The built-in `app.state` synchronizes individual `get`, `set`, and `delete` operations across worker threads using a C++ reader-writer lock (`std::shared_mutex`). For composite read-modify-write patterns across concurrent isolates, use the functional `app.state:update(key, callback)` helper to avoid race conditions.
 
 ---
 

@@ -21,6 +21,7 @@
 #if defined(__APPLE__)
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
+#import <UserNotifications/UserNotifications.h>
 #import <objc/runtime.h>
 #endif
 
@@ -1432,17 +1433,23 @@ void platform_theme_set_callback(theme_change_callback_fn cb) {
 }
 
 #if defined(__APPLE__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-@interface SilentNotificationCenterDelegate : NSObject <NSUserNotificationCenterDelegate>
+@interface ModernNotificationCenterDelegate : NSObject <UNUserNotificationCenterDelegate>
 @end
 
-@implementation SilentNotificationCenterDelegate
-- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification {
-    return YES;
+@implementation ModernNotificationCenterDelegate
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions options))completionHandler {
+    if (@available(macOS 11.0, *)) {
+        completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionList | UNNotificationPresentationOptionSound);
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        completionHandler(UNNotificationPresentationOptionAlert | UNNotificationPresentationOptionSound);
+#pragma clang diagnostic pop
+    }
 }
 @end
-#pragma clang diagnostic pop
 #endif
 
 void platform_notification_send(const char *title, const char *body) {
@@ -1453,19 +1460,33 @@ void platform_notification_send(const char *title, const char *body) {
 #if defined(__APPLE__)
     if ([NSBundle mainBundle].bundleIdentifier != nil) {
         run_on_main_sync(^{
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            static SilentNotificationCenterDelegate *s_delegate = nil;
-            if (!s_delegate) {
-                s_delegate = [[SilentNotificationCenterDelegate alloc] init];
-                [[NSUserNotificationCenter defaultUserNotificationCenter] setDelegate:s_delegate];
+            if (@available(macOS 10.14, *)) {
+                static ModernNotificationCenterDelegate *s_delegate = nil;
+                static dispatch_once_t onceToken;
+                dispatch_once(&onceToken, ^{
+                    s_delegate = [[ModernNotificationCenterDelegate alloc] init];
+                    [[UNUserNotificationCenter currentNotificationCenter] setDelegate:s_delegate];
+                    [[UNUserNotificationCenter currentNotificationCenter] requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
+                                                                                        completionHandler:^(BOOL granted, NSError * _Nullable error) {}];
+                });
+
+                UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+                content.title = [NSString stringWithUTF8String:s_title.c_str()];
+                content.body = [NSString stringWithUTF8String:s_body.c_str()];
+                content.sound = [UNNotificationSound defaultSound];
+
+                NSString *identifier = [[NSUUID UUID] UUIDString];
+                UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:identifier content:content trigger:nil];
+                [[UNUserNotificationCenter currentNotificationCenter] addNotificationRequest:request withCompletionHandler:nil];
+            } else {
+                std::string script = "display notification \"" + s_body + "\" with title \"" + s_title + "\"";
+                pid_t pid;
+                const char *argv[] = {"osascript", "-e", script.c_str(), NULL};
+                if (posix_spawnp(&pid, "/usr/bin/osascript", NULL, NULL, (char *const *)argv, environ) == 0) {
+                    int status;
+                    waitpid(pid, &status, 0);
+                }
             }
-            NSUserNotification *notif = [[NSUserNotification alloc] init];
-            notif.title = [NSString stringWithUTF8String:s_title.c_str()];
-            notif.informativeText = [NSString stringWithUTF8String:s_body.c_str()];
-            notif.soundName = NSUserNotificationDefaultSoundName;
-            [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:notif];
-#pragma clang diagnostic pop
         });
         return;
     }

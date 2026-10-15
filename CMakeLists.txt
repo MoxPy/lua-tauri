@@ -144,10 +144,12 @@ if(APPLE)
     set_source_files_properties(src/native_bridge.cpp PROPERTIES LANGUAGE OBJCXX)
     find_library(WEBKIT_FRAMEWORK WebKit REQUIRED)
     find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
+    find_library(USERNOTIFICATIONS_FRAMEWORK UserNotifications REQUIRED)
     target_link_libraries(taurilua PRIVATE
         ${LUAJIT_LIB}
         ${WEBKIT_FRAMEWORK}
         ${COCOA_FRAMEWORK}
+        ${USERNOTIFICATIONS_FRAMEWORK}
     )
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
         target_link_options(taurilua PRIVATE -Wl,-pagezero_size,10000 -Wl,-image_base,100000000)
