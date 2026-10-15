@@ -31,8 +31,11 @@ local function setup_module_search_paths()
                 ffi.cdef[[
                     uint32_t GetModuleFileNameA(void* hModule, char* lpFilename, uint32_t nSize);
                 ]]
+                local k32 = nil
+                pcall(function() k32 = ffi.load("kernel32") end)
+                local fn = (k32 and k32.GetModuleFileNameA) or ffi.C.GetModuleFileNameA
                 local buf = ffi.new("char[1024]")
-                local len = ffi.C.GetModuleFileNameA(nil, buf, 1024)
+                local len = fn(nil, buf, 1024)
                 if len > 0 then
                     local full_path = ffi.string(buf, len):gsub("\\", "/")
                     dir = full_path:match("^(.*)/[^/]+$")
@@ -1105,6 +1108,29 @@ function Tauri.new(config)
     local self = setmetatable({}, Tauri)
     config = config or {}
     self.config = config
+    local app_name = (config.package and config.package.name) or config.productName or "tauri-lua-app"
+    if ffi.os == "Linux" then
+        local linux_paths = {
+            "/usr/share/" .. app_name .. "/rocks/share/lua/5.1/?.lua",
+            "/usr/share/" .. app_name .. "/rocks/share/lua/5.1/?/init.lua",
+            "/usr/local/share/" .. app_name .. "/rocks/share/lua/5.1/?.lua",
+            "/usr/local/share/" .. app_name .. "/rocks/share/lua/5.1/?/init.lua"
+        }
+        local linux_cpaths = {
+            "/usr/share/" .. app_name .. "/rocks/lib/lua/5.1/?.so",
+            "/usr/local/share/" .. app_name .. "/rocks/lib/lua/5.1/?.so"
+        }
+        for _, p in ipairs(linux_paths) do
+            if not package.path:find(p, 1, true) then
+                package.path = package.path .. ";" .. p
+            end
+        end
+        for _, cp in ipairs(linux_cpaths) do
+            if not package.cpath:find(cp, 1, true) then
+                package.cpath = package.cpath .. ";" .. cp
+            end
+        end
+    end
     self.security = Security.new(config)
     self.commands = {}
     self.listeners = {}

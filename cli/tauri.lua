@@ -176,9 +176,11 @@ end
 local function get_file_mtime(path)
     local p
     if ffi.os == "OSX" then
-        p = io.popen("stat -f '%m' " .. path .. " 2>/dev/null")
+        p = io.popen("stat -f '%m' " .. tostring(path) .. " 2>/dev/null")
+    elseif ffi.os == "Linux" then
+        p = io.popen("stat -c '%Y' " .. tostring(path) .. " 2>/dev/null")
     else
-        p = io.popen("stat -c '%Y' " .. path .. " 2>/dev/null")
+        p = io.popen('powershell -NoProfile -Command "(Get-Item \'' .. tostring(path):gsub("/", "\\") .. '\').LastWriteTimeUtc.Ticks" 2>NUL')
     end
     if not p then return 0 end
     local res = p:read("*a")
@@ -188,14 +190,24 @@ end
 
 local function find_watched_files()
     local files = {}
-    local p = io.popen("find src-tauri/src src/ plugins/ ../lua-tauri-plugins/plugins/ tauri.conf.json src-tauri/tauri.conf.json -name '*.lua' -o -name 'tauri.conf.json' 2>/dev/null")
-    if p then
-        for line in p:lines() do
-            if line ~= "" then
-                table.insert(files, line)
+    if ffi.os == "Windows" then
+        local p = io.popen('powershell -NoProfile -Command "Get-ChildItem -Path src-tauri,src,plugins -Include *.lua,tauri.conf.json -Recurse -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName" 2>NUL')
+        if p then
+            for line in p:lines() do
+                if line ~= "" then table.insert(files, line) end
             end
+            p:close()
         end
-        p:close()
+    else
+        local p = io.popen("find src-tauri/src src/ plugins/ ../lua-tauri-plugins/plugins/ tauri.conf.json src-tauri/tauri.conf.json -name '*.lua' -o -name 'tauri.conf.json' 2>/dev/null")
+        if p then
+            for line in p:lines() do
+                if line ~= "" then
+                    table.insert(files, line)
+                end
+            end
+            p:close()
+        end
     end
     return files
 end
@@ -265,7 +277,43 @@ end
 -- Hermetic LuaRocks Dependency Management & Bundler
 -- ==========================================================
 local function shell_quote(str)
-    return "'" .. tostring(str):gsub("'", "'\\''") .. "'"
+    if ffi.os == "Windows" then
+        local s = tostring(str):gsub('"', '""')
+        return '"' .. s .. '"'
+    else
+        return "'" .. tostring(str):gsub("'", "'\\''") .. "'"
+    end
+end
+
+local function make_dir(path)
+    if ffi.os == "Windows" then
+        local win_path = path:gsub("/", "\\")
+        os.execute('mkdir "' .. win_path .. '" 2>NUL')
+    else
+        exec("mkdir -p " .. shell_quote(path))
+    end
+end
+
+local function remove_dir_recursive(path)
+    if not file_exists(path) then return end
+    if ffi.os == "Windows" then
+        local win_path = path:gsub("/", "\\")
+        os.execute('rmdir /s /q "' .. win_path .. '" 2>NUL')
+    else
+        os.execute("rm -rf " .. shell_quote(path) .. " 2>/dev/null")
+    end
+end
+
+local function copy_dir_recursive(src, dest)
+    if ffi.os == "Windows" then
+        local win_src = src:gsub("/", "\\")
+        local win_dest = dest:gsub("/", "\\")
+        make_dir(dest)
+        os.execute('xcopy /E /I /Y /Q "' .. win_src .. '" "' .. win_dest .. '\\" >NUL 2>NUL')
+    else
+        exec("mkdir -p " .. shell_quote(dest))
+        exec("cp -R " .. shell_quote(src) .. "/. " .. shell_quote(dest) .. "/")
+    end
 end
 
 local function validate_rock_identifier(str, field_name)
@@ -316,17 +364,20 @@ local function get_rocks_tree_dir()
 end
 
 local function find_rockspec_file()
-    local candidates = {
-        "src-tauri/*.rockspec",
-        "*.rockspec"
-    }
-    for _, pattern in ipairs(candidates) do
-        local p = io.popen("ls " .. pattern .. " 2>/dev/null | head -n 1")
+    local search_dirs = { "src-tauri", "." }
+    for _, dir in ipairs(search_dirs) do
+        local probe = (ffi.os == "Windows")
+            and ('dir /b "' .. dir:gsub("/", "\\") .. '\\*.rockspec" 2>NUL')
+            or ("ls " .. dir .. "/*.rockspec 2>/dev/null")
+        local p = io.popen(probe)
         if p then
             local file = p:read("*l")
             p:close()
-            if file and file ~= "" and file_exists(file) then
-                return file
+            if file and file ~= "" then
+                local full = (dir == "." and file or (dir .. "/" .. file))
+                if file_exists(full) then
+                    return full
+                end
             end
         end
     end
@@ -334,7 +385,8 @@ local function find_rockspec_file()
 end
 
 local function find_luarocks_bin()
-    local p = io.popen("which luarocks 2>/dev/null")
+    local probe = (ffi.os == "Windows") and "where luarocks 2>NUL" or "which luarocks 2>/dev/null"
+    local p = io.popen(probe)
     local out = p and p:read("*l")
     if p then p:close() end
     if out and out ~= "" and file_exists(out) then
@@ -344,9 +396,27 @@ local function find_luarocks_bin()
         "/opt/homebrew/bin/luarocks",
         "/usr/local/bin/luarocks",
         "/usr/bin/luarocks",
+        "/snap/bin/luarocks",
+        "C:\\Program Files\\LuaRocks\\luarocks.bat",
         "C:\\Program Files\\LuaRocks\\luarocks.exe",
+        "C:\\Program Files (x86)\\LuaRocks\\luarocks.bat",
+        "C:\\ProgramData\\chocolatey\\bin\\luarocks.bat",
         "C:\\ProgramData\\chocolatey\\bin\\luarocks.exe"
     }
+    if ffi.os == "Windows" then
+        local appdata = os.getenv("APPDATA")
+        if appdata then
+            table.insert(candidates, appdata .. "\\luarocks\\luarocks.bat")
+        end
+        local localappdata = os.getenv("LOCALAPPDATA")
+        if localappdata then
+            table.insert(candidates, localappdata .. "\\Programs\\LuaRocks\\luarocks.bat")
+        end
+        local userprofile = os.getenv("USERPROFILE")
+        if userprofile then
+            table.insert(candidates, userprofile .. "\\scoop\\apps\\luarocks\\current\\luarocks.bat")
+        end
+    end
     for _, c in ipairs(candidates) do
         if file_exists(c) then return c end
     end
@@ -529,7 +599,10 @@ local function cmd_rocks(args)
             local cmd = shell_quote(luarocks_bin) .. " --tree " .. shell_quote(rocks_dir) .. " --lua-version 5.1 list"
             os.execute(cmd)
         else
-            local p = io.popen("ls -1 " .. shell_quote(rocks_dir .. "/lib/luarocks/rocks-5.1") .. " 2>/dev/null")
+            local probe = (ffi.os == "Windows")
+                and ('dir /b "' .. (rocks_dir .. "/lib/luarocks/rocks-5.1"):gsub("/", "\\") .. '" 2>NUL')
+                or ("ls -1 " .. shell_quote(rocks_dir .. "/lib/luarocks/rocks-5.1") .. " 2>/dev/null")
+            local p = io.popen(probe)
             if p then
                 for line in p:lines() do
                     if line ~= "" and line ~= "manifest" then
@@ -559,7 +632,7 @@ local function cmd_rocks(args)
 
     elseif sub == "clean" then
         info("Removing hermetic LuaRocks tree: " .. rocks_dir)
-        os.execute("rm -rf " .. shell_quote(rocks_dir))
+        remove_dir_recursive(rocks_dir)
         success("Hermetic LuaRocks tree cleaned.")
 
     elseif sub == "path" then
@@ -568,8 +641,13 @@ local function cmd_rocks(args)
             local cmd = shell_quote(luarocks_bin) .. " --tree " .. shell_quote(rocks_dir) .. " --lua-version 5.1 path"
             os.execute(cmd)
         else
-            print("export LUA_PATH='" .. rocks_dir .. "/share/lua/5.1/?.lua;" .. rocks_dir .. "/share/lua/5.1/?/init.lua;$LUA_PATH'")
-            print("export LUA_CPATH='" .. rocks_dir .. "/lib/lua/5.1/?.so;$LUA_CPATH'")
+            if ffi.os == "Windows" then
+                print("set LUA_PATH=" .. rocks_dir .. "/share/lua/5.1/?.lua;" .. rocks_dir .. "/share/lua/5.1/?/init.lua;%LUA_PATH%")
+                print("set LUA_CPATH=" .. rocks_dir .. "/lib/lua/5.1/?.dll;%LUA_CPATH%")
+            else
+                print("export LUA_PATH='" .. rocks_dir .. "/share/lua/5.1/?.lua;" .. rocks_dir .. "/share/lua/5.1/?/init.lua;$LUA_PATH'")
+                print("export LUA_CPATH='" .. rocks_dir .. "/lib/lua/5.1/?.so;$LUA_CPATH'")
+            end
         end
     else
         err("Unknown rocks subcommand: " .. sub)
@@ -742,8 +820,7 @@ local function cmd_build(args)
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
             info("Packaging LuaRocks dependencies into macOS App bundle...")
-            exec("mkdir -p " .. shell_quote(res_dir .. "/rocks"))
-            exec("cp -R " .. shell_quote(rocks_tree) .. "/. " .. shell_quote(res_dir .. "/rocks/"))
+            copy_dir_recursive(rocks_tree, res_dir .. "/rocks")
         end
 
         -- Info.plist
@@ -792,8 +869,7 @@ local function cmd_build(args)
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
             info("Packaging LuaRocks dependencies into Debian package...")
             local rocks_dest = deb_dir .. "/usr/share/" .. app_name .. "/rocks"
-            exec("mkdir -p " .. shell_quote(rocks_dest))
-            exec("cp -R " .. shell_quote(rocks_tree) .. "/. " .. shell_quote(rocks_dest .. "/"))
+            copy_dir_recursive(rocks_tree, rocks_dest)
         end
 
         local control = string.format([[Package: %s
@@ -819,7 +895,7 @@ Description: %s built with Tauri-Lua
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "\\share") or file_exists(rocks_tree .. "\\lib") or file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
             info("Packaging LuaRocks dependencies into Windows standalone bundle...")
-            exec("xcopy /E /I /Y " .. rocks_tree .. " " .. win_dir .. "\\rocks")
+            copy_dir_recursive(rocks_tree, win_dir .. "\\rocks")
         end
 
         success("Finished bundle at " .. win_dir)
@@ -2153,12 +2229,16 @@ local function cmd_clean(args)
         clean_all = true
     end
     info("Cleaning build artifacts and release bundles...")
-    os.execute("rm -rf build target .DS_Store **/.DS_Store 2>/dev/null")
+    remove_dir_recursive("build")
+    remove_dir_recursive("target")
+    if ffi.os == "OSX" then
+        os.execute("rm -f .DS_Store **/.DS_Store 2>/dev/null")
+    end
     if clean_all then
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) then
             info("Cleaning hermetic LuaRocks tree: " .. rocks_tree)
-            os.execute("rm -rf " .. shell_quote(rocks_tree))
+            remove_dir_recursive(rocks_tree)
         end
     end
     success("Workspace cleaned successfully.")
