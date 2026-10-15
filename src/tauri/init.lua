@@ -302,15 +302,42 @@ function Security:assert_program(program)
     end
 end
 
+local function canonicalize_path(path)
+    local parts = {}
+    path = path:gsub("\\", "/")
+    local is_absolute = path:sub(1, 1) == "/"
+    for part in path:gmatch("[^/]+") do
+        if part == "." then
+            -- skip
+        elseif part == ".." then
+            if #parts > 0 and parts[#parts] ~= ".." then
+                table.remove(parts)
+            else
+                if not is_absolute then
+                    table.insert(parts, "..")
+                end
+            end
+        else
+            table.insert(parts, part)
+        end
+    end
+    local res = table.concat(parts, "/")
+    if is_absolute then
+        res = "/" .. res
+    end
+    return res
+end
+
 function Security:assert_scope(target_path, base_paths)
     if #self.scopes == 0 then return end
-    local normalized = target_path:gsub("\\", "/")
+    local normalized = canonicalize_path(target_path)
     for _, pattern in ipairs(self.scopes) do
         local resolved = pattern:gsub("%$APPDATA", base_paths.appData)
                                :gsub("%$HOME", base_paths.home)
                                :gsub("%$DESKTOP", base_paths.desktop)
                                :gsub("\\", "/")
-        local escaped = resolved:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1")
+        local canonical_pattern = canonicalize_path(resolved)
+        local escaped = canonical_pattern:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1")
         local lua_pattern = "^" .. escaped:gsub("%%%*", ".*") .. "$"
         if normalized:match(lua_pattern) then
             return true
