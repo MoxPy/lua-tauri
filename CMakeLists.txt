@@ -191,7 +191,10 @@ else()
     target_compile_definitions(taurilua PRIVATE WEBVIEW_GTK)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(GTK REQUIRED gtk+-3.0)
-    pkg_check_modules(WEBKIT REQUIRED webkit2gtk-4.0)
+    pkg_check_modules(WEBKIT webkit2gtk-4.1)
+    if(NOT WEBKIT_FOUND)
+        pkg_check_modules(WEBKIT REQUIRED webkit2gtk-4.0)
+    endif()
     target_include_directories(taurilua PRIVATE ${GTK_INCLUDE_DIRS} ${WEBKIT_INCLUDE_DIRS})
     target_link_libraries(taurilua PRIVATE
         ${GTK_LIBRARIES}

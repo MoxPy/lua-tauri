@@ -152,7 +152,7 @@ my-app/
 ### Prerequisites
 
 * **macOS:** `clang` (Xcode Command Line Tools), `cmake`, `luajit` (`brew install luajit cmake`).
-* **Linux (Debian/Ubuntu):** `build-essential`, `cmake`, `luajit`, `libgtk-3-dev`, `libwebkit2gtk-4.0-dev`.
+* **Linux (Debian/Ubuntu):** `build-essential`, `cmake`, `luajit`, `libgtk-3-dev`, and WebKitGTK (`libwebkit2gtk-4.1-dev` for Ubuntu 24.04+ or `libwebkit2gtk-4.0-dev` for older distributions).
 * **Windows:** Visual Studio C++ Build Tools, `cmake`, `luajit`, Microsoft Edge WebView2 (pre-installed on Win 10/11).
 
 ### Quickstart
@@ -1217,7 +1217,7 @@ print("Backend socket version:", socket._VERSION)
 
 ## Scripting Engine Host & C/C++ Embedding (`libtaurilua`)
 
-Tauri-Lua is not only an application runtime—it is also an **embeddable shared library** (`libtaurilua.dylib` on macOS, `libtaurilua.so` on Linux, `taurilua.dll` on Windows) exposing a clean, zero-overhead **Pure-C API** ([include/taurilua.h](file:///Users/manuellanzani/Desktop/xx/lua-tauri/include/taurilua.h)).
+Tauri-Lua is not only an application runtime—it is also an **embeddable shared library** (`libtaurilua.dylib` on macOS, `libtaurilua.so` on Linux, `taurilua.dll` on Windows) exposing a clean, zero-overhead **Pure-C API** ([include/taurilua.h](include/taurilua.h)).
 
 This empowers existing C/C++ software, native desktop applications, internal enterprise tools, and game engines (**Godot, Unreal Engine, SDL2, GLFW**) to summon modern web frontends on the fly for:
 * In-game configuration windows and HUD overlays
@@ -1429,7 +1429,7 @@ target/bundle/
 
 > [!IMPORTANT]
 > **Why copying just the bare binary (`build/tauri_app`) to another Linux machine is not enough:**  
-> Native GUI applications on Linux dynamically link against system libraries—specifically `glibc`, `libgtk-3`, and `libwebkit2gtk-4.0`. If a target machine has differing shared object versions or lacks development headers, launching the raw binary directly will result in missing library errors (`cannot open shared object file: libwebkit2gtk-4.0.so.37`).
+> Native GUI applications on Linux dynamically link against system libraries—specifically `glibc`, `libgtk-3`, and `libwebkit2gtk-4.1` (or `libwebkit2gtk-4.0` on older distros). If a target machine has differing shared object versions or lacks development headers, launching the raw binary directly will result in missing library errors (`cannot open shared object file`).
 
 `./lua-tauri build` automatically assembles a standards-compliant **Debian (`.deb`) package** inside `target/bundle/deb/`:
 * Places the stripped binary in `/usr/bin/<app-name>`
@@ -1508,7 +1508,7 @@ jobs:
             os: macos-latest
             artifact: target/bundle/dmg/*.dmg
           - platform: linux
-            os: ubuntu-22.04
+            os: ubuntu-latest
             artifact: target/bundle/deb/*.deb
           - platform: windows
             os: windows-latest
@@ -1523,15 +1523,23 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential luajit libluajit-5.1-dev libgtk-3-dev libwebkit2gtk-4.0-dev
+          sudo apt-get install -y cmake build-essential luajit libluajit-5.1-dev libgtk-3-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
 
       - name: Install macOS Dependencies
         if: matrix.platform == 'macos'
         run: brew install cmake luajit
 
-      - name: Install Windows Dependencies
+      - name: Install Windows Dependencies (LuaJIT)
         if: matrix.platform == 'windows'
-        run: choco install cmake luajit
+        shell: cmd
+        run: |
+          git clone --depth 1 https://github.com/LuaJIT/LuaJIT.git %RUNNER_TEMP%\luajit
+          cd %RUNNER_TEMP%\luajit\src
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          call msvcbuild.bat
+          echo %RUNNER_TEMP%\luajit\src>> %GITHUB_PATH%
+          echo LUAJIT_ROOT=%RUNNER_TEMP%\luajit>> %GITHUB_ENV%
 
       # Run frontend & backend build
       - name: Build Application Bundle
