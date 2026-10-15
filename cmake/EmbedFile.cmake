@@ -1,0 +1,12 @@
+
+file(READ ${INPUT_FILE} HEX_CONTENT HEX)
+string(LENGTH "${HEX_CONTENT}" HEX_LEN)
+math(EXPR BYTE_COUNT "${HEX_LEN} / 2")
+set(ARRAY_DEF "")
+set(I 0)
+while(I LESS HEX_LEN)
+    string(SUBSTRING "${HEX_CONTENT}" ${I} 2 PAIR)
+    string(APPEND ARRAY_DEF "0x${PAIR},")
+    math(EXPR I "${I} + 2")
+endwhile()
+file(WRITE ${OUTPUT_HEADER} "#pragma once\nstatic const unsigned char ${VAR_NAME}[] = {${ARRAY_DEF}0x00};\nstatic const unsigned int ${VAR_NAME}_len = ${BYTE_COUNT};\n")

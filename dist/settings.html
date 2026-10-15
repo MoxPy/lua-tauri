@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>Impostazioni</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #0b0f19;
+      color: #f1f5f9;
+      padding: 24px;
+      user-select: none;
+    }
+    h2 {
+      margin: 0 0 16px 0;
+      font-size: 18px;
+    }
+    .form-group {
+      margin-bottom: 14px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 6px;
+    }
+    input[type="text"], select {
+      width: 100%;
+      padding: 8px 12px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      color: #fff;
+      font-size: 13px;
+      outline: none;
+    }
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 14px;
+      font-size: 13px;
+    }
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 24px;
+    }
+    button {
+      padding: 8px 14px;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .btn-close {
+      background: #334155;
+      color: #fff;
+    }
+    .btn-save {
+      background: #0284c7;
+      color: #fff;
+    }
+    pre {
+      background: #030712;
+      border: 1px solid #1e293b;
+      padding: 10px;
+      border-radius: 6px;
+      color: #38bdf8;
+      font-size: 11px;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <h2>Pannello Impostazioni</h2>
+
+  <div class="form-group">
+    <label for="username">Nome Utente</label>
+    <input type="text" id="username" value="Utente Test">
+  </div>
+
+  <div class="form-group">
+    <label for="theme">Tema</label>
+    <select id="theme">
+      <option value="dark">Scuro</option>
+      <option value="light">Chiaro</option>
+    </select>
+  </div>
+
+  <div class="checkbox-group">
+    <input type="checkbox" id="notifications" checked>
+    <label for="notifications">Abilita notifiche</label>
+  </div>
+
+  <div class="actions">
+    <button class="btn-close" onclick="closeWindow()">Chiudi</button>
+    <button class="btn-save" onclick="saveSettings()">Salva e Sincronizza</button>
+  </div>
+
+  <pre id="status">Pronto.</pre>
+
+  <script>
+    async function saveSettings() {
+      const prefs = {
+        username: document.getElementById("username").value,
+        theme: document.getElementById("theme").value,
+        notifications: document.getElementById("notifications").checked
+      };
+
+      await window.__TAURI__.core.invoke("tauri:state:set", {
+        key: "app_preferences",
+        value: prefs
+      });
+
+      await window.__TAURI__.event.emit("settings-changed", prefs);
+      document.getElementById("status").textContent = "Salvato nello State Store:\n" + JSON.stringify(prefs, null, 2);
+    }
+
+    async function closeWindow() {
+      await window.__TAURI__.webviewWindow.getCurrentWebviewWindow().close();
+    }
+  </script>
+</body>
+</html>

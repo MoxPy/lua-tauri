@@ -1,0 +1,74 @@
+{
+  "$schema": "https://schema.tauri.app/v2",
+  "productName": "tauri-lua-app",
+  "version": "1.0.0",
+  "identifier": "com.tauri.lua",
+  "build": {
+    "frontendDist": "dist",
+    "devUrl": ""
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Tauri Lua 1:1 App",
+        "width": 1024,
+        "height": 720,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "capabilities": [
+        "core:default",
+        "fs:read-text-file",
+        "fs:write-text-file",
+        "fs:read-dir",
+        "dialog:open",
+        "dialog:save",
+        "dialog:message",
+        "clipboard:read-text",
+        "clipboard:write-text",
+        "notification:send",
+        "shell:execute"
+      ],
+      "csp": "default-src 'self' tauri: asset:; script-src 'self' tauri: asset: 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: tauri:; connect-src 'self' tauri: ipc:;",
+      "scope": [
+        "$APPDATA/*",
+        "$DESKTOP/*",
+        "$HOME/Documents/*"
+      ]
+    }
+  },
+  "package": {
+    "name": "tauri-lua-app",
+    "version": "1.0.0"
+  },
+  "tauri": {
+    "window": {
+      "title": "Tauri Lua 1:1 App",
+      "width": 1024,
+      "height": 720,
+      "resizable": true
+    },
+    "security": {
+      "capabilities": [
+        "core:default",
+        "fs:read-text-file",
+        "fs:write-text-file",
+        "fs:read-dir",
+        "dialog:open",
+        "dialog:save",
+        "dialog:message",
+        "clipboard:read-text",
+        "clipboard:write-text",
+        "notification:send",
+        "shell:execute"
+      ],
+      "csp": "default-src 'self' tauri: asset:; script-src 'self' tauri: asset: 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: tauri:; connect-src 'self' tauri: ipc:;",
+      "scope": [
+        "$APPDATA/*",
+        "$DESKTOP/*",
+        "$HOME/Documents/*"
+      ]
+    }
+  }
+}

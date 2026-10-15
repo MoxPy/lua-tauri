@@ -1,0 +1,1855 @@
+local ffi = require("ffi")
+
+ffi.cdef[[
+    int kill(int pid, int sig);
+    int usleep(unsigned int usec);
+]]
+
+-- ==========================================================
+-- Minimal Color & Print Helpers
+-- ==========================================================
+local colors = {
+    reset   = "\27[0m",
+    bold    = "\27[1m",
+    dim     = "\27[2m",
+    red     = "\27[31m",
+    green   = "\27[32m",
+    yellow  = "\27[33m",
+    blue    = "\27[34m",
+    magenta = "\27[35m",
+    cyan    = "\27[36m",
+    white   = "\27[37m"
+}
+
+local function log_tag(tag, tag_color, msg)
+    io.stdout:write(string.format("%s%12s%s %s\n", tag_color .. colors.bold, tag, colors.reset, msg))
+    io.stdout:flush()
+end
+
+local function info(msg)    log_tag("Info", colors.blue, msg) end
+local function success(msg) log_tag("Success", colors.green, msg) end
+local function warn(msg)    log_tag("Warning", colors.yellow, msg) end
+local function err(msg)     log_tag("Error", colors.red, msg) end
+local function running(msg) log_tag("Running", colors.cyan, colors.dim .. "`" .. msg .. "`" .. colors.reset) end
+
+-- ==========================================================
+-- Simple Pure-Lua JSON Parser (Encode & Decode)
+-- ==========================================================
+local json = {}
+
+local function escape_str(s)
+    local map = { ['\\'] = '\\\\', ['"'] = '\\"', ['\b'] = '\\b', ['\f'] = '\\f', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t' }
+    return s:gsub('[\\"\b\f\n\r\t]', map)
+end
+
+function json.encode(val)
+    local t = type(val)
+    if t == "nil" then return "null"
+    elseif t == "boolean" then return val and "true" or "false"
+    elseif t == "number" then return tostring(val)
+    elseif t == "string" then return '"' .. escape_str(val) .. '"'
+    elseif t == "table" then
+        local is_array = true
+        local max_idx = 0
+        for k, v in pairs(val) do
+            if type(k) == "number" and k > 0 and math.floor(k) == k then
+                if k > max_idx then max_idx = k end
+            else
+                is_array = false
+                break
+            end
+        end
+        if is_array then
+            local items = {}
+            for i = 1, max_idx do items[i] = json.encode(val[i]) end
+            return "[" .. table.concat(items, ",") .. "]"
+        else
+            local fields = {}
+            for k, v in pairs(val) do
+                table.insert(fields, string.format("%q:%s", tostring(k), json.encode(v)))
+            end
+            return "{" .. table.concat(fields, ",") .. "}"
+        end
+    end
+    return "null"
+end
+
+local function parse_value(str, idx)
+    idx = str:find("%S", idx) or idx
+    local char = str:sub(idx, idx)
+    if char == "{" then
+        local obj = {}
+        idx = idx + 1
+        while true do
+            idx = str:find("%S", idx) or idx
+            if str:sub(idx, idx) == "}" then return obj, idx + 1 end
+            if str:sub(idx, idx) == "," then idx = idx + 1 end
+            idx = str:find("%S", idx) or idx
+            if str:sub(idx, idx) == "}" then return obj, idx + 1 end
+            local key, next_idx = parse_value(str, idx)
+            idx = str:find("%S", next_idx) or next_idx
+            if str:sub(idx, idx) == ":" then idx = idx + 1 end
+            local val
+            val, idx = parse_value(str, idx)
+            obj[key] = val
+        end
+    elseif char == "[" then
+        local arr = {}
+        idx = idx + 1
+        while true do
+            idx = str:find("%S", idx) or idx
+            if str:sub(idx, idx) == "]" then return arr, idx + 1 end
+            if str:sub(idx, idx) == "," then idx = idx + 1 end
+            idx = str:find("%S", idx) or idx
+            if str:sub(idx, idx) == "]" then return arr, idx + 1 end
+            local val
+            val, idx = parse_value(str, idx)
+            table.insert(arr, val)
+        end
+    elseif char == '"' then
+        local end_idx = idx + 1
+        while true do
+            end_idx = str:find('"', end_idx)
+            if not end_idx then return "", #str + 1 end
+            local backslashes = 0
+            local b_idx = end_idx - 1
+            while b_idx >= idx and str:sub(b_idx, b_idx) == "\\" do
+                backslashes = backslashes + 1
+                b_idx = b_idx - 1
+            end
+            if backslashes % 2 == 0 then break end
+            end_idx = end_idx + 1
+        end
+        local val = str:sub(idx + 1, end_idx - 1)
+        val = val:gsub('\\"', '"'):gsub('\\\\', '\\'):gsub('\\n', '\n'):gsub('\\r', '\r'):gsub('\\t', '\t')
+        return val, end_idx + 1
+    elseif str:sub(idx, idx + 3) == "true" then return true, idx + 4
+    elseif str:sub(idx, idx + 4) == "false" then return false, idx + 5
+    elseif str:sub(idx, idx + 3) == "null" then return nil, idx + 4
+    else
+        local next_delim = str:find("[,%]}%s]", idx) or (#str + 1)
+        local raw = str:sub(idx, next_delim - 1)
+        return tonumber(raw) or raw, next_delim
+    end
+end
+
+function json.decode(str)
+    if not str or str == "" then return nil end
+    return parse_value(str, 1)
+end
+
+-- ==========================================================
+-- Utility Functions
+-- ==========================================================
+local function file_exists(path)
+    local f = io.open(path, "r")
+    if f then
+        f:close()
+        return true
+    end
+    return false
+end
+
+local function read_file(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local content = f:read("*a")
+    f:close()
+    return content
+end
+
+local function write_file(path, content)
+    local f = io.open(path, "wb")
+    if not f then return false end
+    f:write(content)
+    f:close()
+    return true
+end
+
+local function exec(cmd)
+    local ok = os.execute(cmd)
+    if ok ~= 0 and ok ~= true then
+        error("Command failed: " .. cmd)
+    end
+end
+
+local function get_file_mtime(path)
+    local p
+    if ffi.os == "OSX" then
+        p = io.popen("stat -f '%m' " .. path .. " 2>/dev/null")
+    else
+        p = io.popen("stat -c '%Y' " .. path .. " 2>/dev/null")
+    end
+    if not p then return 0 end
+    local res = p:read("*a")
+    p:close()
+    return tonumber(res) or 0
+end
+
+local function find_watched_files()
+    local files = {}
+    local p = io.popen("find src-tauri/src src/ tauri.conf.json src-tauri/tauri.conf.json -name '*.lua' -o -name 'tauri.conf.json' 2>/dev/null")
+    if p then
+        for line in p:lines() do
+            if line ~= "" then
+                table.insert(files, line)
+            end
+        end
+        p:close()
+    end
+    return files
+end
+
+-- ==========================================================
+-- Config Resolution
+-- ==========================================================
+local function load_config()
+    local conf_path = nil
+    if file_exists("src-tauri/tauri.conf.json") then
+        conf_path = "src-tauri/tauri.conf.json"
+    elseif file_exists("tauri.conf.json") then
+        conf_path = "tauri.conf.json"
+    else
+        error("File tauri.conf.json non trovato in root né in src-tauri/")
+    end
+
+    local raw = read_file(conf_path)
+    local parsed = json.decode(raw) or {}
+    return parsed, conf_path
+end
+
+local function get_app_meta(conf)
+    local name = (conf.package and conf.package.name) or conf.productName or "tauri-lua-app"
+    local version = (conf.package and conf.package.version) or conf.version or "0.1.0"
+    local identifier = conf.identifier or "com.tauri.lua"
+    return name, version, identifier
+end
+
+local ENGINE_ROOT = os.getenv("TAURI_LUA_ROOT")
+if not ENGINE_ROOT or ENGINE_ROOT == "" then
+    local script_dir = arg[0]:match("^(.*)/[^/]+$")
+    if script_dir then
+        ENGINE_ROOT = script_dir .. "/.."
+    else
+        ENGINE_ROOT = "."
+    end
+end
+
+-- ==========================================================
+-- Ensure Runtime Binary is Built
+-- ==========================================================
+local function ensure_runtime_built(release_mode)
+    local bin = "build/tauri_app"
+    if not release_mode then
+        if file_exists(bin) then return bin end
+        if file_exists(ENGINE_ROOT .. "/build/tauri_app") then
+            return ENGINE_ROOT .. "/build/tauri_app"
+        end
+    end
+
+    if release_mode or not file_exists(bin) then
+        local build_type = release_mode and "Release" or "Debug"
+        info("Compiling Tauri-Lua runtime (" .. build_type .. ")...")
+        local p = io.popen("pwd 2>/dev/null")
+        local cwd = p and p:read("*l") or "."
+        if p then p:close() end
+        exec("cmake -B build -S " .. ENGINE_ROOT .. " -DAPP_DIR=" .. cwd .. " -DCMAKE_BUILD_TYPE=" .. build_type .. " > /dev/null")
+        exec("cmake --build build --config " .. build_type .. " > /dev/null")
+        success("Runtime built successfully.")
+        bin = "build/tauri_app"
+    end
+    return bin
+end
+
+-- ==========================================================
+-- Command: DEV
+-- ==========================================================
+local function cmd_dev(args)
+    local conf, conf_path = load_config()
+    local app_name, version = get_app_meta(conf)
+    local build_conf = conf.build or {}
+
+    info("Starting Tauri-Lua development for `" .. app_name .. "` v" .. version)
+
+    local dev_server_pid = nil
+    local before_dev = build_conf.beforeDevCommand
+    if before_dev and before_dev ~= "" then
+        running(before_dev)
+        local p = io.popen(before_dev .. " & echo $!")
+        if p then
+            dev_server_pid = tonumber(p:read("*l"))
+            p:close()
+        end
+    end
+
+    local dev_url = build_conf.devUrl or build_conf.devPath
+    if dev_url and dev_url:match("^https?://") then
+        info("Waiting for dev server at " .. dev_url .. " ...")
+        local ready = false
+        for i = 1, 60 do
+            local p = io.popen("curl -s -o /dev/null -w '%{http_code}' " .. dev_url .. " 2>/dev/null")
+            local code = p and p:read("*a")
+            if p then p:close() end
+            if code and tonumber(code) and tonumber(code) > 0 then
+                ready = true
+                break
+            end
+            ffi.C.usleep(500000) -- 500ms
+        end
+        if ready then
+            success("Dev server is ready!")
+        else
+            warn("Dev server did not answer within timeout, proceeding anyway...")
+        end
+    end
+
+    local bin_path = ensure_runtime_built(false)
+
+    -- Watch timestamps table
+    local file_timestamps = {}
+    for _, f in ipairs(find_watched_files()) do
+        file_timestamps[f] = get_file_mtime(f)
+    end
+
+    local function spawn_app()
+        running(bin_path)
+        local p = io.popen(bin_path .. " & echo $!")
+        local pid = p and tonumber(p:read("*l"))
+        if p then p:close() end
+        return pid
+    end
+
+    local app_pid = spawn_app()
+    info("Watching for backend and config changes (Hot Reload enabled)...")
+
+    local function cleanup()
+        io.stdout:write("\n")
+        info("Shutting down development processes...")
+        if app_pid and ffi.C.kill(app_pid, 0) == 0 then
+            ffi.C.kill(app_pid, 9)
+        end
+        if dev_server_pid and ffi.C.kill(dev_server_pid, 0) == 0 then
+            ffi.C.kill(dev_server_pid, 9)
+        end
+        os.exit(0)
+    end
+
+    -- Run watch loop
+    while true do
+        ffi.C.usleep(300000) -- poll every 300ms
+
+        -- Check if child application process is still alive
+        if app_pid and ffi.C.kill(app_pid, 0) ~= 0 then
+            info("Application closed, stopping dev session.")
+            cleanup()
+        end
+
+        local changed_file = nil
+        local current_files = find_watched_files()
+        for _, f in ipairs(current_files) do
+            local mtime = get_file_mtime(f)
+            if file_timestamps[f] and mtime > file_timestamps[f] then
+                changed_file = f
+                file_timestamps[f] = mtime
+                break
+            elseif not file_timestamps[f] then
+                changed_file = f
+                file_timestamps[f] = mtime
+                break
+            end
+        end
+
+        if changed_file then
+            log_tag("Reload", colors.magenta, "Detected change in " .. changed_file .. ", reloading backend...")
+            if app_pid then
+                ffi.C.kill(app_pid, 9)
+            end
+            ffi.C.usleep(50000) -- 50ms pause
+            app_pid = spawn_app()
+        end
+    end
+end
+
+-- ==========================================================
+-- Command: BUILD
+-- ==========================================================
+local function cmd_build(args)
+    local conf, conf_path = load_config()
+    local app_name, version, identifier = get_app_meta(conf)
+    local build_conf = conf.build or {}
+    local bundle_conf = conf.bundle or (conf.tauri and conf.tauri.bundle) or {}
+
+    info("Building application `" .. app_name .. "` v" .. version .. " (" .. identifier .. ")")
+
+    local before_build = build_conf.beforeBuildCommand
+    if before_build and before_build ~= "" then
+        running(before_build)
+        exec(before_build)
+    end
+
+    local frontend_dist = build_conf.frontendDist or build_conf.distDir or bundle_conf.distDir or "dist"
+    if frontend_dist:sub(1, 3) == "../" then
+        frontend_dist = frontend_dist:sub(4)
+    end
+
+    if not file_exists(frontend_dist) then
+        error("frontendDist non trovata: " .. frontend_dist)
+    end
+
+    -- Build runtime in release mode
+    local bin_path = ensure_runtime_built(true)
+
+    local target_dir = "target/bundle"
+    local os_name = ffi.os
+
+    if os_name == "OSX" then
+        local macos_bundle_dir = target_dir .. "/macos/" .. app_name .. ".app"
+        local dmg_dir = target_dir .. "/dmg"
+        local macos_dir = macos_bundle_dir .. "/Contents/MacOS"
+        local res_dir = macos_bundle_dir .. "/Contents/Resources"
+
+        info("Bundling macOS App...")
+        exec("mkdir -p " .. macos_dir)
+        exec("mkdir -p " .. res_dir)
+        exec("mkdir -p " .. dmg_dir)
+
+        exec("cp " .. bin_path .. " " .. macos_dir .. "/" .. app_name)
+        exec("cp -r " .. frontend_dist .. " " .. res_dir .. "/")
+
+        -- Info.plist
+        local plist = string.format([[<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>%s</string>
+    <key>CFBundleIdentifier</key>
+    <string>%s</string>
+    <key>CFBundleName</key>
+    <string>%s</string>
+    <key>CFBundleVersion</key>
+    <string>%s</string>
+    <key>CFBundleShortVersionString</key>
+    <string>%s</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>]], app_name, identifier, app_name, version, version)
+
+        write_file(macos_bundle_dir .. "/Contents/Info.plist", plist)
+
+        local dmg_file = dmg_dir .. "/" .. app_name .. "_" .. version .. "_x64.dmg"
+        info("Creating DMG disk image: " .. dmg_file)
+        exec("hdiutil create -volname \"" .. app_name .. "\" -srcfolder \"" .. macos_bundle_dir .. "\" -ov -format UDZO \"" .. dmg_file .. "\" > /dev/null")
+
+        success("Finished 2 bundles at:")
+        io.stdout:write("        " .. colors.green .. macos_bundle_dir .. colors.reset .. "\n")
+        io.stdout:write("        " .. colors.green .. dmg_file .. colors.reset .. "\n")
+
+    elseif os_name == "Linux" then
+        local deb_dir = target_dir .. "/deb/" .. app_name .. "_" .. version .. "_amd64"
+        info("Bundling Debian (.deb)...")
+        exec("mkdir -p " .. deb_dir .. "/DEBIAN")
+        exec("mkdir -p " .. deb_dir .. "/usr/bin")
+        exec("mkdir -p " .. deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist)
+
+        exec("cp " .. bin_path .. " " .. deb_dir .. "/usr/bin/" .. app_name)
+        exec("cp -r " .. frontend_dist .. "/* " .. deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist .. "/")
+
+        local control = string.format([[Package: %s
+Version: %s
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Developer <dev@example.com>
+Description: %s built with Tauri-Lua
+]], app_name, version, app_name)
+
+        write_file(deb_dir .. "/DEBIAN/control", control)
+        exec("dpkg-deb --build " .. deb_dir .. " " .. target_dir .. "/deb > /dev/null")
+        success("Finished bundle at " .. target_dir .. "/deb")
+
+    elseif os_name == "Windows" then
+        local win_dir = target_dir .. "\\windows\\" .. app_name .. "-standalone"
+        info("Bundling Windows Standalone...")
+        exec("mkdir " .. win_dir)
+        exec("copy build\\Release\\tauri_app.exe " .. win_dir .. "\\")
+        exec("xcopy /E /I " .. frontend_dist .. " " .. win_dir .. "\\" .. frontend_dist)
+        success("Finished bundle at " .. win_dir)
+    end
+end
+
+-- ==========================================================
+-- Command: CREATE (Interactive Template Scaffolder)
+-- ==========================================================
+local function prompt_line(msg, default_val)
+    if default_val then
+        io.stdout:write(colors.cyan .. "? " .. colors.reset .. colors.bold .. msg .. colors.reset .. " " .. colors.dim .. "(" .. default_val .. "): " .. colors.reset)
+    else
+        io.stdout:write(colors.cyan .. "? " .. colors.reset .. colors.bold .. msg .. colors.reset .. ": ")
+    end
+    io.stdout:flush()
+    local line = io.stdin:read("*l")
+    if not line or line:match("^%s*$") then
+        return default_val
+    end
+    return line:match("^%s*(.-)%s*$")
+end
+
+local function prompt_choice(msg, options, default_idx)
+    io.stdout:write(colors.cyan .. "? " .. colors.reset .. colors.bold .. msg .. colors.reset .. "\n")
+    for idx, opt in ipairs(options) do
+        local marker = (idx == default_idx) and (colors.green .. ">" .. colors.reset) or " "
+        io.stdout:write(string.format("  %s %s%d)%s %s\n", marker, colors.dim, idx, colors.reset, opt.name))
+    end
+    io.stdout:write(colors.dim .. "  Choice [1-" .. #options .. "] (default " .. default_idx .. "): " .. colors.reset)
+    io.stdout:flush()
+    local line = io.stdin:read("*l")
+    local chosen = tonumber(line)
+    if not chosen or chosen < 1 or chosen > #options then
+        return options[default_idx].value
+    end
+    return options[chosen].value
+end
+
+local function prompt_bool(msg, default_val)
+    local hint = default_val and "(Y/n)" or "(y/N)"
+    io.stdout:write(colors.cyan .. "? " .. colors.reset .. colors.bold .. msg .. colors.reset .. " " .. colors.dim .. hint .. ": " .. colors.reset)
+    io.stdout:flush()
+    local line = io.stdin:read("*l")
+    if not line or line:match("^%s*$") then
+        return default_val
+    end
+    line = line:lower():match("^%s*(.-)%s*$")
+    return (line == "y" or line == "yes" or line == "s" or line == "si")
+end
+
+local function cmd_create(args)
+    io.stdout:write("\n" .. colors.cyan .. colors.bold .. "  ⚡️ Tauri-Lua Create App" .. colors.reset .. "\n\n")
+
+    local app_name = nil
+    local template = nil
+    local use_tailwind = nil
+    local package_manager = nil
+
+    local i = 1
+    while i <= #args do
+        local a = args[i]
+        if a == "--template" or a == "-t" then
+            template = args[i + 1]
+            i = i + 2
+        elseif a == "--tailwind" then
+            use_tailwind = true
+            i = i + 1
+        elseif a == "--no-tailwind" then
+            use_tailwind = false
+            i = i + 1
+        elseif a == "--pm" or a == "--package-manager" then
+            package_manager = args[i + 1]
+            i = i + 2
+        elseif not a:match("^%-") and not app_name then
+            app_name = a
+            i = i + 1
+        else
+            i = i + 1
+        end
+    end
+
+    if not app_name or app_name == "" then
+        app_name = prompt_line("Project name", "my-tauri-app")
+    end
+    if not app_name or app_name == "" then app_name = "my-tauri-app" end
+    app_name = app_name:gsub("[^%w%-_]", "-"):lower()
+
+    if file_exists(app_name) then
+        error("Target directory `" .. app_name .. "` already exists! Please choose another name.")
+    end
+
+    if not template or template == "" then
+        local t_opts = {
+            { name = "Vanilla (HTML5 / JS / CSS - Zero build step, instant start)", value = "vanilla" },
+            { name = "React (TypeScript + Vite)", value = "react" },
+            { name = "Vue 3 (TypeScript + Vite)", value = "vue" },
+            { name = "Svelte (TypeScript + Vite)", value = "svelte" }
+        }
+        template = prompt_choice("Select your frontend framework:", t_opts, 1)
+    end
+    template = template:lower()
+    if template ~= "vanilla" and template ~= "react" and template ~= "vue" and template ~= "svelte" then
+        template = "vanilla"
+    end
+
+    if use_tailwind == nil then
+        use_tailwind = prompt_bool("Configure Tailwind CSS?", false)
+    end
+
+    if template ~= "vanilla" and (not package_manager or package_manager == "") then
+        local pm_opts = {
+            { name = "npm", value = "npm" },
+            { name = "pnpm", value = "pnpm" },
+            { name = "bun", value = "bun" },
+            { name = "yarn", value = "yarn" }
+        }
+        package_manager = prompt_choice("Select package manager:", pm_opts, 1)
+    end
+    if not package_manager or package_manager == "" then
+        package_manager = "npm"
+    end
+
+    info("Scaffolding project `" .. app_name .. "` (" .. template .. ", " .. (use_tailwind and "Tailwind CSS" or "Standard CSS") .. ")...")
+
+    exec("mkdir -p " .. app_name .. "/src-tauri/src")
+    exec("mkdir -p " .. app_name .. "/src-tauri/icons")
+    exec("mkdir -p " .. app_name .. "/src")
+
+    -- Copy icons
+    if file_exists(ENGINE_ROOT .. "/src-tauri/icons") then
+        exec("cp -r " .. ENGINE_ROOT .. "/src-tauri/icons/* " .. app_name .. "/src-tauri/icons/ 2>/dev/null || true")
+    end
+
+    -- 1. Backend: main.lua
+    local main_lua = [=[local Tauri = require("tauri")
+
+-- 1. Initialize application with configuration
+local conf = {}
+if __EMBEDDED_CONFIG_JSON__ then
+    conf = Tauri.json.decode(__EMBEDDED_CONFIG_JSON__) or {}
+end
+local app = Tauri.init(conf)
+
+-- 2. State management
+if not app.state:has("counter") then
+    app.state:set("counter", 0)
+end
+
+-- 3. Register standard IPC command
+app:register("greet", function(payload)
+    local name = (payload and payload.name and payload.name ~= "") and payload.name or "Developer"
+    local count = app.state:get("counter") + 1
+    app.state:set("counter", count)
+
+    return {
+        greeting = "Hello " .. name .. "! ⚡️",
+        invocations = count,
+        engine = "LuaJIT " .. (jit and jit.version or "2.1"),
+        workerId = __ISOLATE_WORKER_ID__ or 0
+    }
+end)
+
+-- 4. Register real-time streaming channel (Tauri v2 Parity)
+app:register("stream_countdown", function(payload, caller, channel)
+    local ch = channel or (payload and payload.onProgress)
+    local steps = tonumber(payload and payload.steps) or 5
+
+    for i = steps, 1, -1 do
+        if ch then
+            ch:send({
+                step = i,
+                total = steps,
+                progress = math.floor(((steps - i + 1) / steps) * 100),
+                message = "Executing step #" .. (steps - i + 1) .. " of " .. steps .. "..."
+            })
+        end
+        Tauri.sleep(200)
+    end
+
+    return { status = "success", message = "All pipeline steps executed cleanly!" }
+end)
+
+-- 5. Launch main window
+app:create_main_window()
+]=]
+    write_file(app_name .. "/src-tauri/src/main.lua", main_lua)
+
+    -- 2. Backend: tauri.conf.json
+    local tauri_conf = {
+        ["$schema"] = "https://schema.tauri.app/v2",
+        productName = app_name,
+        version = "0.1.0",
+        identifier = "com." .. app_name .. ".app",
+        build = {},
+        app = {
+            windows = {
+                {
+                    title = app_name,
+                    width = 1024,
+                    height = 720,
+                    resizable = true
+                }
+            },
+            security = {
+                capabilities = {
+                    "core:default",
+                    "fs:read-text-file",
+                    "fs:write-text-file",
+                    "dialog:open",
+                    "dialog:message"
+                }
+            }
+        }
+    }
+
+    if template == "vanilla" then
+        tauri_conf.build.frontendDist = "../src"
+        tauri_conf.build.devUrl = ""
+    else
+        tauri_conf.build.beforeDevCommand = package_manager .. " run dev"
+        tauri_conf.build.devUrl = "http://localhost:5173"
+        tauri_conf.build.beforeBuildCommand = package_manager .. " run build"
+        tauri_conf.build.frontendDist = "../dist"
+    end
+    write_file(app_name .. "/src-tauri/tauri.conf.json", json.encode(tauri_conf))
+
+    -- Shared CSS styling for rich aesthetics
+    local shared_css = [=[
+:root {
+  --bg-primary: #0a0e17;
+  --bg-card: rgba(18, 24, 38, 0.7);
+  --border-card: rgba(255, 255, 255, 0.08);
+  --accent-cyan: #38bdf8;
+  --accent-indigo: #818cf8;
+  --accent-purple: #c084fc;
+  --text-main: #f8fafc;
+  --text-dim: #94a3b8;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+body {
+  background: var(--bg-primary);
+  color: var(--text-main);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-x: hidden;
+  position: relative;
+  user-select: none;
+}
+.ambient-glow {
+  position: absolute;
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.15) 0%, rgba(129, 140, 248, 0.08) 50%, transparent 70%);
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 0;
+  filter: blur(40px);
+}
+.container {
+  position: relative;
+  z-index: 1;
+  max-width: 840px;
+  width: 90%;
+  margin: 2rem auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+.header { text-align: center; }
+.badge-row { display: flex; justify-content: center; gap: 0.75rem; margin-bottom: 1rem; }
+.badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.35rem 0.85rem;
+  border-radius: 9999px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.badge-primary { background: rgba(56, 189, 248, 0.12); color: var(--accent-cyan); border: 1px solid rgba(56, 189, 248, 0.25); }
+.badge-success { background: rgba(52, 211, 153, 0.12); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.25); display: flex; align-items: center; gap: 0.4rem; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: #34d399; box-shadow: 0 0 8px #34d399; }
+.title {
+  font-size: 2.25rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 50%, #94a3b8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: 0.5rem;
+}
+.subtitle { color: var(--text-dim); font-size: 1rem; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+@media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+.card {
+  background: var(--bg-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-card);
+  border-radius: 20px;
+  padding: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  box-shadow: 0 20px 35px -10px rgba(0, 0, 0, 0.5);
+  transition: transform 0.2s, border-color 0.2s;
+}
+.card:hover { transform: translateY(-3px); border-color: rgba(255, 255, 255, 0.18); }
+.card-header { display: flex; align-items: center; gap: 0.9rem; }
+.card-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.card-header h3 { font-size: 1.15rem; font-weight: 700; color: #fff; }
+.card-header p { font-size: 0.8rem; color: var(--text-dim); }
+.form-group { display: flex; flex-direction: column; gap: 0.75rem; }
+input[type="text"] {
+  background: rgba(10, 14, 23, 0.8);
+  border: 1px solid var(--border-card);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  color: #fff;
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+input[type="text"]:focus { border-color: var(--accent-cyan); }
+.btn {
+  border: none;
+  border-radius: 10px;
+  padding: 0.75rem 1.25rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: transform 0.15s, opacity 0.15s, box-shadow 0.15s;
+}
+.btn:active { transform: scale(0.97); }
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-indigo));
+  color: #0a0e17;
+  box-shadow: 0 4px 15px rgba(56, 189, 248, 0.25);
+}
+.btn-primary:hover { opacity: 0.92; box-shadow: 0 6px 20px rgba(56, 189, 248, 0.35); }
+.btn-accent {
+  background: linear-gradient(135deg, var(--accent-indigo), var(--accent-purple));
+  color: #ffffff;
+  box-shadow: 0 4px 15px rgba(129, 140, 248, 0.25);
+}
+.btn-accent:hover { opacity: 0.92; box-shadow: 0 6px 20px rgba(129, 140, 248, 0.35); }
+.output-box {
+  background: rgba(10, 14, 23, 0.9);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 10px;
+  padding: 0.85rem;
+  font-size: 0.85rem;
+  color: var(--accent-cyan);
+  line-height: 1.5;
+  word-break: break-all;
+}
+.hidden { display: none; }
+.progress-container { display: flex; flex-direction: column; gap: 0.5rem; margin-top: auto; }
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-indigo), var(--accent-cyan));
+  border-radius: 9999px;
+  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.progress-meta { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-dim); }
+.footer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+  color: #64748b;
+  margin-top: 1rem;
+}
+]=]
+
+    -- 3. Frontend Scaffolding
+    if template == "vanilla" then
+        local vanilla_html = [=[<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>]=] .. app_name .. [=[</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="ambient-glow"></div>
+  <div class="container">
+    <header class="header">
+      <div class="badge-row">
+        <span class="badge badge-primary">⚡️ Tauri-Lua</span>
+        <span class="badge badge-success"><span class="dot"></span> LuaJIT Engine</span>
+      </div>
+      <h1 class="title">]=] .. app_name .. [=[</h1>
+      <p class="subtitle">Vanilla frontend powered by a blazing fast LuaJIT C++17 runtime.</p>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon">💬</div>
+          <div>
+            <h3>IPC Invoke</h3>
+            <p>Direct C++ / LuaJIT bridge dispatch</p>
+          </div>
+        </div>
+        <div class="form-group">
+          <input type="text" id="name-input" placeholder="Enter your name..." value="Developer" />
+          <button id="greet-btn" class="btn btn-primary">Invoke Greet</button>
+        </div>
+        <div id="greet-output" class="output-box hidden"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon">🌊</div>
+          <div>
+            <h3>Channel Streaming</h3>
+            <p>Tauri v2 real-time bidirectional streams</p>
+          </div>
+        </div>
+        <div class="form-group">
+          <button id="stream-btn" class="btn btn-accent">Start Stream Pipeline</button>
+        </div>
+        <div class="progress-container">
+          <div class="progress-bar">
+            <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+          </div>
+          <div class="progress-meta">
+            <span id="stream-status">Idle</span>
+            <span id="stream-pct">0%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+      <span>Zero Node.js runtime required</span>
+      <span>•</span>
+      <span>Hot-Reload Active (~50ms)</span>
+    </footer>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>]=]
+        write_file(app_name .. "/src/index.html", vanilla_html)
+        write_file(app_name .. "/src/style.css", shared_css)
+
+        local vanilla_js = [=[
+const greetBtn = document.getElementById('greet-btn');
+const nameInput = document.getElementById('name-input');
+const greetOutput = document.getElementById('greet-output');
+
+const streamBtn = document.getElementById('stream-btn');
+const progressFill = document.getElementById('progress-fill');
+const streamStatus = document.getElementById('stream-status');
+const streamPct = document.getElementById('stream-pct');
+
+greetBtn.addEventListener('click', async () => {
+  const name = nameInput.value.trim() || 'Developer';
+  try {
+    greetBtn.textContent = 'Invoking...';
+    const res = await window.__TAURI__.invoke('greet', { name });
+    greetOutput.classList.remove('hidden');
+    greetOutput.innerHTML = `<strong>${res.greeting}</strong><br>` +
+      `<small style="color: #94a3b8">Worker #${res.workerId} | ${res.engine} | Call #${res.invocations}</small>`;
+  } catch (err) {
+    greetOutput.classList.remove('hidden');
+    greetOutput.textContent = 'Error: ' + err;
+  } finally {
+    greetBtn.textContent = 'Invoke Greet';
+  }
+});
+
+streamBtn.addEventListener('click', async () => {
+  streamBtn.disabled = true;
+  streamBtn.textContent = 'Streaming Active...';
+  progressFill.style.width = '0%';
+  streamPct.textContent = '0%';
+  streamStatus.textContent = 'Initializing stream channel...';
+
+  try {
+    const channel = new window.__TAURI__.Channel((data) => {
+      progressFill.style.width = data.progress + '%';
+      streamPct.textContent = data.progress + '%';
+      streamStatus.textContent = data.message;
+    });
+
+    const result = await window.__TAURI__.invoke('stream_countdown', {
+      steps: 5,
+      onProgress: channel
+    });
+
+    streamStatus.textContent = result.message;
+    progressFill.style.width = '100%';
+    streamPct.textContent = '100%';
+  } catch (err) {
+    streamStatus.textContent = 'Stream error: ' + err;
+  } finally {
+    streamBtn.disabled = false;
+    streamBtn.textContent = 'Start Stream Pipeline';
+  }
+});
+]=]
+        write_file(app_name .. "/src/main.js", vanilla_js)
+
+        local vanilla_pkg = {
+            name = app_name,
+            version = "0.1.0",
+            private = true,
+            scripts = {
+                ["tauri:dev"] = "./lua-tauri dev",
+                ["tauri:build"] = "./lua-tauri build"
+            }
+        }
+        write_file(app_name .. "/package.json", json.encode(vanilla_pkg))
+
+    elseif template == "react" then
+        local react_pkg = {
+            name = app_name,
+            private = true,
+            version = "0.1.0",
+            type = "module",
+            scripts = {
+                dev = "vite",
+                build = "tsc && vite build",
+                ["tauri:dev"] = "./lua-tauri dev",
+                ["tauri:build"] = "./lua-tauri build"
+            },
+            dependencies = {
+                react = "^18.3.1",
+                ["react-dom"] = "^18.3.1"
+            },
+            devDependencies = {
+                ["@types/react"] = "^18.3.5",
+                ["@types/react-dom"] = "^18.3.0",
+                ["@vitejs/plugin-react"] = "^4.3.1",
+                typescript = "^5.5.3",
+                vite = "^5.4.2"
+            }
+        }
+        if use_tailwind then
+            react_pkg.devDependencies["tailwindcss"] = "^3.4.10"
+            react_pkg.devDependencies["postcss"] = "^8.4.41"
+            react_pkg.devDependencies["autoprefixer"] = "^10.4.20"
+        end
+        write_file(app_name .. "/package.json", json.encode(react_pkg))
+
+        local vite_conf = [=[import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  clearScreen: false,
+  server: {
+    port: 5173,
+    strictPort: true,
+  },
+});
+]=]
+        write_file(app_name .. "/vite.config.ts", vite_conf)
+
+        local tsconfig = [=[{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"]
+}
+]=]
+        write_file(app_name .. "/tsconfig.json", tsconfig)
+
+        local index_html = [=[<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>]=] .. app_name .. [=[</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+]=]
+        write_file(app_name .. "/index.html", index_html)
+
+        local main_tsx = [=[import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import './index.css';
+
+ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+]=]
+        write_file(app_name .. "/src/main.tsx", main_tsx)
+
+        local app_tsx = [=[import React, { useState } from 'react';
+
+declare global {
+  interface Window {
+    __TAURI__: {
+      invoke: (cmd: string, args?: any) => Promise<any>;
+      Channel: new (cb: (msg: any) => void) => any;
+    };
+  }
+}
+
+export function App() {
+  const [name, setName] = useState('Developer');
+  const [greetRes, setGreetRes] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [streamProgress, setStreamProgress] = useState(0);
+  const [streamMsg, setStreamMsg] = useState('Idle');
+  const [streaming, setStreaming] = useState(false);
+
+  const handleGreet = async () => {
+    setLoading(true);
+    try {
+      const res = await window.__TAURI__.invoke('greet', { name });
+      setGreetRes(res);
+    } catch (e: any) {
+      alert('IPC Error: ' + e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStream = async () => {
+    setStreaming(true);
+    setStreamProgress(0);
+    setStreamMsg('Starting stream...');
+    try {
+      const ch = new window.__TAURI__.Channel((data: any) => {
+        setStreamProgress(data.progress);
+        setStreamMsg(data.message);
+      });
+      const res = await window.__TAURI__.invoke('stream_countdown', { steps: 5, onProgress: ch });
+      setStreamMsg(res.message);
+    } catch (e: any) {
+      setStreamMsg('Error: ' + e);
+    } finally {
+      setStreaming(false);
+    }
+  };
+
+  return (
+    <div className="container">
+      <header className="header">
+        <div className="badge-row">
+          <span className="badge badge-primary">⚡️ React + Tauri-Lua</span>
+          <span className="badge badge-success"><span className="dot"></span> LuaJIT Engine</span>
+        </div>
+        <h1 className="title">]=] .. app_name .. [=[</h1>
+        <p className="subtitle">Vite + React powered by high-performance LuaJIT backend.</p>
+      </header>
+
+      <div className="grid">
+        <div className="card">
+          <div className="card-header">
+            <div className="card-icon">💬</div>
+            <div>
+              <h3>IPC Invoke</h3>
+              <p>Direct call to Lua backend</p>
+            </div>
+          </div>
+          <div className="form-group">
+            <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name..." />
+            <button className="btn btn-primary" onClick={handleGreet} disabled={loading}>
+              {loading ? 'Invoking...' : 'Invoke Greet'}
+            </button>
+          </div>
+          {greetRes && (
+            <div className="output-box">
+              <strong>{greetRes.greeting}</strong><br />
+              <small>Worker #{greetRes.workerId} | Call #{greetRes.invocations}</small>
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="card-header">
+            <div className="card-icon">🌊</div>
+            <div>
+              <h3>Channel Streaming</h3>
+              <p>Real-time Tauri v2 bidirectional stream</p>
+            </div>
+          </div>
+          <div className="form-group">
+            <button className="btn btn-accent" onClick={handleStream} disabled={streaming}>
+              {streaming ? 'Streaming...' : 'Start Stream Pipeline'}
+            </button>
+          </div>
+          <div className="progress-container">
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${streamProgress}%` }}></div>
+            </div>
+            <div className="progress-meta">
+              <span>{streamMsg}</span>
+              <span>{streamProgress}%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
+]=]
+        write_file(app_name .. "/src/App.tsx", app_tsx)
+        local tailwind_prefix = use_tailwind and "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n" or ""
+        write_file(app_name .. "/src/index.css", tailwind_prefix .. shared_css)
+
+    elseif template == "vue" then
+        local vue_pkg = {
+            name = app_name,
+            private = true,
+            version = "0.1.0",
+            type = "module",
+            scripts = {
+                dev = "vite",
+                build = "vue-tsc && vite build",
+                ["tauri:dev"] = "./lua-tauri dev",
+                ["tauri:build"] = "./lua-tauri build"
+            },
+            dependencies = {
+                vue = "^3.4.38"
+            },
+            devDependencies = {
+                ["@vitejs/plugin-vue"] = "^5.1.2",
+                typescript = "^5.5.3",
+                vite = "^5.4.2",
+                ["vue-tsc"] = "^2.1.4"
+            }
+        }
+        if use_tailwind then
+            vue_pkg.devDependencies["tailwindcss"] = "^3.4.10"
+            vue_pkg.devDependencies["postcss"] = "^8.4.41"
+            vue_pkg.devDependencies["autoprefixer"] = "^10.4.20"
+        end
+        write_file(app_name .. "/package.json", json.encode(vue_pkg))
+
+        local vite_conf = [=[import { defineConfig } from 'vite';
+import vue from '@vitejs/plugin-vue';
+
+export default defineConfig({
+  plugins: [vue()],
+  clearScreen: false,
+  server: {
+    port: 5173,
+    strictPort: true,
+  },
+});
+]=]
+        write_file(app_name .. "/vite.config.ts", vite_conf)
+
+        local index_html = [=[<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>]=] .. app_name .. [=[</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
+]=]
+        write_file(app_name .. "/index.html", index_html)
+
+        local main_ts = [=[import { createApp } from 'vue';
+import App from './App.vue';
+import './style.css';
+
+createApp(App).mount('#app');
+]=]
+        write_file(app_name .. "/src/main.ts", main_ts)
+
+        local app_vue = [=[<script setup lang="ts">
+import { ref } from 'vue';
+
+const name = ref('Developer');
+const greetRes = ref<any>(null);
+const loading = ref(false);
+const streamProgress = ref(0);
+const streamMsg = ref('Idle');
+const streaming = ref(false);
+
+declare const window: any;
+
+const handleGreet = async () => {
+  loading.value = true;
+  try {
+    const res = await window.__TAURI__.invoke('greet', { name: name.value });
+    greetRes.value = res;
+  } catch (e: any) {
+    alert('IPC Error: ' + e);
+  } finally {
+    loading.value = false;
+  }
+};
+
+const handleStream = async () => {
+  streaming.value = true;
+  streamProgress.value = 0;
+  streamMsg.value = 'Starting stream...';
+  try {
+    const ch = new window.__TAURI__.Channel((data: any) => {
+      streamProgress.value = data.progress;
+      streamMsg.value = data.message;
+    });
+    const res = await window.__TAURI__.invoke('stream_countdown', { steps: 5, onProgress: ch });
+    streamMsg.value = res.message;
+  } catch (e: any) {
+    streamMsg.value = 'Error: ' + e;
+  } finally {
+    streaming.value = false;
+  }
+};
+</script>
+
+<template>
+  <div class="container">
+    <header class="header">
+      <div class="badge-row">
+        <span class="badge badge-primary">⚡️ Vue 3 + Tauri-Lua</span>
+        <span class="badge badge-success"><span class="dot"></span> LuaJIT Engine</span>
+      </div>
+      <h1 class="title">]=] .. app_name .. [=[</h1>
+      <p class="subtitle">Vite + Vue 3 powered by high-performance LuaJIT backend.</p>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon">💬</div>
+          <div>
+            <h3>IPC Invoke</h3>
+            <p>Direct call to Lua backend</p>
+          </div>
+        </div>
+        <div class="form-group">
+          <input type="text" v-model="name" placeholder="Your name..." />
+          <button class="btn btn-primary" @click="handleGreet" :disabled="loading">
+            {{ loading ? 'Invoking...' : 'Invoke Greet' }}
+          </button>
+        </div>
+        <div v-if="greetRes" class="output-box">
+          <strong>{{ greetRes.greeting }}</strong><br />
+          <small>Worker #{{ greetRes.workerId }} | Call #{{ greetRes.invocations }}</small>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon">🌊</div>
+          <div>
+            <h3>Channel Streaming</h3>
+            <p>Real-time Tauri v2 bidirectional stream</p>
+          </div>
+        </div>
+        <div class="form-group">
+          <button class="btn btn-accent" @click="handleStream" :disabled="streaming">
+            {{ streaming ? 'Streaming...' : 'Start Stream Pipeline' }}
+          </button>
+        </div>
+        <div class="progress-container">
+          <div class="progress-bar">
+            <div class="progress-fill" :style="{ width: streamProgress + '%' }"></div>
+          </div>
+          <div class="progress-meta">
+            <span>{{ streamMsg }}</span>
+            <span>{{ streamProgress }}%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+]=]
+        write_file(app_name .. "/src/App.vue", app_vue)
+        local tailwind_prefix = use_tailwind and "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n" or ""
+        write_file(app_name .. "/src/style.css", tailwind_prefix .. shared_css)
+
+    elseif template == "svelte" then
+        local svelte_pkg = {
+            name = app_name,
+            private = true,
+            version = "0.1.0",
+            type = "module",
+            scripts = {
+                dev = "vite",
+                build = "vite build",
+                ["tauri:dev"] = "./lua-tauri dev",
+                ["tauri:build"] = "./lua-tauri build"
+            },
+            devDependencies = {
+                ["@sveltejs/vite-plugin-svelte"] = "^3.1.2",
+                svelte = "^4.2.19",
+                typescript = "^5.5.3",
+                vite = "^5.4.2"
+            }
+        }
+        if use_tailwind then
+            svelte_pkg.devDependencies["tailwindcss"] = "^3.4.10"
+            svelte_pkg.devDependencies["postcss"] = "^8.4.41"
+            svelte_pkg.devDependencies["autoprefixer"] = "^10.4.20"
+        end
+        write_file(app_name .. "/package.json", json.encode(svelte_pkg))
+
+        local vite_conf = [=[import { defineConfig } from 'vite';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
+
+export default defineConfig({
+  plugins: [svelte()],
+  clearScreen: false,
+  server: {
+    port: 5173,
+    strictPort: true,
+  },
+});
+]=]
+        write_file(app_name .. "/vite.config.ts", vite_conf)
+
+        local index_html = [=[<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>]=] .. app_name .. [=[</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
+]=]
+        write_file(app_name .. "/index.html", index_html)
+
+        local main_ts = [=[import './app.css';
+import App from './App.svelte';
+
+const app = new App({
+  target: document.getElementById('app')!,
+});
+
+export default app;
+]=]
+        write_file(app_name .. "/src/main.ts", main_ts)
+
+        local app_svelte = [=[<script lang="ts">
+  let name = 'Developer';
+  let greetRes: any = null;
+  let loading = false;
+  let streamProgress = 0;
+  let streamMsg = 'Idle';
+  let streaming = false;
+
+  declare const window: any;
+
+  async function handleGreet() {
+    loading = true;
+    try {
+      greetRes = await window.__TAURI__.invoke('greet', { name });
+    } catch (e: any) {
+      alert('IPC Error: ' + e);
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function handleStream() {
+    streaming = true;
+    streamProgress = 0;
+    streamMsg = 'Starting stream...';
+    try {
+      const ch = new window.__TAURI__.Channel((data: any) => {
+        streamProgress = data.progress;
+        streamMsg = data.message;
+      });
+      const res = await window.__TAURI__.invoke('stream_countdown', { steps: 5, onProgress: ch });
+      streamMsg = res.message;
+    } catch (e: any) {
+      streamMsg = 'Error: ' + e;
+    } finally {
+      streaming = false;
+    }
+  }
+</script>
+
+<div class="container">
+  <header class="header">
+    <div class="badge-row">
+      <span class="badge badge-primary">⚡️ Svelte + Tauri-Lua</span>
+      <span class="badge badge-success"><span class="dot"></span> LuaJIT Engine</span>
+    </div>
+    <h1 class="title">]=] .. app_name .. [=[</h1>
+    <p class="subtitle">Vite + Svelte powered by high-performance LuaJIT backend.</p>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">💬</div>
+        <div>
+          <h3>IPC Invoke</h3>
+          <p>Direct call to Lua backend</p>
+        </div>
+      </div>
+      <div class="form-group">
+        <input type="text" bind:value={name} placeholder="Your name..." />
+        <button class="btn btn-primary" on:click={handleGreet} disabled={loading}>
+          {loading ? 'Invoking...' : 'Invoke Greet'}
+        </button>
+      </div>
+      {#if greetRes}
+        <div class="output-box">
+          <strong>{greetRes.greeting}</strong><br />
+          <small>Worker #{greetRes.workerId} | Call #{greetRes.invocations}</small>
+        </div>
+      {/if}
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">🌊</div>
+        <div>
+          <h3>Channel Streaming</h3>
+          <p>Real-time Tauri v2 bidirectional stream</p>
+        </div>
+      </div>
+      <div class="form-group">
+        <button class="btn btn-accent" on:click={handleStream} disabled={streaming}>
+          {streaming ? 'Streaming...' : 'Start Stream Pipeline'}
+        </button>
+      </div>
+      <div class="progress-container">
+        <div class="progress-bar">
+          <div class="progress-fill" style="width: {streamProgress}%"></div>
+        </div>
+        <div class="progress-meta">
+          <span>{streamMsg}</span>
+          <span>{streamProgress}%</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+]=]
+        write_file(app_name .. "/src/App.svelte", app_svelte)
+        local tailwind_prefix = use_tailwind and "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n" or ""
+        write_file(app_name .. "/src/app.css", tailwind_prefix .. shared_css)
+    end
+
+    -- 4. Optional Tailwind configs
+    if use_tailwind then
+        local tailwind_config = [=[/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx,vue,svelte}",
+  ],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+}
+]=]
+        write_file(app_name .. "/tailwind.config.js", tailwind_config)
+
+        local postcss_config = [=[export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+]=]
+        write_file(app_name .. "/postcss.config.js", postcss_config)
+    end
+
+    -- 5. .gitignore
+    local gitignore = [[node_modules/
+dist/
+build/
+target/
+.DS_Store
+*.log
+]]
+    write_file(app_name .. "/.gitignore", gitignore)
+
+    -- 6. lua-tauri local launcher script
+    local launcher_script = [=[#!/usr/bin/env bash
+set -e
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENGINE_PATH="${TAURI_LUA_ROOT}"
+
+if [ -z "$ENGINE_PATH" ] || [ ! -d "$ENGINE_PATH" ]; then
+    if [ -f "$PROJECT_DIR/../lua-tauri" ]; then
+        ENGINE_PATH="$(cd "$PROJECT_DIR/.." && pwd)"
+    fi
+fi
+
+if [ -z "$ENGINE_PATH" ] || [ ! -f "$ENGINE_PATH/lua-tauri" ]; then
+    echo "Error: Could not locate Tauri-Lua engine. Set TAURI_LUA_ROOT or place project near engine."
+    exit 1
+fi
+
+export TAURI_LUA_ROOT="$ENGINE_PATH"
+exec "$ENGINE_PATH/lua-tauri" "$@"
+]=]
+    write_file(app_name .. "/lua-tauri", launcher_script)
+    exec("chmod +x " .. app_name .. "/lua-tauri")
+
+    success("Created project `" .. app_name .. "` successfully!")
+    io.stdout:write("\n" .. colors.bold .. "  Next steps:\n" .. colors.reset)
+    io.stdout:write("    cd " .. app_name .. "\n")
+    if template ~= "vanilla" then
+        io.stdout:write("    " .. package_manager .. " install\n")
+    end
+    io.stdout:write("    ./lua-tauri dev\n\n")
+end
+
+-- ==========================================================
+-- Command: INIT
+-- ==========================================================
+local function cmd_init(args)
+    info("Initializing new Tauri-Lua project structure...")
+
+    exec("mkdir -p src-tauri/src")
+    exec("mkdir -p src-tauri/icons")
+    exec("mkdir -p src")
+
+    local default_conf = {
+        ["$schema"] = "https://schema.tauri.app/v2",
+        productName = "my-tauri-app",
+        version = "0.1.0",
+        identifier = "com.mytauriapp.dev",
+        build = {
+            frontendDist = "../src",
+            devUrl = ""
+        },
+        app = {
+            windows = {
+                {
+                    title = "My Tauri App",
+                    width = 1024,
+                    height = 720,
+                    resizable = true
+                }
+            },
+            security = {
+                capabilities = {
+                    "core:default",
+                    "fs:read-text-file",
+                    "dialog:open",
+                    "dialog:message"
+                }
+            }
+        }
+    }
+
+    if not file_exists("src-tauri/tauri.conf.json") then
+        write_file("src-tauri/tauri.conf.json", json.encode(default_conf))
+        success("Created src-tauri/tauri.conf.json")
+    else
+        warn("src-tauri/tauri.conf.json already exists, skipped.")
+    end
+
+    if not file_exists("src-tauri/src/main.lua") then
+        local sample_main = [[local Tauri = require("tauri")
+
+local conf = {}
+if __EMBEDDED_CONFIG_JSON__ then
+    conf = Tauri.json.decode(__EMBEDDED_CONFIG_JSON__) or {}
+end
+
+local app = Tauri.init(conf)
+
+app:register("greet", function(payload)
+    local name = payload and payload.name or "World"
+    return "Hello " .. name .. "! Greetings from Lua backend."
+end)
+
+app:create_main_window()
+]]
+        write_file("src-tauri/src/main.lua", sample_main)
+        success("Created src-tauri/src/main.lua")
+    else
+        warn("src-tauri/src/main.lua already exists, skipped.")
+    end
+
+    if not file_exists("src/index.html") then
+        local sample_html = [[<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>My Tauri App</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #0f172a;
+            color: #f8fafc;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .card {
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(12px);
+            padding: 2.5rem;
+            border-radius: 16px;
+            text-align: center;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+            max-width: 480px;
+        }
+        button {
+            background: linear-gradient(135deg, #38bdf8, #818cf8);
+            border: none;
+            padding: 10px 20px;
+            font-size: 15px;
+            font-weight: 600;
+            color: #0f172a;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: transform 0.15s, opacity 0.15s;
+        }
+        button:hover { opacity: 0.9; transform: scale(1.03); }
+        #output { margin-top: 1.5rem; font-size: 16px; color: #38bdf8; min-height: 24px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Tauri-Lua</h1>
+        <p>Ultra-fast native desktop app powered by LuaJIT.</p>
+        <button id="btn">Call Backend Command</button>
+        <div id="output"></div>
+    </div>
+    <script>
+        document.getElementById('btn').addEventListener('click', async () => {
+            const res = await window.__TAURI__.invoke('greet', { name: 'Developer' });
+            document.getElementById('output').textContent = res;
+        });
+    </script>
+</body>
+</html>
+]]
+        write_file("src/index.html", sample_html)
+        success("Created src/index.html")
+    end
+
+    success("Project initialized! Run `./lua-tauri dev` to start developing.")
+end
+
+-- ==========================================================
+-- Command: ICON
+-- ==========================================================
+local function cmd_icon(args)
+    local src_img = args[1]
+    if not src_img or not file_exists(src_img) then
+        error("Usage: lua-tauri icon <path/to/source-icon.png>")
+    end
+
+    info("Generating platform icons from " .. src_img)
+    exec("mkdir -p src-tauri/icons")
+
+    if ffi.os == "OSX" then
+        local iconset_dir = "src-tauri/icons/icon.iconset"
+        exec("mkdir -p " .. iconset_dir)
+        local sizes = { 16, 32, 64, 128, 256, 512, 1024 }
+        for _, s in ipairs(sizes) do
+            exec(string.format("sips -z %d %d %s --out %s/icon_%dx%d.png > /dev/null 2>&1", s, s, src_img, iconset_dir, s, s))
+            if s <= 512 then
+                local s2 = s * 2
+                exec(string.format("sips -z %d %d %s --out %s/icon_%dx%d@2x.png > /dev/null 2>&1", s2, s2, src_img, iconset_dir, s, s))
+            end
+        end
+        exec("iconutil -c icns " .. iconset_dir .. " -o src-tauri/icons/icon.icns 2>/dev/null || true")
+        exec("rm -rf " .. iconset_dir)
+        success("Generated src-tauri/icons/icon.icns")
+    else
+        warn("Automated icon generation is currently supported natively on macOS via sips/iconutil.")
+    end
+end
+
+local function cmd_clean()
+    info("Cleaning build artifacts and release bundles...")
+    os.execute("rm -rf build target .DS_Store **/.DS_Store 2>/dev/null")
+    success("Workspace cleaned successfully. Only source files remain.")
+end
+
+-- ==========================================================
+-- CLI Main Entrypoint
+-- ==========================================================
+local function print_help()
+    io.stdout:write([[
+Tauri-Lua CLI (Fast, lightweight native desktop runtime)
+
+USAGE:
+    lua-tauri <SUBCOMMAND>
+
+SUBCOMMANDS:
+    create   Scaffold a new Tauri-Lua project (Vanilla, React, Vue, Svelte)
+    dev      Start development server with live reload and HMR
+    build    Build release application and generate platform packages (.app, .dmg, .deb)
+    init     Initialize a new src-tauri/ configuration in current folder
+    icon     Generate multi-platform icons from a source PNG
+    clean    Remove build/ and target/ directories to reset workspace
+    help     Print this help message
+
+]])
+end
+
+local cmd = arg[1] or "help"
+local subargs = {}
+for i = 2, #arg do table.insert(subargs, arg[i]) end
+
+if cmd == "create" then
+    cmd_create(subargs)
+elseif cmd == "dev" then
+    cmd_dev(subargs)
+elseif cmd == "build" then
+    cmd_build(subargs)
+elseif cmd == "init" then
+    cmd_init(subargs)
+elseif cmd == "icon" then
+    cmd_icon(subargs)
+elseif cmd == "clean" then
+    cmd_clean()
+elseif cmd == "help" or cmd == "--help" or cmd == "-h" then
+    print_help()
+else
+    err("Unknown subcommand: " .. cmd)
+    print_help()
+    os.exit(1)
+end

@@ -1,0 +1,35 @@
+# Build directories and generated binaries
+/build/
+/target/
+bin/
+out/
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.exe
+*.app
+*.dmg
+*.deb
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE and editor configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary sockets and logs
+*.sock
+*.log
+*.tmp
