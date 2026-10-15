@@ -253,7 +253,7 @@ Generates all multi-resolution platform icon sets (`.icns`, `.ico`, 32x32, 128x1
 
 ## Declarative Configuration: `tauri.conf.json`
 
-The runtime configuration adheres to the modern **Tauri v2 schema**:
+The runtime configuration uses the **Tauri v2 schema URL as a base** and adds Tauri-Lua-specific extensions:
 
 ```json
 {
@@ -302,22 +302,21 @@ The runtime configuration adheres to the modern **Tauri v2 schema**:
 }
 ```
 
+> **Note:** `dependencies.luarocks` and `app.security.capabilities/scope` are Tauri-Lua runtime extensions and are not part of the official Tauri v2 JSON schema validator.
+
 ---
 
 ## Backend Programming Model (`main.lua`)
 
-Writing native commands in Lua is simple, expressive, and thread-safe:
+Writing native commands in Lua is simple and expressive:
 
 ```lua
 -- src-tauri/src/main.lua
 local Tauri = require("tauri")
 
--- 1. Initialize application with configuration
-local conf = {}
-if __EMBEDDED_CONFIG_JSON__ then
-    conf = Tauri.json.decode(__EMBEDDED_CONFIG_JSON__) or {}
-end
-local app = Tauri.init(conf)
+-- 1. Initialize application
+-- (Tauri.init() auto-loads embedded config when available)
+local app = Tauri.init()
 
 -- 2. Persistent Thread-Safe Application State
 if not app.state:has("counter") then
@@ -332,14 +331,9 @@ app:register("calculate_fibonacci", function(payload)
         a, b = b, a + b
     end
 
-    -- Update state across workers
-    local count = app.state:get("counter") + 1
-    app.state:set("counter", count)
-
     return {
         input = n,
         result = a,
-        totalInvocations = count,
         workerId = __ISOLATE_WORKER_ID__ or 0
     }
 end)
@@ -712,11 +706,11 @@ window.__TAURI__.event.listen("tauri://single-instance", (event) => {
 
 ### 9. Native Desktop Notifications (`notification` Parity)
 
-Tauri-Lua delivers non-blocking, operating-system-native desktop notifications with zero external subshell injection:
+Tauri-Lua delivers non-blocking, operating-system-native desktop notifications:
 
-* **macOS:** Cocoa `NSUserNotification` via `NSUserNotificationCenter` with a custom delegate (`userNotificationCenter:shouldPresentNotification:` returning `YES`), displaying notification banners with default system sound even when the application is active in the foreground.
+* **macOS:** Currently uses Cocoa `NSUserNotificationCenter` (legacy/deprecated API) for bundled apps, with an `osascript` fallback path during development sessions.
 * **Windows:** Asynchronous Windows 10/11 Toast Notifications via WinRT `ToastNotificationManager` dispatched with `SW_HIDE` (avoiding intrusive modal message boxes).
-* **Linux:** Non-blocking `posix_spawnp` of `notify-send` with discrete `argv` arrays (zero shell interpolation).
+* **Linux:** Non-blocking `posix_spawnp` of `notify-send` with discrete `argv` arrays.
 
 #### 1. Backend Usage (`Lua`)
 ```lua
@@ -908,7 +902,7 @@ All official plugins are maintained in the sibling repository [`lua-tauri-plugin
 
 | Plugin | Features & Security Architecture | Parity Status | Supported Drivers / Backends |
 | :--- | :--- | :---: | :--- |
-| [**`sql`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/sql) | **Multi-Database SQL Engine:** Transactional schema migrations (`_sqlx_migrations`), prepared statements with parameterized binds (`$1, $2` and `?`) against SQL injection, and automatic AppData sandboxing. | ✅ 1:1 Tauri 2 | **SQLite3** (`sqlite:...`), **PostgreSQL** (`postgres://...`), **MySQL** (`mysql://...`) |
+| [**`sql`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/sql) | **Multi-Database SQL Engine:** Transactional schema migrations (`_sqlx_migrations`), prepared statements with engine-appropriate parameter bindings (for example `?` or `$1`) against SQL injection, and automatic AppData sandboxing. | ✅ 1:1 Tauri 2 | **SQLite3** (`sqlite:...`), **PostgreSQL** (`postgres://...`), **MySQL** (`mysql://...`) |
 | [**`http`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/http) | **Native `libcurl` Client:** Complete CORS bypass for desktop frontends, native OS SSL/TLS certificate validation, connection pooling, and strict `allow`/`deny` URL scope enforcement. | ✅ 1:1 Tauri 2 | Native `libcurl` (HTTP/1.1, HTTP/2) |
 | [**`autostart`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/autostart) | **Launch at System Login:** macOS LaunchAgent `.plist` (`~/Library/LaunchAgents`), Linux XDG Autostart (`~/.config/autostart`), and Windows User Registry (`HKCU\...\Run`). | ✅ 1:1 Tauri 2 | Native OS Startup Handlers |
 | [**`window-state`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/window-state) | **Window State Persistence:** Automatically remembers and restores window dimensions, coordinates, and maximize/fullscreen states across restarts via `on_window_close` hook. | ✅ 1:1 Tauri 2 | OS Window Rect & State Cache |
@@ -931,8 +925,8 @@ The runtime automatically configures Lua search paths to locate plugins without 
 ### 3. Registering & Using Plugins (`app:plugin`)
 
 ```lua
-local tauri = require("tauri")
-local app = tauri.init()
+local Tauri = require("tauri")
+local app = Tauri.init()
 
 -- 1. Load Plugins by Name (Auto-Discovered)
 local sql = require("sql")
@@ -964,7 +958,7 @@ app:plugin(http.init({
 app:plugin(autostart.init())
 app:plugin(window_state.init())
 
-app:run()
+app:create_main_window()
 ```
 
 ---
@@ -976,8 +970,8 @@ Frontend code interacts with plugins using standard Tauri 2 `@tauri-apps/plugin-
 ```javascript
 // 1. SQL Plugin (@tauri-apps/plugin-sql parity)
 const db = await window.__TAURI__.sql.Database.load('sqlite:app.db');
-await db.execute('INSERT INTO users (name, email) VALUES ($1, $2);', ['Alice', 'alice@company.com']);
-const users = await db.select('SELECT * FROM users WHERE email = $1;', ['alice@company.com']);
+await db.execute('INSERT INTO users (name, email) VALUES (?, ?);', ['Alice', 'alice@company.com']);
+const users = await db.select('SELECT * FROM users WHERE email = ?;', ['alice@company.com']);
 console.table(users);
 
 // 2. HTTP Plugin (@tauri-apps/plugin-http parity - CORS Bypassed!)
@@ -993,7 +987,7 @@ if (!isAuto) {
 }
 
 // 4. Window State Plugin (@tauri-apps/plugin-window-state parity)
-const savedState = await window.__TAURI_WINDOW_STATE__.restore('main');
+const savedState = await window.__TAURI__.windowState.restore('main');
 console.log("Restored dimensions:", savedState.width, savedState.height);
 ```
 
@@ -1038,12 +1032,12 @@ Schema migrations guarantee that your local and remote database tables stay in s
 - When the client connects, any unapplied migrations run sequentially within a transaction.
 
 #### SQL Injection Immunity (OWASP CWE-89)
-All queries accept parameterized bindings using positional placeholders (`$1, $2, $3`) or standard question marks (`?`). User inputs are never concatenated directly into query strings, ensuring complete immunity from SQL injection:
+All queries accept parameterized bindings. Use placeholder syntax supported by your target backend/driver (for example `?` for SQLite/MySQL and positional placeholders like `$1` for PostgreSQL-compatible drivers). User inputs are never concatenated directly into query strings, ensuring strong SQL injection resistance:
 
 ```javascript
 // Safe parameterized query across all engines:
 const users = await db.select(
-  'SELECT id, name, email FROM users WHERE department = $1 AND active = $2;',
+  'SELECT id, name, email FROM users WHERE department = ? AND active = ?;',
   ['Engineering', true]
 );
 ```
@@ -1052,9 +1046,9 @@ const users = await db.select(
 
 **Backend (`src-tauri/src/main.lua`):**
 ```lua
-local tauri = require("tauri")
+local Tauri = require("tauri")
 local sql = require("sql")
-local app = tauri.init()
+local app = Tauri.init()
 
 -- Configure database with automatic forward migrations
 app:plugin(sql.init({
@@ -1080,7 +1074,7 @@ app:plugin(sql.init({
     }
 }))
 
-app:run()
+app:create_main_window()
 ```
 
 **Frontend (`src/main.js` or React / Vue):**
@@ -1091,13 +1085,13 @@ const db = await window.__TAURI__.sql.Database.load('sqlite:production.db');
 
 // 2. Insert with parameterized values
 await db.execute(
-  'INSERT INTO users (name, email, department) VALUES ($1, $2, $3);',
+  'INSERT INTO users (name, email, department) VALUES (?, ?, ?);',
   ['Alice Rossi', 'alice@company.com', 'Cybersecurity']
 );
 
 // 3. Query records safely
 const engineeringTeam = await db.select(
-  'SELECT * FROM users WHERE department = $1 ORDER BY id DESC;',
+  'SELECT * FROM users WHERE department = ? ORDER BY id DESC;',
   ['Cybersecurity']
 );
 
@@ -1299,7 +1293,7 @@ int main() {
 }
 ```
 
-### 3. Full Engine Embedding Example (`examples/host_c/main.c`)
+### 3. Full Engine Embedding Example ([`examples/host_c/main.c`](examples/host_c/main.c))
 
 For applications that need custom Lua scripts, bi-directional IPC, or direct `lua_State*` manipulation:
 
@@ -1377,7 +1371,7 @@ Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
    - Configurable declaratively in `tauri.conf.json` (`security.csp`) or dynamically via `app:set_csp("...")`.
 3. **Session Isolation Tokens:**
    - A cryptographically random 32-character session token is generated at startup and attached to `window.__TAURI_TOKEN__` as a read-only, non-configurable property.
-   - Injected or unauthorized scripts cannot forge IPC invocation payloads.
+   - This protects integrity against payload tampering and cross-origin invocation attempts, but it is **not** a substitute for XSS prevention inside trusted pages.
 4. **Strict Origin Gating:**
    - Every IPC dispatch verifies the native window's current URL origin. Requests originating from unapproved domains or unauthorized external pages are immediately rejected.
 5. **Capability & Program Whitelisting:**
@@ -1392,7 +1386,7 @@ Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
 
 | Layer | macOS | Linux | Windows |
 | :--- | :--- | :--- | :--- |
-| **Webview Core** | **WKWebView** (WebKit) | **WebKit2GTK** (WebKitGTK-4.0) | **WebView2** (Chromium Edge) |
+| **Webview Core** | **WKWebView** (WebKit) | **WebKit2GTK** (WebKitGTK-4.0 / 4.1) | **WebView2** (Chromium Edge) |
 | **Window Host** | Cocoa (`NSWindow`) | GTK3 (`GtkWindow`) | Win32 API (`HWND`) |
 | **IPC Mechanism** | `WKScriptMessageHandler` | WebKit User Content Controller | `ICoreWebView2::WebMessageReceived` |
 | **Native Menu Bar** | Cocoa (`NSMenu`, `NSMenuItem`) | GTK3 (`GtkMenuBar`, `GtkMenuItem`) | Win32 API (`HMENU`, `WM_COMMAND`) |
@@ -1565,7 +1559,7 @@ When scaling your desktop application with Tauri-Lua, adhere to these principal 
 1. **Leverage the Worker Isolate Pool:** Long-running calculations (compression, crypto, large JSON parsing) should always be delegated to registered commands. They run on the worker thread pool, keeping the main UI thread silky smooth.
 2. **Favor LuaJIT FFI over C Lua API:** When calling native platform libraries directly from Lua, use LuaJIT's `ffi` module. FFI calls are JIT-compiled into raw assembly and avoid Lua stack conversion overhead.
 3. **Respect Sandbox Scopes:** Never bypass `self.security:assert_scope()` in custom filesystem handlers. Always resolve system roots via `$APPDATA`, `$DESKTOP`, or `$HOME`.
-4. **Keep State Operations Serialized:** The built-in `app.state` provides synchronized atomic access across threads. Store metadata, counters, and cache tables inside `app.state` to ensure multi-isolate consistency.
+4. **Keep State Operations Serialized:** `app.state:get` and `app.state:set` are individually synchronized, but read-modify-write sequences are not atomic by default. Serialize critical updates through a single command path.
 
 ---
 

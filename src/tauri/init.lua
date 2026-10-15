@@ -1069,6 +1069,14 @@ local TAURI_CLIENT_SCRIPT = [[
         });
       }
     },
+    windowState: {
+      restore: function(label) {
+        if (window.__TAURI_WINDOW_STATE__ && typeof window.__TAURI_WINDOW_STATE__.restore === "function") {
+          return window.__TAURI_WINDOW_STATE__.restore(label);
+        }
+        return Promise.reject("window-state plugin not available");
+      }
+    },
     store: {
       get: function(k) { return makeInvoke("tauri:store:get", { key: k }); },
       set: function(k, v) { return makeInvoke("tauri:store:set", { key: k, value: v }); },
@@ -1106,7 +1114,15 @@ local g_tauri_instance = nil
 
 function Tauri.new(config)
     local self = setmetatable({}, Tauri)
-    config = config or {}
+    if type(config) ~= "table" then
+        config = {}
+    end
+    if next(config) == nil and type(__EMBEDDED_CONFIG_JSON__) == "string" and __EMBEDDED_CONFIG_JSON__ ~= "" then
+        local decoded = json.decode(__EMBEDDED_CONFIG_JSON__)
+        if type(decoded) == "table" then
+            config = decoded
+        end
+    end
     self.config = config
     local app_name = (config.package and config.package.name) or config.productName or "tauri-lua-app"
     if ffi.os == "Linux" then
@@ -1828,6 +1844,16 @@ function Tauri:create_main_window()
         end
     end
     self.windows["main"] = true
+end
+
+function Tauri:run()
+    if __IS_ISOLATE_WORKER__ then
+        return true
+    end
+    if not self.windows["main"] then
+        self:create_main_window()
+    end
+    return true
 end
 
 function __TAURI_DISPATCH_IPC__(label, seq, req)
