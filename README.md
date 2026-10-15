@@ -1367,13 +1367,13 @@ cl /O2 main.c /Iinclude /link build\taurilua.lib
 
 Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
 
-1. **Zero Command-Injection Process Spawning:**
-   - Raw `/bin/sh` shell invocations (`io.popen`) are completely bypassed in favor of direct OS process creation (`posix_spawnp` on POSIX and `CreateProcessA` on Windows).
-   - Shell control metacharacters (`;`, `&&`, `|`, `$()`, backticks) are delivered verbatim as harmless string parameters to the target binary.
+1. **Zero Command-Injection Architecture:**
+   - Raw shell invocations (`io.popen`, `os.execute`, `system()`) are completely eliminated across both core and plugins in favor of direct OS process creation (`posix_spawnp` on POSIX, `CreateProcessA` on Windows, and Win32 `FindFirstFileA` for directory operations).
+   - Shell control metacharacters (`;`, `&&`, `|`, `$()`, backticks) cannot trigger shell command injection.
    - Synchronous, thread-safe line buffering (`platform_process_read_line`) streams output chunks to `window.__TAURI__.Channel` in real time.
 2. **Dual-Layer Content Security Policy (CSP):**
    - Automatically injected as an HTTP response header (`Content-Security-Policy`) on custom scheme requests (`tauri://localhost`, `asset://`) and as a dynamic DOM `<meta http-equiv="Content-Security-Policy">` tag in all served HTML documents.
-   - Neutralizes Cross-Site Scripting (XSS) vectors by strictly enforcing allowed script and connect origins.
+   - Default policy enforces strict script origin restrictions without `'unsafe-inline'` in `script-src` (`default-src 'self' tauri: asset:; script-src 'self' tauri: asset:; style-src 'self' 'unsafe-inline'; ...`), neutralizing Cross-Site Scripting (XSS) vectors.
    - Configurable declaratively in `tauri.conf.json` (`security.csp`) or dynamically via `app:set_csp("...")`.
 3. **Session Isolation Tokens:**
    - A cryptographically random 32-character session token is generated at startup and attached to `window.__TAURI_TOKEN__` as a read-only, non-configurable property.
@@ -1385,6 +1385,8 @@ Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
    - The shell engine supports an optional `allowed_programs` list to restrict command execution exclusively to approved executables.
 6. **Path Scope Constraint Enforcement:**
    - Filesystem operations resolve path aliases (`$APPDATA`, `$DESKTOP`, `$HOME`) canonically to prevent directory traversal (`../`) attacks.
+7. **Transactional Atomic State Management (`app.state:update`):**
+   - In-memory shared state mutations are guarded by a recursive native mutex (`platform_state_lock` / `platform_state_unlock`), ensuring atomic read-modify-write transactions across concurrent threads or asynchronous callbacks without race conditions.
 
 ---
 

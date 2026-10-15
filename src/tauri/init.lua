@@ -1,4 +1,5 @@
 local ffi = require("ffi")
+local bit = bit or require("bit")
 
 -- ============================================================================
 -- Module & Plugin Search Paths (Auto-Discovery)
@@ -206,12 +207,39 @@ int platform_state_get_json(const char *key, char *out_val, int max_len);
 int platform_state_has(const char *key);
 void platform_state_delete(const char *key);
 void platform_state_clear();
+void platform_state_lock();
+void platform_state_unlock();
 
 void platform_set_csp(const char *csp);
 void *platform_process_spawn(const char *program, const char **args, int arg_count);
 int platform_process_read_line(void *handle, char *out_buf, int max_len);
 int platform_process_wait(void *handle);
 void platform_process_close(void *handle);
+
+int mkdir(const char *pathname, unsigned int mode);
+int _mkdir(const char *pathname);
+
+typedef struct _FILETIME {
+    unsigned long dwLowDateTime;
+    unsigned long dwHighDateTime;
+} FILETIME;
+
+typedef struct _WIN32_FIND_DATAA {
+    unsigned long dwFileAttributes;
+    FILETIME ftCreationTime;
+    FILETIME ftLastAccessTime;
+    FILETIME ftLastWriteTime;
+    unsigned long nFileSizeHigh;
+    unsigned long nFileSizeLow;
+    unsigned long dwReserved0;
+    unsigned long dwReserved1;
+    char cFileName[260];
+    char cAlternateFileName[14];
+} WIN32_FIND_DATAA;
+
+void* FindFirstFileA(const char *lpFileName, WIN32_FIND_DATAA *lpFindFileData);
+int FindNextFileA(void *hFindFile, WIN32_FIND_DATAA *lpFindFileData);
+int FindClose(void *hFindFile);
 
 typedef struct DIR DIR;
 typedef long off_t;
@@ -452,14 +480,22 @@ function State:update(key, callback)
     if type(callback) ~= "function" then
         error("State:update requires a function callback")
     end
-    local current = self:get(key)
-    local next_val = callback(current)
-    if next_val ~= nil then
-        self:set(key, next_val)
-    else
-        self:delete(key)
+    clib.platform_state_lock()
+    local ok, res = pcall(function()
+        local current = self:get(key)
+        local next_val = callback(current)
+        if next_val ~= nil then
+            self:set(key, next_val)
+        else
+            self:delete(key)
+        end
+        return next_val
+    end)
+    clib.platform_state_unlock()
+    if not ok then
+        error(res)
     end
-    return next_val
+    return res
 end
 
 function State:set(key, value)
@@ -516,6 +552,34 @@ function State:clear()
     clib.platform_state_clear()
 end
 
+local function safe_mkdir_p(target_path)
+    if not target_path or target_path == "" or target_path == "." or target_path == "/" then
+        return true
+    end
+    local normalized = target_path:gsub("\\", "/")
+    local prefix = ""
+    if normalized:match("^/") then
+        prefix = "/"
+        normalized = normalized:sub(2)
+    elseif normalized:match("^[A-Za-z]:/") then
+        prefix = normalized:sub(1, 3)
+        normalized = normalized:sub(4)
+    end
+
+    local current = prefix
+    for part in normalized:gmatch("[^/]+") do
+        if part ~= "" and part ~= "." then
+            current = (current == "" or current:match("/$")) and (current .. part) or (current .. "/" .. part)
+            if ffi.os == "Windows" then
+                pcall(function() clib._mkdir(current) end)
+            else
+                pcall(function() clib.mkdir(current, 493) end)
+            end
+        end
+    end
+    return true
+end
+
 local Store = {}
 Store.__index = Store
 
@@ -540,7 +604,7 @@ end
 function Store:save()
     local parent = self.path:match("^(.*)/[^/]+$")
     if parent and parent ~= "" then
-        os.execute("mkdir -p \"" .. parent .. "\" 2>/dev/null")
+        safe_mkdir_p(parent)
     end
     local f = io.open(self.path, "wb")
     if f then
@@ -1643,15 +1707,23 @@ function Tauri:_register_builtins()
         self.security:assert_scope(payload.path, self.base_paths)
         local entries = {}
         if ffi.os == "Windows" then
-            local cmd = string.format('dir "%s" /b', payload.path:gsub("/", "\\"))
-            local p = io.popen(cmd)
-            if p then
-                for line in p:lines() do
-                    if line ~= "" then
-                        table.insert(entries, { name = line, isDirectory = false })
+            local search_path = payload.path:gsub("[/\\]+$", "") .. "\\*"
+            local find_data = ffi.new("WIN32_FIND_DATAA")
+            local hFind = clib.FindFirstFileA(search_path, find_data)
+            if hFind ~= ffi.cast("void*", -1) and hFind ~= nil then
+                while true do
+                    local name = ffi.string(find_data.cFileName)
+                    if name ~= "." and name ~= ".." then
+                        local is_dir = (bit.band(find_data.dwFileAttributes, 0x10) ~= 0)
+                        table.insert(entries, { name = name, isDirectory = is_dir })
+                    end
+                    if clib.FindNextFileA(hFind, find_data) == 0 then
+                        break
                     end
                 end
-                p:close()
+                clib.FindClose(hFind)
+            else
+                error("Impossibile aprire la directory: " .. payload.path)
             end
         else
             local dir = clib.opendir(payload.path)

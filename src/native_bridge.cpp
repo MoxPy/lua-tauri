@@ -53,7 +53,7 @@ using namespace Microsoft::WRL;
 extern char **environ;
 #endif
 
-static std::string g_csp_policy = "default-src 'self' tauri: asset:; script-src 'self' tauri: asset: 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: tauri:; connect-src 'self' tauri: ipc: http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:* https://tauri.localhost;";
+static std::string g_csp_policy = "default-src 'self' tauri: asset:; script-src 'self' tauri: asset:; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: tauri:; connect-src 'self' tauri: ipc: http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:* https://tauri.localhost;";
 
 static std::string generate_session_token() {
     static const char chars[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -90,7 +90,7 @@ struct StateValue {
 };
 
 static std::unordered_map<std::string, StateValue> g_shared_state;
-static std::shared_mutex g_state_rw_mutex;
+static std::recursive_mutex g_state_mutex;
 
 class NativeThreadPool {
 public:
@@ -983,12 +983,39 @@ int platform_deeplink_register(const char *scheme) {
 }
 
 int platform_updater_install(const char *archive_path) {
+    if (!archive_path || archive_path[0] == '\0') return 0;
 #if defined(_WIN32)
-    std::string cmd = "tar -xf \"" + std::string(archive_path) + "\" -C .";
-    return system(cmd.c_str()) == 0 ? 1 : 0;
+    std::string cmd = "tar.exe -xf \"" + std::string(archive_path) + "\" -C .";
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    ZeroMemory(&pi, sizeof(pi));
+    si.cb = sizeof(si);
+    if (!CreateProcessA(NULL, const_cast<char *>(cmd.c_str()), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        return 0;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = 1;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return exit_code == 0 ? 1 : 0;
 #else
-    std::string cmd = "tar -xzf \"" + std::string(archive_path) + "\" -C .";
-    return system(cmd.c_str()) == 0 ? 1 : 0;
+    pid_t pid = -1;
+    char *const argv[] = {
+        const_cast<char *>("tar"),
+        const_cast<char *>("-xzf"),
+        const_cast<char *>(archive_path),
+        const_cast<char *>("-C"),
+        const_cast<char *>("./"),
+        nullptr
+    };
+    if (posix_spawnp(&pid, "tar", nullptr, nullptr, argv, environ) != 0) {
+        return 0;
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
 #endif
 }
 
@@ -1755,13 +1782,13 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
 
 void platform_state_set_string(const char *key, const char *val) {
     if (!key || !val) return;
-    std::unique_lock<std::shared_mutex> lock(g_state_rw_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     g_shared_state[key] = StateValue{StateType::String, val, 0.0};
 }
 
 int platform_state_get_string(const char *key, char *out_val, int max_len) {
     if (!key || !out_val || max_len <= 0) return 0;
-    std::shared_lock<std::shared_mutex> lock(g_state_rw_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     auto it = g_shared_state.find(key);
     if (it != g_shared_state.end() && it->second.type == StateType::String) {
         strncpy(out_val, it->second.str_data.c_str(), max_len - 1);
@@ -1773,13 +1800,13 @@ int platform_state_get_string(const char *key, char *out_val, int max_len) {
 
 void platform_state_set_number(const char *key, double val) {
     if (!key) return;
-    std::unique_lock<std::shared_mutex> lock(g_state_rw_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     g_shared_state[key] = StateValue{StateType::Number, "", val};
 }
 
 int platform_state_get_number(const char *key, double *out_val) {
     if (!key || !out_val) return 0;
-    std::shared_lock<std::shared_mutex> lock(g_state_rw_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     auto it = g_shared_state.find(key);
     if (it != g_shared_state.end() && it->second.type == StateType::Number) {
         *out_val = it->second.num_data;
@@ -1790,13 +1817,13 @@ int platform_state_get_number(const char *key, double *out_val) {
 
 void platform_state_set_json(const char *key, const char *json_val) {
     if (!key || !json_val) return;
-    std::unique_lock<std::shared_mutex> lock(g_state_rw_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     g_shared_state[key] = StateValue{StateType::Json, json_val, 0.0};
 }
 
 int platform_state_get_json(const char *key, char *out_val, int max_len) {
     if (!key || !out_val || max_len <= 0) return 0;
-    std::shared_lock<std::shared_mutex> lock(g_state_rw_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     auto it = g_shared_state.find(key);
     if (it != g_shared_state.end() && it->second.type == StateType::Json) {
         strncpy(out_val, it->second.str_data.c_str(), max_len - 1);
@@ -1808,19 +1835,27 @@ int platform_state_get_json(const char *key, char *out_val, int max_len) {
 
 int platform_state_has(const char *key) {
     if (!key) return 0;
-    std::shared_lock<std::shared_mutex> lock(g_state_rw_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     return g_shared_state.find(key) != g_shared_state.end() ? 1 : 0;
 }
 
 void platform_state_delete(const char *key) {
     if (!key) return;
-    std::unique_lock<std::shared_mutex> lock(g_state_rw_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     g_shared_state.erase(key);
 }
 
 void platform_state_clear() {
-    std::unique_lock<std::shared_mutex> lock(g_state_rw_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     g_shared_state.clear();
+}
+
+void platform_state_lock() {
+    g_state_mutex.lock();
+}
+
+void platform_state_unlock() {
+    g_state_mutex.unlock();
 }
 
 void platform_set_csp(const char *csp) {

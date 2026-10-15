@@ -77,6 +77,8 @@ int platform_state_get_json(const char *key, char *out_val, int max_len);
 int platform_state_has(const char *key);
 void platform_state_delete(const char *key);
 void platform_state_clear();
+void platform_state_lock();
+void platform_state_unlock();
 
 void platform_set_csp(const char *csp);
 void *platform_process_spawn(const char *program, const char **args, int arg_count);
