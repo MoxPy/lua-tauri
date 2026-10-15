@@ -83,7 +83,7 @@ flowchart TB
     end
 
     UI --> Client
-    Client -->|Custom Protocol tauri://| WK
+    Client -->|"Custom Protocol tauri://"| WK
     WK --> Origin
     Origin --> Router
     Router -->|UI Events / Windowing| MainState
@@ -882,7 +882,7 @@ Tauri-Lua implements a decoupled, first-class **Plugin Architecture** matching t
 flowchart LR
     subgraph Host["Tauri-Lua Host App"]
         App["app = tauri.init()"]
-        App -->|app:plugin()| Registry["Plugin Registry"]
+        App -->|"app:plugin()"| Registry["Plugin Registry"]
     end
 
     subgraph Plugins["Official Plugins (lua-tauri-plugins)"]
@@ -897,10 +897,10 @@ flowchart LR
     Registry --> Autostart
     Registry --> WindowState
 
-    SQL -->|IPC: plugin:sql|exec| Webview["Client Webview"]
-    HTTP -->|IPC: plugin:http|fetch| Webview
-    Autostart -->|IPC: plugin:autostart|enable| Webview
-    WindowState -->|Lifecycle: on_window_close| Webview
+    SQL -->|"IPC: plugin:sql:exec"| Webview["Client Webview"]
+    HTTP -->|"IPC: plugin:http:fetch"| Webview
+    Autostart -->|"IPC: plugin:autostart:enable"| Webview
+    WindowState -->|"Lifecycle: on_window_close"| Webview
 ```
 
 ### 1. Official Plugin Catalog
