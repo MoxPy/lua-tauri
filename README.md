@@ -30,6 +30,7 @@ Building small-to-medium desktop applications with Electron produces 150+ MB ins
 * **Enterprise Cybersecurity:** Hardened process spawning (zero command injection), dual-layer Content Security Policy (CSP), Origin Isolation, and Capability/Scope gating modeled after Tauri v2.
 * **Instant App Scaffolding:** Interactive `lua-tauri create` command supporting Vanilla, React, Vue, Svelte, and Tailwind CSS with pre-wired Vite templates.
 * **Custom Native Menu Bar (Tauri 2 / `muda` Parity):** Fluent OOP & declarative menus (`Menu`, `Submenu`, `MenuItem`, `CheckMenuItem`, `PredefinedMenuItem`) with OS responder chain integration and dual Lua/JS event routing.
+* **First-Class Plugin Architecture (Tauri 2 Parity):** Modular extensibility (`app:plugin`) with dynamic module auto-discovery, guest JavaScript injection, and full lifecycle event hooks.
 * **Non-Blocking Multi-Core Concurrency:** Built-in Worker Isolate Pool distributes CPU-heavy workloads across hardware threads without stalling the 60/120 FPS UI loop.
 
 ---
@@ -834,6 +835,139 @@ const imageBase64 = await window.__TAURI__.clipboard.readImage();
 // 4. Clear
 await window.__TAURI__.clipboard.clear();
 ```
+
+---
+
+## Plugin System & Extensibility (Tauri v2 Parity)
+
+Tauri-Lua implements a decoupled, first-class **Plugin Architecture** matching the design patterns of [Tauri 2 plugins](https://github.com/tauri-apps/plugins-workspace). The core runtime remains lean and bloat-free, while domain-specific capabilities (e.g. SQLite databases, persistent window state, autostart, biometrics) can be loaded modularly.
+
+```mermaid
+flowchart LR
+    subgraph Host["Tauri-Lua Host App"]
+        App["app = tauri.init()"]
+        App -->|app:plugin()| Registry["Plugin Registry"]
+    end
+
+    subgraph Plugins["Modular Plugins (lua-tauri-plugins)"]
+        SQL["plugin-sql (SQLite / FFI)"]
+        WindowState["plugin-window-state"]
+        Custom["custom-plugin"]
+    end
+
+    Registry --> SQL
+    Registry --> WindowState
+    Registry --> Custom
+
+    SQL -->|IPC: plugin:sql|exec| Webview["Client Webview"]
+    WindowState -->|Lifecycle: on_window_close| Webview
+```
+
+### 1. Module Auto-Discovery (`package.path` & `package.cpath`)
+
+The runtime automatically configures Lua search paths to locate plugins without tedious relative paths or environment variables:
+
+| Location | Path Pattern | Use Case |
+| :--- | :--- | :--- |
+| **External Monorepo** | `../lua-tauri-plugins/plugins/?/init.lua` | Sibling repository for development (recommended) |
+| **Project Local** | `./plugins/?.lua` & `./plugins/?/init.lua` | Project-specific or private plugins |
+| **Node Modules** | `./node_modules/@tauri-apps/plugin-?/init.lua` | Installed via npm/pnpm/yarn |
+| **Native Binaries** | `?.dylib` (macOS), `?.so` (Linux), `?.dll` (Windows) | Compiled C/C++ FFI extensions |
+
+### 2. Registering Plugins (`app:plugin`)
+
+Plugins can be registered fluently on the application instance:
+
+```lua
+local tauri = require("tauri")
+local app = tauri.init()
+
+-- 1. Using require from external or local plugins
+local sql = require("plugins.sql")
+local window_state = require("plugins.window-state")
+
+app:plugin(sql.init({ db_name = "app.db" }))
+app:plugin(window_state.init())
+
+app:run()
+```
+
+### 3. Plugin Authoring Guide
+
+A Tauri-Lua plugin is a Lua module exposing a `setup(app, plugin)` lifecycle hook, optional client-side JavaScript injection (`js`), and event handlers:
+
+```lua
+-- plugins/window-state/init.lua
+local tauri = require("tauri")
+
+local window_state = {}
+
+function window_state.init(options)
+    options = options or {}
+
+    return tauri.plugin("window-state", {
+        -- 1. Setup hook: Register IPC commands and initialize resources
+        setup = function(app, plugin)
+            app:register("plugin:window-state|save", function(args)
+                print("[WINDOW-STATE] Saving dimensions:", args.width, args.height)
+                app.state:set("window_dimensions", { width = args.width, height = args.height })
+                return { success = true }
+            end)
+
+            app:register("plugin:window-state|restore", function()
+                return app.state:get("window_dimensions") or { width = 960, height = 640 }
+            end)
+        end,
+
+        -- 2. Optional client-side JS auto-injected into all created webviews
+        js = [[
+            window.__TAURI_WINDOW_STATE__ = {
+                save: () => window.__TAURI__.invoke('plugin:window-state|save', {
+                    width: window.innerWidth,
+                    height: window.innerHeight
+                }),
+                restore: () => window.__TAURI__.invoke('plugin:window-state|restore')
+            };
+        ]],
+
+        -- 3. Lifecycle Hooks
+        on_window_close = function(app, event)
+            print("[PLUGIN: window-state] Window closing, auto-saving state...")
+        end,
+
+        on_theme_changed = function(app, theme)
+            print("[PLUGIN: window-state] OS Theme changed:", theme)
+        end,
+
+        on_file_drop = function(app, data)
+            print("[PLUGIN: window-state] Files dropped:", #data.paths)
+        end,
+
+        on_single_instance = function(app, payload)
+            print("[PLUGIN: window-state] Secondary instance launched with args:", #payload.args)
+        end
+    })
+end
+
+return window_state
+```
+
+### 4. Invoking Plugin Commands in Frontend (`JavaScript / TypeScript`)
+
+Frontend code invokes plugin endpoints using the standard Tauri 2 `plugin:<name>|<command>` naming convention:
+
+```javascript
+// Native invoke compatible with @tauri-apps/api
+const state = await window.__TAURI__.invoke('plugin:window-state|restore');
+console.log("Restored Window State:", state);
+
+// Or via the injected helper:
+await window.__TAURI_WINDOW_STATE__.save();
+```
+
+### 5. CLI Hot-Reload Integration
+
+The development server (`./lua-tauri dev`) actively watches both `./plugins/` and `../lua-tauri-plugins/plugins/`. Any changes saved in your plugin files immediately trigger hot-reloading of the backend runtime.
 
 ---
 
