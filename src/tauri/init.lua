@@ -4,9 +4,51 @@ local ffi = require("ffi")
 -- Module & Plugin Search Paths (Auto-Discovery)
 -- ============================================================================
 local function setup_module_search_paths()
+    local function get_executable_dir()
+        local dir = nil
+        pcall(function()
+            if ffi.os == "OSX" then
+                ffi.cdef[[
+                    int _NSGetExecutablePath(char* buf, uint32_t* bufsize);
+                ]]
+                local buf = ffi.new("char[1024]")
+                local size = ffi.new("uint32_t[1]", 1024)
+                if ffi.C._NSGetExecutablePath(buf, size) == 0 then
+                    local full_path = ffi.string(buf)
+                    dir = full_path:match("^(.*)/[^/]+$")
+                end
+            elseif ffi.os == "Linux" then
+                ffi.cdef[[
+                    ssize_t readlink(const char *path, char *buf, size_t bufsiz);
+                ]]
+                local buf = ffi.new("char[1024]")
+                local len = ffi.C.readlink("/proc/self/exe", buf, 1024)
+                if len > 0 then
+                    local full_path = ffi.string(buf, len)
+                    dir = full_path:match("^(.*)/[^/]+$")
+                end
+            elseif ffi.os == "Windows" then
+                ffi.cdef[[
+                    uint32_t GetModuleFileNameA(void* hModule, char* lpFilename, uint32_t nSize);
+                ]]
+                local buf = ffi.new("char[1024]")
+                local len = ffi.C.GetModuleFileNameA(nil, buf, 1024)
+                if len > 0 then
+                    local full_path = ffi.string(buf, len):gsub("\\", "/")
+                    dir = full_path:match("^(.*)/[^/]+$")
+                end
+            end
+        end)
+        return dir
+    end
+
+    local exec_dir = get_executable_dir()
+
     local extra_lua_paths = {
         "./?.lua",
         "./?/init.lua",
+        "./src-tauri/?.lua",
+        "./src-tauri/?/init.lua",
         "./plugins/?.lua",
         "./plugins/?/init.lua",
         "./plugins/?/src/?.lua",
@@ -17,7 +59,16 @@ local function setup_module_search_paths()
         "../plugins/?/init.lua",
         "./node_modules/?/init.lua",
         "./node_modules/@tauri-apps/plugin-?/init.lua",
-        "./node_modules/lua-tauri-plugin-?/init.lua"
+        "./node_modules/lua-tauri-plugin-?/init.lua",
+        -- Local Hermetic LuaRocks tree paths (development)
+        "./src-tauri/.rocks/share/lua/5.1/?.lua",
+        "./src-tauri/.rocks/share/lua/5.1/?/init.lua",
+        "./.rocks/share/lua/5.1/?.lua",
+        "./.rocks/share/lua/5.1/?/init.lua",
+        "../src-tauri/.rocks/share/lua/5.1/?.lua",
+        "../src-tauri/.rocks/share/lua/5.1/?/init.lua",
+        "../.rocks/share/lua/5.1/?.lua",
+        "../.rocks/share/lua/5.1/?/init.lua"
     }
 
     local extra_c_paths = {
@@ -29,8 +80,47 @@ local function setup_module_search_paths()
         "./plugins/?.dll",
         "../lua-tauri-plugins/plugins/?/?.so",
         "../lua-tauri-plugins/plugins/?/?.dylib",
-        "../lua-tauri-plugins/plugins/?/?.dll"
+        "../lua-tauri-plugins/plugins/?/?.dll",
+        -- Local Hermetic LuaRocks C modules (development)
+        "./src-tauri/.rocks/lib/lua/5.1/?.so",
+        "./src-tauri/.rocks/lib/lua/5.1/?.dylib",
+        "./src-tauri/.rocks/lib/lua/5.1/?.dll",
+        "./.rocks/lib/lua/5.1/?.so",
+        "./.rocks/lib/lua/5.1/?.dylib",
+        "./.rocks/lib/lua/5.1/?.dll",
+        "../src-tauri/.rocks/lib/lua/5.1/?.so",
+        "../src-tauri/.rocks/lib/lua/5.1/?.dylib",
+        "../src-tauri/.rocks/lib/lua/5.1/?.dll",
+        "../.rocks/lib/lua/5.1/?.so",
+        "../.rocks/lib/lua/5.1/?.dylib",
+        "../.rocks/lib/lua/5.1/?.dll"
     }
+
+    -- Bundled production runtime discovery
+    if exec_dir then
+        if exec_dir:match("/Contents/MacOS$") then
+            -- macOS App Bundle (.app/Contents/Resources/rocks)
+            local res_dir = exec_dir:gsub("/MacOS$", "/Resources")
+            table.insert(extra_lua_paths, res_dir .. "/rocks/share/lua/5.1/?.lua")
+            table.insert(extra_lua_paths, res_dir .. "/rocks/share/lua/5.1/?/init.lua")
+            table.insert(extra_c_paths, res_dir .. "/rocks/lib/lua/5.1/?.so")
+            table.insert(extra_c_paths, res_dir .. "/rocks/lib/lua/5.1/?.dylib")
+        else
+            -- Linux / Windows standalone or installed packages
+            table.insert(extra_lua_paths, exec_dir .. "/rocks/share/lua/5.1/?.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/rocks/share/lua/5.1/?/init.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/../Resources/rocks/share/lua/5.1/?.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/../Resources/rocks/share/lua/5.1/?/init.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/../share/rocks/share/lua/5.1/?.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/../share/rocks/share/lua/5.1/?/init.lua")
+            table.insert(extra_c_paths, exec_dir .. "/rocks/lib/lua/5.1/?.so")
+            table.insert(extra_c_paths, exec_dir .. "/rocks/lib/lua/5.1/?.dylib")
+            table.insert(extra_c_paths, exec_dir .. "/rocks/lib/lua/5.1/?.dll")
+            table.insert(extra_c_paths, exec_dir .. "/../Resources/rocks/lib/lua/5.1/?.so")
+            table.insert(extra_c_paths, exec_dir .. "/../Resources/rocks/lib/lua/5.1/?.dylib")
+            table.insert(extra_c_paths, exec_dir .. "/../share/rocks/lib/lua/5.1/?.so")
+        end
+    end
 
     local current_path = package.path or ""
     for _, p in ipairs(extra_lua_paths) do

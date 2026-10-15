@@ -207,6 +207,19 @@ Generates optimized production distributions:
 ./lua-tauri build
 ```
 
+### `lua-tauri rocks [command]`
+Manages hermetic, isolated **LuaRocks** dependencies for your application inside `src-tauri/.rocks/`:
+* `lua-tauri rocks install [rock] [ver]` — Installs declared rocks from `tauri.conf.json` or an individual rock.
+* `lua-tauri rocks list` — Lists all rocks currently installed in the project's hermetic tree.
+* `lua-tauri rocks remove <rock>` — Uninstalls a rock from the hermetic tree.
+* `lua-tauri rocks clean` — Clears the local `.rocks/` directory (or use `lua-tauri clean --all`).
+* `lua-tauri rocks path` — Prints the exact `LUA_PATH` and `LUA_CPATH` exports for the local tree.
+
+```bash
+./lua-tauri rocks install inspect
+./lua-tauri rocks list
+```
+
 ### `lua-tauri init`
 Scaffolds a `src-tauri/` directory structure with a baseline `tauri.conf.json` and boilerplate `main.lua` into any existing web project.
 
@@ -238,6 +251,13 @@ The runtime configuration adheres to the modern **Tauri v2 schema**:
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
+  },
+  "dependencies": {
+    "luarocks": [
+      "inspect",
+      "luasocket 3.1.0-1",
+      { "name": "lua-cjson", "version": "2.1.0" }
+    ]
   },
   "app": {
     "windows": [
@@ -970,6 +990,106 @@ The development server (`./lua-tauri dev`) actively watches both `./plugins/` an
 
 ---
 
+## Hermetic LuaRocks Integration & Dependency Ecosystem
+
+Tauri-Lua features seamless, first-class integration with the global **LuaRocks** package ecosystem. Rather than polluting global system directories (`/usr/local` or `~/.luarocks`), dependencies are managed with **hermetic isolation** inside your project tree (`src-tauri/.rocks/`) and automatically packaged into release bundles.
+
+```text
+                    tauri.conf.json
+              [dependencies.luarocks]
+                         │
+                         ▼
+             Hermetic Tree Isolation
+               (src-tauri/.rocks/)
+            ├── share/lua/5.1/  (Lua modules)
+            └── lib/lua/5.1/    (C shared objects: .so / .dylib / .dll)
+                         │
+       ┌─────────────────┴─────────────────┐
+       ▼                                   ▼
+Development Mode                     Production Bundling
+(Auto-Discovered                     (Packaged in Bundle)
+ package.path / package.cpath)       ├── macOS: Contents/Resources/rocks/
+                                     ├── Linux: /usr/share/<app>/rocks/
+                                     └── Windows: <app>-standalone\rocks\
+```
+
+### 1. Declarative Dependencies (`tauri.conf.json`)
+
+Declare your required rocks directly in `tauri.conf.json`. Both pure Lua packages and compiled native C extensions (e.g. `luasocket`, `lua-cjson`, `inspect`, `lsqlite3`) are fully supported:
+
+```json
+{
+  "$schema": "https://schema.tauri.app/v2",
+  "productName": "my-tauri-app",
+  "dependencies": {
+    "luarocks": [
+      "inspect",
+      "luasocket 3.1.0-1",
+      {
+        "name": "lua-cjson",
+        "version": "2.1.0"
+      },
+      {
+        "name": "lua-resty-jwt",
+        "server": "https://luarocks.org/dev"
+      }
+    ]
+  }
+}
+```
+
+*Note: If your project includes a standard `*.rockspec` file in the root or `src-tauri/`, Tauri-Lua automatically detects it and can resolve dependencies directly via `luarocks install --only-deps`.*
+
+### 2. Automatic Synchronization & CLI Commands
+
+- **Zero-Friction Dev & Build:** When you run `./lua-tauri dev` or `./lua-tauri build`, Tauri-Lua checks `src-tauri/.rocks/` and automatically synchronizes any missing dependencies.
+- **Dedicated CLI Subcommands:**
+  ```bash
+  # Synchronize all dependencies declared in tauri.conf.json
+  ./lua-tauri rocks install
+
+  # Install an individual rock into the local hermetic tree
+  ./lua-tauri rocks install luasocket 3.1.0-1
+
+  # List all installed rocks in the local tree
+  ./lua-tauri rocks list
+
+  # Remove a rock from the local tree
+  ./lua-tauri rocks remove inspect
+
+  # Clean the hermetic .rocks directory
+  ./lua-tauri rocks clean
+  # Or clean build artifacts + rocks:
+  ./lua-tauri clean --all
+  ```
+
+### 3. Production Bundle Packaging
+
+When building for production (`./lua-tauri build`), Tauri-Lua packages the hermetic `.rocks` tree directly into the final platform distributions:
+- **macOS (`.app` / `.dmg`):** Inlined into `YourApp.app/Contents/Resources/rocks/`
+- **Linux (`.deb`):** Inlined into `/usr/share/<app-name>/rocks/`
+- **Windows Standalone:** Inlined into `target/bundle/windows/<app-name>-standalone\rocks\`
+
+### 4. Zero-Config Runtime Resolution
+
+`src/tauri/init.lua` dynamically discovers the host executable path across all platforms (`_NSGetExecutablePath` on macOS, `/proc/self/exe` on Linux, `GetModuleFileNameA` on Windows) and configures `package.path` and `package.cpath` to locate both Lua source modules and compiled C extensions (`.so`, `.dylib`, `.dll`) seamlessly.
+
+Simply `require` your rock anywhere in backend Lua code:
+```lua
+local inspect = require("inspect")
+local socket = require("socket")
+
+print("Backend socket version:", socket._VERSION)
+```
+
+### 5. Cybersecurity & Defensive Architecture (OWASP / CWE-78)
+
+- **Command Injection Prevention (CWE-78):** Every rock name, version, and server URL parsed from configuration or CLI arguments is validated against strict alphanumeric whitelists. Any forbidden characters (`;`, `&`, `|`, `$`, backticks, newlines) are rejected immediately prior to command construction.
+- **Hermetic Isolation (CWE-829 / CWE-427):** Uses `--tree src-tauri/.rocks` to isolate third-party dependencies from the host environment, completely preventing global system pollution, permission escalation risks, and DLL search-order hijacking.
+- **Diagnostic Guidance:** If `luarocks` is not found on the developer's system, Tauri-Lua gracefully prints platform-specific installation instructions (`brew install luarocks`, `apt install luarocks`, etc.) rather than crashing with unhandled shell errors.
+
+---
+
 ## Security Architecture (Tauri v2 Parity)
 
 Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
@@ -1016,12 +1136,20 @@ Distributing desktop applications across heterogeneous operating systems require
 target/bundle/
 ├── macos/
 │   └── tauri-lua-app.app           # Self-contained macOS Application Bundle
+│       └── Contents/Resources/
+│           ├── dist/               # Webview frontend assets
+│           └── rocks/              # Bundled hermetic LuaRocks & C modules
 ├── dmg/
 │   └── tauri-lua-app_1.0.0_x64.dmg # Compressed mountable Apple Disk Image
 ├── deb/
 │   └── tauri-lua-app_1.0.0_amd64.deb # Standard Debian / Ubuntu package
+│       └── usr/share/<app-name>/
+│           ├── dist/
+│           └── rocks/
 └── windows/
     └── tauri-lua-app-standalone/   # Portable Windows distribution
+        ├── dist/
+        └── rocks/
 ```
 
 ### 1. Linux Distribution (`.deb` & Shared Libraries)

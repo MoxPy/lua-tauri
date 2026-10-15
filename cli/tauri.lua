@@ -262,6 +262,323 @@ local function ensure_runtime_built(release_mode)
 end
 
 -- ==========================================================
+-- Hermetic LuaRocks Dependency Management & Bundler
+-- ==========================================================
+local function shell_quote(str)
+    return "'" .. tostring(str):gsub("'", "'\\''") .. "'"
+end
+
+local function validate_rock_identifier(str, field_name)
+    if type(str) ~= "string" or str == "" then
+        return nil, field_name .. " must be a non-empty string"
+    end
+    -- Strictly reject shell metacharacters and control characters (CWE-78)
+    if str:find("[;&|`$><()\\!%c]") then
+        return nil, "Security error: invalid characters in " .. field_name .. " ('" .. str .. "')"
+    end
+    return str, nil
+end
+
+local function validate_rock_name(name)
+    local val, err_msg = validate_rock_identifier(name, "rock name")
+    if not val then return nil, err_msg end
+    if not name:match("^[a-zA-Z0-9%-_%.]+$") then
+        return nil, "Security error: invalid format for rock name '" .. name .. "' (only alphanumeric, '-', '_', '.' allowed)"
+    end
+    return name, nil
+end
+
+local function validate_rock_version(ver)
+    if not ver or ver == "" then return nil, nil end
+    local val, err_msg = validate_rock_identifier(ver, "rock version")
+    if not val then return nil, err_msg end
+    if not ver:match("^[a-zA-Z0-9%-_%.%~%s%<%>%=>%:]+$") then
+        return nil, "Security error: invalid format for rock version '" .. ver .. "'"
+    end
+    return ver, nil
+end
+
+local function validate_rock_server(srv)
+    if not srv or srv == "" then return nil, nil end
+    local val, err_msg = validate_rock_identifier(srv, "rock server")
+    if not val then return nil, err_msg end
+    if not srv:match("^https?://[a-zA-Z0-9%-_%.%:/]+$") then
+        return nil, "Security error: rock server must be a valid HTTP/HTTPS URL ('" .. srv .. "')"
+    end
+    return srv, nil
+end
+
+local function get_rocks_tree_dir()
+    if file_exists("src-tauri") then
+        return "src-tauri/.rocks"
+    end
+    return ".rocks"
+end
+
+local function find_rockspec_file()
+    local candidates = {
+        "src-tauri/*.rockspec",
+        "*.rockspec"
+    }
+    for _, pattern in ipairs(candidates) do
+        local p = io.popen("ls " .. pattern .. " 2>/dev/null | head -n 1")
+        if p then
+            local file = p:read("*l")
+            p:close()
+            if file and file ~= "" and file_exists(file) then
+                return file
+            end
+        end
+    end
+    return nil
+end
+
+local function find_luarocks_bin()
+    local p = io.popen("which luarocks 2>/dev/null")
+    local out = p and p:read("*l")
+    if p then p:close() end
+    if out and out ~= "" and file_exists(out) then
+        return out
+    end
+    local candidates = {
+        "/opt/homebrew/bin/luarocks",
+        "/usr/local/bin/luarocks",
+        "/usr/bin/luarocks",
+        "C:\\Program Files\\LuaRocks\\luarocks.exe",
+        "C:\\ProgramData\\chocolatey\\bin\\luarocks.exe"
+    }
+    for _, c in ipairs(candidates) do
+        if file_exists(c) then return c end
+    end
+    return nil
+end
+
+local function print_luarocks_missing_guidance()
+    warn("LuaRocks CLI (`luarocks`) was not detected on your system.")
+    io.stdout:write(colors.cyan .. "  -> To install LuaRocks for your operating system:\n" .. colors.reset)
+    if ffi.os == "OSX" then
+        io.stdout:write("     macOS:            brew install luarocks\n")
+    elseif ffi.os == "Linux" then
+        io.stdout:write("     Ubuntu / Debian:  sudo apt install luarocks\n")
+        io.stdout:write("     Fedora / RHEL:    sudo dnf install luarocks\n")
+        io.stdout:write("     Arch Linux:       sudo pacman -S luarocks\n")
+    else
+        io.stdout:write("     Windows:          winget install luarocks  (or: choco install luarocks)\n")
+    end
+    io.stdout:write("\n")
+end
+
+local function extract_luarocks_dependencies(conf)
+    local list = {}
+    local raw = nil
+    if conf.dependencies and conf.dependencies.luarocks then
+        raw = conf.dependencies.luarocks
+    elseif conf.dependencies and conf.dependencies.rocks then
+        raw = conf.dependencies.rocks
+    elseif conf.tauri and conf.tauri.dependencies and conf.tauri.dependencies.luarocks then
+        raw = conf.tauri.dependencies.luarocks
+    elseif conf.rocks then
+        raw = conf.rocks
+    elseif conf.bundle and conf.bundle.luarocks then
+        raw = conf.bundle.luarocks
+    end
+
+    if type(raw) == "table" then
+        for _, item in ipairs(raw) do
+            if type(item) == "string" then
+                local name, ver = item:match("^([%w%-_%.]+)%s*(.*)$")
+                if name then
+                    table.insert(list, { name = name, version = (ver ~= "" and ver or nil) })
+                end
+            elseif type(item) == "table" and item.name then
+                table.insert(list, {
+                    name = item.name,
+                    version = item.version,
+                    server = item.server
+                })
+            end
+        end
+    end
+    return list
+end
+
+local function is_rock_installed(rocks_dir, rock_name)
+    local manifest_dir = rocks_dir .. "/lib/luarocks/rocks-5.1/" .. rock_name
+    return file_exists(manifest_dir)
+end
+
+local function install_single_rock(rock_def, rocks_dir, luarocks_bin)
+    local name, name_err = validate_rock_name(rock_def.name)
+    if not name then
+        err(name_err)
+        return false
+    end
+
+    local ver, ver_err = validate_rock_version(rock_def.version)
+    if ver_err then
+        err(ver_err)
+        return false
+    end
+
+    local srv, srv_err = validate_rock_server(rock_def.server)
+    if srv_err then
+        err(srv_err)
+        return false
+    end
+
+    local desc = name .. (ver and (" " .. ver) or "")
+    info("Installing LuaRock `" .. desc .. "` into hermetic tree: " .. rocks_dir)
+
+    local cmd = shell_quote(luarocks_bin) .. " --tree " .. shell_quote(rocks_dir) .. " --lua-version 5.1 install " .. shell_quote(name)
+    if ver and ver ~= "" then
+        cmd = cmd .. " " .. shell_quote(ver)
+    end
+    if srv and srv ~= "" then
+        cmd = cmd .. " --server " .. shell_quote(srv)
+    end
+
+    running(cmd)
+    local ok = os.execute(cmd)
+    if ok == 0 or ok == true then
+        success("Successfully installed `" .. desc .. "`")
+        return true
+    else
+        err("Failed to install LuaRock `" .. desc .. "`")
+        return false
+    end
+end
+
+local function ensure_rocks_installed(conf, force)
+    local rocks = extract_luarocks_dependencies(conf)
+    local rockspec_file = find_rockspec_file()
+    if #rocks == 0 and not rockspec_file then
+        return true
+    end
+
+    local rocks_dir = get_rocks_tree_dir()
+    local luarocks_bin = find_luarocks_bin()
+
+    if not luarocks_bin then
+        local all_present = true
+        for _, r in ipairs(rocks) do
+            if not is_rock_installed(rocks_dir, r.name) then
+                all_present = false
+                break
+            end
+        end
+        if all_present and not rockspec_file then
+            return true
+        end
+
+        print_luarocks_missing_guidance()
+        error("Cannot synchronize LuaRocks dependencies because `luarocks` executable was not found.")
+    end
+
+    if rockspec_file then
+        info("Detected rockspec: `" .. rockspec_file .. "` - checking dependencies...")
+        local cmd = shell_quote(luarocks_bin) .. " --tree " .. shell_quote(rocks_dir) .. " --lua-version 5.1 install --only-deps " .. shell_quote(rockspec_file)
+        running(cmd)
+        os.execute(cmd)
+    end
+
+    if #rocks > 0 then
+        info("Checking hermetic LuaRocks tree `" .. rocks_dir .. "` (" .. #rocks .. " declared dependencies)...")
+        local installed_count = 0
+        for _, rock_def in ipairs(rocks) do
+            if force or not is_rock_installed(rocks_dir, rock_def.name) then
+                local ok = install_single_rock(rock_def, rocks_dir, luarocks_bin)
+                if not ok then
+                    error("LuaRocks installation aborted due to dependency error.")
+                end
+                installed_count = installed_count + 1
+            end
+        end
+
+        if installed_count > 0 then
+            success("Hermetic LuaRocks tree synchronized (" .. installed_count .. " packages installed/updated).")
+        end
+    end
+    return true
+end
+
+local function cmd_rocks(args)
+    local conf, conf_path = load_config()
+    local rocks_dir = get_rocks_tree_dir()
+    local sub = args[1] or "install"
+
+    if sub == "install" then
+        local rock_name = args[2]
+        local rock_ver = args[3]
+        local luarocks_bin = find_luarocks_bin()
+        if not luarocks_bin then
+            print_luarocks_missing_guidance()
+            error("LuaRocks CLI is required to install dependencies.")
+        end
+
+        if rock_name then
+            local ok = install_single_rock({ name = rock_name, version = rock_ver }, rocks_dir, luarocks_bin)
+            if not ok then os.exit(1) end
+        else
+            ensure_rocks_installed(conf, true)
+        end
+
+    elseif sub == "list" then
+        info("Hermetic LuaRocks tree: " .. rocks_dir)
+        local luarocks_bin = find_luarocks_bin()
+        if luarocks_bin then
+            local cmd = shell_quote(luarocks_bin) .. " --tree " .. shell_quote(rocks_dir) .. " --lua-version 5.1 list"
+            os.execute(cmd)
+        else
+            local p = io.popen("ls -1 " .. shell_quote(rocks_dir .. "/lib/luarocks/rocks-5.1") .. " 2>/dev/null")
+            if p then
+                for line in p:lines() do
+                    if line ~= "" and line ~= "manifest" then
+                        print("  - " .. line)
+                    end
+                end
+                p:close()
+            end
+        end
+
+    elseif sub == "remove" or sub == "uninstall" then
+        local rock_name = args[2]
+        if not rock_name or rock_name == "" then
+            error("Usage: lua-tauri rocks remove <rock_name>")
+        end
+        local luarocks_bin = find_luarocks_bin()
+        if not luarocks_bin then
+            print_luarocks_missing_guidance()
+            error("LuaRocks CLI is required.")
+        end
+        local name, err_msg = validate_rock_name(rock_name)
+        if not name then error(err_msg) end
+        info("Removing LuaRock `" .. name .. "` from " .. rocks_dir .. " ...")
+        local cmd = shell_quote(luarocks_bin) .. " --tree " .. shell_quote(rocks_dir) .. " --lua-version 5.1 remove " .. shell_quote(name)
+        os.execute(cmd)
+        success("Removed `" .. name .. "` from " .. rocks_dir)
+
+    elseif sub == "clean" then
+        info("Removing hermetic LuaRocks tree: " .. rocks_dir)
+        os.execute("rm -rf " .. shell_quote(rocks_dir))
+        success("Hermetic LuaRocks tree cleaned.")
+
+    elseif sub == "path" then
+        local luarocks_bin = find_luarocks_bin()
+        if luarocks_bin then
+            local cmd = shell_quote(luarocks_bin) .. " --tree " .. shell_quote(rocks_dir) .. " --lua-version 5.1 path"
+            os.execute(cmd)
+        else
+            print("export LUA_PATH='" .. rocks_dir .. "/share/lua/5.1/?.lua;" .. rocks_dir .. "/share/lua/5.1/?/init.lua;$LUA_PATH'")
+            print("export LUA_CPATH='" .. rocks_dir .. "/lib/lua/5.1/?.so;$LUA_CPATH'")
+        end
+    else
+        err("Unknown rocks subcommand: " .. sub)
+        print("Usage: lua-tauri rocks [install [name] [version] | list | remove <name> | clean | path]")
+        os.exit(1)
+    end
+end
+
+-- ==========================================================
 -- Command: DEV
 -- ==========================================================
 local function cmd_dev(args)
@@ -270,6 +587,9 @@ local function cmd_dev(args)
     local build_conf = conf.build or {}
 
     info("Starting Tauri-Lua development for `" .. app_name .. "` v" .. version)
+
+    -- Ensure hermetic LuaRocks dependencies are synchronized
+    ensure_rocks_installed(conf)
 
     local dev_server_pid = nil
     local before_dev = build_conf.beforeDevCommand
@@ -381,6 +701,9 @@ local function cmd_build(args)
 
     info("Building application `" .. app_name .. "` v" .. version .. " (" .. identifier .. ")")
 
+    -- Ensure hermetic LuaRocks dependencies are synchronized before bundle packaging
+    ensure_rocks_installed(conf)
+
     local before_build = build_conf.beforeBuildCommand
     if before_build and before_build ~= "" then
         running(before_build)
@@ -415,6 +738,13 @@ local function cmd_build(args)
 
         exec("cp " .. bin_path .. " " .. macos_dir .. "/" .. app_name)
         exec("cp -r " .. frontend_dist .. " " .. res_dir .. "/")
+
+        local rocks_tree = get_rocks_tree_dir()
+        if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
+            info("Packaging LuaRocks dependencies into macOS App bundle...")
+            exec("mkdir -p " .. shell_quote(res_dir .. "/rocks"))
+            exec("cp -R " .. shell_quote(rocks_tree) .. "/. " .. shell_quote(res_dir .. "/rocks/"))
+        end
 
         -- Info.plist
         local plist = string.format([[<?xml version="1.0" encoding="UTF-8"?>
@@ -458,6 +788,14 @@ local function cmd_build(args)
         exec("cp " .. bin_path .. " " .. deb_dir .. "/usr/bin/" .. app_name)
         exec("cp -r " .. frontend_dist .. "/* " .. deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist .. "/")
 
+        local rocks_tree = get_rocks_tree_dir()
+        if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
+            info("Packaging LuaRocks dependencies into Debian package...")
+            local rocks_dest = deb_dir .. "/usr/share/" .. app_name .. "/rocks"
+            exec("mkdir -p " .. shell_quote(rocks_dest))
+            exec("cp -R " .. shell_quote(rocks_tree) .. "/. " .. shell_quote(rocks_dest .. "/"))
+        end
+
         local control = string.format([[Package: %s
 Version: %s
 Section: utils
@@ -477,6 +815,13 @@ Description: %s built with Tauri-Lua
         exec("mkdir " .. win_dir)
         exec("copy build\\Release\\tauri_app.exe " .. win_dir .. "\\")
         exec("xcopy /E /I " .. frontend_dist .. " " .. win_dir .. "\\" .. frontend_dist)
+
+        local rocks_tree = get_rocks_tree_dir()
+        if file_exists(rocks_tree) and (file_exists(rocks_tree .. "\\share") or file_exists(rocks_tree .. "\\lib") or file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
+            info("Packaging LuaRocks dependencies into Windows standalone bundle...")
+            exec("xcopy /E /I /Y " .. rocks_tree .. " " .. win_dir .. "\\rocks")
+        end
+
         success("Finished bundle at " .. win_dir)
     end
 end
@@ -1802,10 +2147,21 @@ local function cmd_icon(args)
     end
 end
 
-local function cmd_clean()
+local function cmd_clean(args)
+    local clean_all = false
+    if args and (args[1] == "--all" or args[1] == "-a" or args[1] == "--rocks") then
+        clean_all = true
+    end
     info("Cleaning build artifacts and release bundles...")
     os.execute("rm -rf build target .DS_Store **/.DS_Store 2>/dev/null")
-    success("Workspace cleaned successfully. Only source files remain.")
+    if clean_all then
+        local rocks_tree = get_rocks_tree_dir()
+        if file_exists(rocks_tree) then
+            info("Cleaning hermetic LuaRocks tree: " .. rocks_tree)
+            os.execute("rm -rf " .. shell_quote(rocks_tree))
+        end
+    end
+    success("Workspace cleaned successfully.")
 end
 
 -- ==========================================================
@@ -1822,9 +2178,10 @@ SUBCOMMANDS:
     create   Scaffold a new Tauri-Lua project (Vanilla, React, Vue, Svelte)
     dev      Start development server with live reload and HMR
     build    Build release application and generate platform packages (.app, .dmg, .deb)
+    rocks    Manage hermetic LuaRocks dependencies (install, list, remove, clean, path)
     init     Initialize a new src-tauri/ configuration in current folder
     icon     Generate multi-platform icons from a source PNG
-    clean    Remove build/ and target/ directories to reset workspace
+    clean    Remove build/ and target/ directories to reset workspace (use --all to clean .rocks)
     help     Print this help message
 
 ]])
@@ -1840,12 +2197,14 @@ elseif cmd == "dev" then
     cmd_dev(subargs)
 elseif cmd == "build" then
     cmd_build(subargs)
+elseif cmd == "rocks" then
+    cmd_rocks(subargs)
 elseif cmd == "init" then
     cmd_init(subargs)
 elseif cmd == "icon" then
     cmd_icon(subargs)
 elseif cmd == "clean" then
-    cmd_clean()
+    cmd_clean(subargs)
 elseif cmd == "help" or cmd == "--help" or cmd == "-h" then
     print_help()
 else

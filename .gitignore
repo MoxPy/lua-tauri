@@ -1,3 +1,7 @@
+# Hermetic LuaRocks trees
+.rocks/
+src-tauri/.rocks/
+
 # Build directories and generated binaries
 /build/
 /target/
