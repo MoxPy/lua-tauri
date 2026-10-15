@@ -5,6 +5,9 @@
 [![Platform](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg)](#cross-platform-implementation-details)
 [![Binary Size](https://img.shields.io/badge/Binary%20Size-~175%20KB-brightgreen.svg)](#benchmarks--performance-profile)
 [![Engine](https://img.shields.io/badge/Engine-LuaJIT%202.1%20%2B%20C%2B%2B17-orange.svg)](#architecture-overview)
+[![LuaRocks](https://img.shields.io/badge/LuaRocks-Hermetic%20Ecosystem-blueviolet.svg)](#hermetic-luarocks-integration--dependency-ecosystem)
+[![Host Embedding](https://img.shields.io/badge/Host%20Embedding-libtaurilua%20(C%20ABI)-blue.svg)](#scripting-engine-host--cc-embedding-libtaurilua)
+[![Plugins](https://img.shields.io/badge/Plugins-SQL%20(SQLite%2C%20PG%2C%20MySQL)%20%7C%20HTTP%20%7C%20Autostart-success.svg)](#first-class-plugin-architecture-tauri-2-parity)
 [![License](https://img.shields.io/badge/License-MIT-purple.svg)](#license)
 
 > [!NOTE]
@@ -27,10 +30,16 @@ Building small-to-medium desktop applications with Electron produces 150+ MB ins
 * **Instant Builds:** Native runtime compiles in **~3 seconds**.
 * **Zero-Recompile Backend Reloading:** Backend Lua changes reload in **~50 milliseconds**.
 * **Microscopic Footprint:** Production executable binary is **~175 KB**, with bundle disk images under **100 KB**.
+* **Embeddable Scripting Host (`libtaurilua`):** Turn any C/C++ desktop software or Game Engine (**Godot, Unreal Engine, SDL2, GLFW**) into a hybrid web-UI app via our pure C ABI (`include/taurilua.h`) in one line of code.
+* **Hermetic LuaRocks Package Ecosystem:** Seamless zero-config integration with the global LuaRocks ecosystem. Declare packages directly in `tauri.conf.json` (`luasocket`, `lsqlite3`, `lua-cjson`), build them into isolated local trees (`src-tauri/.rocks/`), and bundle them automatically into release installers with zero DLL search-order hijacking.
+* **Complete Official Plugin Suite (1:1 Tauri 2 Parity):**
+  - **`plugin-sql`**: Multi-database engine supporting **SQLite**, **PostgreSQL**, and **MySQL** with transactional schema migrations (`_sqlx_migrations`) and SQL-injection-proof parameter bindings.
+  - **`plugin-http`**: Native `libcurl` engine delivering complete CORS bypass for desktop frontends with granular security scopes (`allow`/`deny`).
+  - **`plugin-autostart`**: OS-native login persistence on macOS (LaunchAgent), Linux (XDG Autostart), and Windows (Registry Run keys).
+  - **`plugin-window-state`**: Zero-flicker restoration of window coordinates and fullscreen states across app launches.
 * **Enterprise Cybersecurity:** Hardened process spawning (zero command injection), dual-layer Content Security Policy (CSP), Origin Isolation, and Capability/Scope gating modeled after Tauri v2.
 * **Instant App Scaffolding:** Interactive `lua-tauri create` command supporting Vanilla, React, Vue, Svelte, and Tailwind CSS with pre-wired Vite templates.
 * **Custom Native Menu Bar (Tauri 2 / `muda` Parity):** Fluent OOP & declarative menus (`Menu`, `Submenu`, `MenuItem`, `CheckMenuItem`, `PredefinedMenuItem`) with OS responder chain integration and dual Lua/JS event routing.
-* **First-Class Plugin Architecture (Tauri 2 Parity):** Modular extensibility (`app:plugin`) with dynamic module auto-discovery, guest JavaScript injection, and full lifecycle event hooks.
 * **Non-Blocking Multi-Core Concurrency:** Built-in Worker Isolate Pool distributes CPU-heavy workloads across hardware threads without stalling the 60/120 FPS UI loop.
 
 ---
@@ -43,6 +52,10 @@ Building small-to-medium desktop applications with Electron produces 150+ MB ins
 | **Backend Hot-Reload** | **~50 ms** *(script swap)* | 10 – 30 seconds *(cargo rebuild)* | 1 – 3 seconds *(process restart)* |
 | **Binary Size (Executable)** | **~175 KB** | ~8 – 15 MB | ~130 – 180 MB |
 | **RAM at Idle** | **~35 MB** *(system webview)* | ~35 MB *(system webview)* | ~150 – 250 MB *(bundled chromium)* |
+| **Shared Library Host Embedding** | **Yes (`libtaurilua` C ABI)** | Complex / Experimental FFI | No *(Heavyweight IPC subprocess)* |
+| **Native Dependency Management** | **Hermetic LuaRocks (`tauri.conf.json`)** | Cargo / crates.io | npm / node-gyp C++ builds |
+| **SQL Database Support** | **SQLite, PostgreSQL & MySQL** | SQLite, PostgreSQL & MySQL | Heavy native npm addons |
+| **Cross-Origin HTTP Requests** | **Native `libcurl` (Zero CORS friction)** | `reqwest` (Zero CORS) | Browser CORS / Fetch limitations |
 | **Toolchain Dependencies** | **`luajit` + `cmake`** | `rustc` + `cargo` + platform SDKs | `node` + `npm` + Python + build-tools |
 | **Scripting Engine** | **LuaJIT 2.1** *(Near C performance)* | Native Machine Code | V8 JavaScript Engine |
 
@@ -894,12 +907,12 @@ flowchart LR
 
 All official plugins are maintained in the sibling repository [`lua-tauri-plugins`](https://github.com/MoxPy/lua-tauri-plugins):
 
-| Plugin | Features & Security Architecture | Parity Status |
-| :--- | :--- | :---: |
-| [**`sql`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/sql) | **SQLite3 via Native FFI:** Atomic transactional schema migrations (`_sqlx_migrations` table parity), `$1, $2` and `?` parameter binding against SQL injection, and automatic OS `AppData` sandboxing. | ✅ 1:1 Tauri 2 |
-| [**`http`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/http) | **Native `libcurl` Client:** Complete CORS bypass for desktop frontends, native OS SSL/TLS certificate validation, connection pooling, and strict `allow`/`deny` URL scope enforcement. | ✅ 1:1 Tauri 2 |
-| [**`autostart`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/autostart) | **Launch at System Login:** macOS LaunchAgent `.plist` (`~/Library/LaunchAgents`), Linux XDG Autostart (`~/.config/autostart`), and Windows User Registry (`HKCU\...\Run`). | ✅ 1:1 Tauri 2 |
-| [**`window-state`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/window-state) | **Window State Persistence:** Automatically remembers and restores window dimensions, coordinates, and maximize/fullscreen states across restarts via `on_window_close` hook. | ✅ 1:1 Tauri 2 |
+| Plugin | Features & Security Architecture | Parity Status | Supported Drivers / Backends |
+| :--- | :--- | :---: | :--- |
+| [**`sql`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/sql) | **Multi-Database SQL Engine:** Transactional schema migrations (`_sqlx_migrations`), prepared statements with parameterized binds (`$1, $2` and `?`) against SQL injection, and automatic AppData sandboxing. | ✅ 1:1 Tauri 2 | **SQLite3** (`sqlite:...`), **PostgreSQL** (`postgres://...`), **MySQL** (`mysql://...`) |
+| [**`http`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/http) | **Native `libcurl` Client:** Complete CORS bypass for desktop frontends, native OS SSL/TLS certificate validation, connection pooling, and strict `allow`/`deny` URL scope enforcement. | ✅ 1:1 Tauri 2 | Native `libcurl` (HTTP/1.1, HTTP/2) |
+| [**`autostart`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/autostart) | **Launch at System Login:** macOS LaunchAgent `.plist` (`~/Library/LaunchAgents`), Linux XDG Autostart (`~/.config/autostart`), and Windows User Registry (`HKCU\...\Run`). | ✅ 1:1 Tauri 2 | Native OS Startup Handlers |
+| [**`window-state`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/window-state) | **Window State Persistence:** Automatically remembers and restores window dimensions, coordinates, and maximize/fullscreen states across restarts via `on_window_close` hook. | ✅ 1:1 Tauri 2 | OS Window Rect & State Cache |
 
 ---
 
@@ -987,7 +1000,117 @@ console.log("Restored dimensions:", savedState.width, savedState.height);
 
 ---
 
-### 5. CLI Hot-Reload Integration
+### 5. Plugin Deep Dive: Multi-Database SQL Engine (@tauri-apps/plugin-sql Parity)
+
+The Tauri-Lua SQL plugin provides complete feature parity with official `@tauri-apps/plugin-sql`. It supports **SQLite**, **PostgreSQL**, and **MySQL / MariaDB** under a unified, declarative connection string interface.
+
+```text
+       Frontend Webview (JavaScript / TypeScript)
+       window.__TAURI__.sql.Database.load(url)
+                          │
+       ┌──────────────────┼──────────────────┐
+       ▼                  ▼                  ▼
+  sqlite:app.db    postgres://...      mysql://...
+  (Embedded FFI)   (Remote Cluster)   (Remote Cluster)
+       │                  │                  │
+       └──────────────────┼──────────────────┘
+                          │
+                _sqlx_migrations
+         (Atomic Versioned Schema Track)
+                          │
+             Parameterized Bindings ($1, ?)
+           (OWASP CWE-89 Injection Immunity)
+```
+
+#### Supported Database URI Formats
+1. **SQLite (`sqlite:path/to/db.db` or `sqlite:app.db`):**
+   - Relative paths like `sqlite:app.db` are automatically sandboxed into the application's native OS AppData directory (`~/Library/Application Support/` on macOS, `~/.local/share/` on Linux, `%APPDATA%` on Windows).
+   - Zero external drivers required: operates via native C SQLite3 FFI with high-speed memory mapping.
+2. **PostgreSQL (`postgres://user:password@host:port/database` or `postgresql://...`):**
+   - Connects to remote or local PostgreSQL clusters with full transaction support.
+   - Ideal for internal enterprise tools or multi-user desktop clients syncing with a central database.
+3. **MySQL / MariaDB (`mysql://user:password@host:port/database`):**
+   - Connects to remote or local MySQL and MariaDB servers.
+
+#### Atomic Schema Migrations (`_sqlx_migrations`)
+Schema migrations guarantee that your local and remote database tables stay in sync across client upgrades:
+- Migrations are declared as an array of versioned objects (`version`, `description`, `sql`).
+- The runtime creates and maintains an internal `_sqlx_migrations` table tracking applied version numbers and execution timestamps.
+- When the client connects, any unapplied migrations run sequentially within a transaction.
+
+#### SQL Injection Immunity (OWASP CWE-89)
+All queries accept parameterized bindings using positional placeholders (`$1, $2, $3`) or standard question marks (`?`). User inputs are never concatenated directly into query strings, ensuring complete immunity from SQL injection:
+
+```javascript
+// Safe parameterized query across all engines:
+const users = await db.select(
+  'SELECT id, name, email FROM users WHERE department = $1 AND active = $2;',
+  ['Engineering', true]
+);
+```
+
+#### Full End-to-End Example
+
+**Backend (`src-tauri/src/main.lua`):**
+```lua
+local tauri = require("tauri")
+local sql = require("sql")
+local app = tauri.init()
+
+-- Configure database with automatic forward migrations
+app:plugin(sql.init({
+    default_path = "sqlite:production.db",
+    migrations = {
+        {
+            version = 1,
+            description = "init_schema",
+            sql = [[
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            ]]
+        },
+        {
+            version = 2,
+            description = "add_department_column",
+            sql = "ALTER TABLE users ADD COLUMN department TEXT DEFAULT 'General';"
+        }
+    }
+}))
+
+app:run()
+```
+
+**Frontend (`src/main.js` or React / Vue):**
+```javascript
+// 1. Connect to SQLite or remote PostgreSQL / MySQL
+const db = await window.__TAURI__.sql.Database.load('sqlite:production.db');
+// Or remote: const db = await window.__TAURI__.sql.Database.load('postgres://postgres:secret@localhost:5432/mycorp');
+
+// 2. Insert with parameterized values
+await db.execute(
+  'INSERT INTO users (name, email, department) VALUES ($1, $2, $3);',
+  ['Alice Rossi', 'alice@company.com', 'Cybersecurity']
+);
+
+// 3. Query records safely
+const engineeringTeam = await db.select(
+  'SELECT * FROM users WHERE department = $1 ORDER BY id DESC;',
+  ['Cybersecurity']
+);
+
+console.table(engineeringTeam);
+
+// 4. Close database connection when finished
+await db.close();
+```
+
+---
+
+### 6. CLI Hot-Reload Integration
 
 The development server (`./lua-tauri dev`) actively watches both `./plugins/` and `../lua-tauri-plugins/plugins/`. Any changes saved in your plugin files immediately trigger hot-reloading of the backend runtime.
 
