@@ -1396,11 +1396,11 @@ Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
    - Automatically injected as an HTTP response header (`Content-Security-Policy`) on custom scheme requests (`tauri://localhost`, `asset://`) and as a dynamic DOM `<meta http-equiv="Content-Security-Policy">` tag in all served HTML documents.
    - Default policy enforces strict script origin restrictions without `'unsafe-inline'` in `script-src` (`default-src 'self' tauri: asset:; script-src 'self' tauri: asset:; style-src 'self' 'unsafe-inline'; ...`), neutralizing Cross-Site Scripting (XSS) vectors.
    - Configurable declaratively in `tauri.conf.json` (`security.csp`) or dynamically via `app:set_csp("...")`.
-3. **Session Isolation Tokens:**
-   - A cryptographically random 32-character session token is generated at startup and attached to `window.__TAURI_TOKEN__` as a read-only, non-configurable property.
-   - Blocks unauthorized iframes, cross-origin web frames, and injected foreign origins from forging IPC commands. (Same-origin script protection is reinforced via strict Content Security Policy).
-4. **Strict Origin Gating:**
-   - Every IPC dispatch verifies the native window's current URL origin. Requests originating from unapproved domains or unauthorized external pages are immediately rejected.
+3. **Session Verification Tokens (`window.__TAURI_TOKEN__`):**
+   - A cryptographically random 32-character session token is attached to `window.__TAURI_TOKEN__` at initialization.
+   - **Threat Model Scope:** This token acts as a defense-in-depth barrier against unauthorized child iframes and cross-origin subframes. It is **not** a same-origin security boundary (any malicious script executing within the same-origin document context can access JS window variables).
+4. **Native Origin Gating (Authoritative Security Boundary):**
+   - The authoritative security boundary is enforced at the native C++ level on every IPC message (`get_native_window_origin` & `OriginValidator::is_allowed`). Requests originating from unapproved origins or external untrusted domains are unconditionally rejected before reaching Lua handlers. Strict Content Security Policy (CSP) reinforces same-origin isolation.
 5. **Capability & Program Whitelisting:**
    - Tauri-Lua implements an integrated, declarative capability and scope validation engine directly in `tauri.conf.json` (`security.capabilities`). Sensitive native APIs (filesystem, dialogs, clipboard, shell) are rejected at the native boundary unless explicitly enabled in configuration.
    - The shell engine supports an optional `allowed_programs` list to restrict command execution exclusively to approved executables.
