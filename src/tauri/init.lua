@@ -157,11 +157,33 @@ local function setup_module_search_paths()
         end
     end
 
+    local function filter_absolute_only(path_str)
+        local parts = {}
+        for part in (path_str .. ";"):gmatch("([^;]*);") do
+            local clean = part:match("^%s*(.-)%s*$")
+            if clean and clean ~= "" then
+                local is_absolute = false
+                if ffi.os == "Windows" then
+                    is_absolute = clean:match("^[a-zA-Z]:[/\\]") ~= nil or clean:match("^\\\\") ~= nil
+                else
+                    is_absolute = clean:match("^/") ~= nil
+                end
+                if is_absolute then
+                    table.insert(parts, clean)
+                end
+            end
+        end
+        return table.concat(parts, ";")
+    end
+
     local current_path = package.path or ""
     for _, p in ipairs(extra_lua_paths) do
         if not current_path:find(p, 1, true) then
             current_path = current_path .. ";" .. p
         end
+    end
+    if not dev_mode then
+        current_path = filter_absolute_only(current_path)
     end
     package.path = current_path
 
@@ -170,6 +192,9 @@ local function setup_module_search_paths()
         if not current_cpath:find(cp, 1, true) then
             current_cpath = current_cpath .. ";" .. cp
         end
+    end
+    if not dev_mode then
+        current_cpath = filter_absolute_only(current_cpath)
     end
     package.cpath = current_cpath
 end
