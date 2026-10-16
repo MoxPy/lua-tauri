@@ -1674,6 +1674,22 @@ jobs:
 
 ---
 
+## Known Limitations
+
+Like any native framework balancing performance, security, and portability, Tauri-Lua has intentional architectural boundaries and platform-specific constraints:
+
+1. **Wayland Compositor Restrictions (Linux):**
+   - Under Wayland, client applications cannot programmatically place windows at arbitrary screen coordinates. Calls to set window position degrade gracefully as non-fatal no-ops.
+   - Global hotkey interception (`XGrabKey`) is prohibited by Wayland compositors for security reasons. Global shortcuts degrade cleanly without crashing when `WAYLAND_DISPLAY` is active.
+2. **Mobile Platforms (iOS & Android):**
+   - Tauri-Lua is purpose-built for desktop operating systems (macOS, Linux, Windows). Mobile platform compilation (iOS/Android) is not supported.
+3. **macOS System Notifications in Unpackaged Mode:**
+   - Apple's modern `UserNotifications` framework requires an active application bundle identifier and signed `.app` structure. In unpackaged development mode (`./lua-tauri dev`), notifications fall back to local delivery without registering with macOS Notification Center. Full interactive banner delivery activates once packaged into a `.app` bundle.
+4. **MySQL / MariaDB DDL Non-Transactionality:**
+   - On MySQL and MariaDB, DDL statements (`CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`) trigger an immediate, implicit engine commit and cannot be rolled back within a transaction. If a migration fails mid-script, the migration table marks the version as failed/dirty, requiring manual resolution before running subsequent migrations.
+
+---
+
 ## Systems Engineering Best Practices for Lua Developers
 
 When scaling your desktop application with Tauri-Lua, adhere to these principal design rules:
