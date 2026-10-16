@@ -1414,6 +1414,14 @@ Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
 | **Event Loop** | `[NSApp run]` | `gtk_main()` | `GetMessage` / `DispatchMessage` |
 | **Bundle Target** | `.app` & `.dmg` (`hdiutil`) | `.deb` (`dpkg-deb`) | Standalone Folder / Archive |
 
+### Linux Wayland Compatibility & Graceful Degradation
+
+Tauri-Lua runs seamlessly on both X11 and Wayland environments through WebKit2GTK and GTK3. Under Wayland, the security and architecture model places intentional restrictions on client applications:
+
+1. **Window Positioning:** The Wayland protocol disallows client applications from arbitrarily placing windows at fixed screen coordinates. Window positioning calls degrade gracefully as non-fatal no-ops without crashing.
+2. **Window State Persistence (`plugin:window-state`):** Window width, height, maximized, and fullscreen states are fully restored. Screen (x, y) coordinates are skipped under Wayland to respect compositor tile/window placement.
+3. **Global Shortcuts:** Direct global key grabbing (`XGrabKey`) is prohibited by Wayland compositors for anti-keylogging security. Tauri-Lua degrades cleanly without crashing when running under `WAYLAND_DISPLAY`.
+
 ---
 
 ## Packaging & Distribution Guide
