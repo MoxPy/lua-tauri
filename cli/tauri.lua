@@ -239,7 +239,7 @@ end
 
 local ENGINE_ROOT = os.getenv("TAURI_LUA_ROOT")
 if not ENGINE_ROOT or ENGINE_ROOT == "" then
-    local script_dir = arg[0]:match("^(.*)/[^/]+$")
+    local script_dir = arg and arg[0] and arg[0]:match("^(.*)/[^/]+$")
     if script_dir then
         ENGINE_ROOT = script_dir .. "/.."
     else
@@ -316,44 +316,91 @@ local function copy_dir_recursive(src, dest)
     end
 end
 
-local function validate_rock_identifier(str, field_name)
-    if type(str) ~= "string" or str == "" then
-        return nil, field_name .. " must be a non-empty string"
+local function parse_rock_server_url(srv)
+    if type(srv) ~= "string" or srv == "" then
+        return nil, "Rock server URL must be a non-empty string"
     end
-    -- Strictly reject shell metacharacters and control characters (CWE-78)
-    if str:find("[;&|`$><()\\!%c]") then
-        return nil, "Security error: invalid characters in " .. field_name .. " ('" .. str .. "')"
+    if srv:find("[;&|`$><()\\!%c%s]") then
+        return nil, "Security error: invalid characters in rock server URL"
     end
-    return str, nil
+    local scheme, rest = srv:match("^([a-zA-Z][a-zA-Z0-9%+%-%.]*)://(.*)$")
+    if not scheme then
+        return nil, "Security error: invalid rock server URL (missing scheme)"
+    end
+    scheme = scheme:lower()
+    if scheme ~= "https" then
+        return nil, "Security error: rock server must use HTTPS (received: '" .. scheme .. "')"
+    end
+    local host_port, path = rest:match("^([^/]+)(/?.*)$")
+    if not host_port or host_port == "" then
+        return nil, "Security error: missing host in rock server URL"
+    end
+    local host, port = host_port:match("^([^:]+):?(%d*)$")
+    if not host or host == "" then
+        return nil, "Security error: invalid host in rock server URL"
+    end
+    if not host:match("^[a-zA-Z0-9%-_%.]+$") then
+        return nil, "Security error: invalid hostname in rock server URL ('" .. host .. "')"
+    end
+    return {
+        scheme = scheme,
+        host = host,
+        port = (port ~= "" and tonumber(port)) or 443,
+        path = (path ~= "" and path) or "/"
+    }, nil
+end
+
+local function validate_rock_server(srv, allow_custom_server)
+    if not srv or srv == "" then return nil, nil end
+    local parsed, err_msg = parse_rock_server_url(srv)
+    if not parsed then return nil, err_msg end
+
+    local is_default = (srv == "https://luarocks.org" or srv == "https://luarocks.org/" or srv:match("^https://luarocks%.org/"))
+    if not is_default and not allow_custom_server then
+        return nil, "Security error: custom rock server '" .. srv .. "' requires explicit opt-in (--allow-custom-server flag or allow_custom_rock_server: true in tauri.conf.json)"
+    end
+    return srv, nil
 end
 
 local function validate_rock_name(name)
-    local val, err_msg = validate_rock_identifier(name, "rock name")
-    if not val then return nil, err_msg end
+    if type(name) ~= "string" or name == "" then
+        return nil, "rock name must be a non-empty string"
+    end
+    if name:find("[;&|`$><()\\!%c%s]") then
+        return nil, "Security error: invalid shell characters in rock name"
+    end
     if not name:match("^[a-zA-Z0-9%-_%.]+$") then
         return nil, "Security error: invalid format for rock name '" .. name .. "' (only alphanumeric, '-', '_', '.' allowed)"
     end
     return name, nil
 end
 
-local function validate_rock_version(ver)
-    if not ver or ver == "" then return nil, nil end
-    local val, err_msg = validate_rock_identifier(ver, "rock version")
-    if not val then return nil, err_msg end
+local function is_pinned_version(ver)
+    if type(ver) ~= "string" or ver == "" then return false end
+    if ver:find("[%s%<%>%~%*%^]") then return false end
+    return ver:match("^[0-9]+%.[0-9]+.*$") ~= nil or ver:match("^[0-9]+%-[0-9]+$") ~= nil
+end
+
+local function validate_rock_version(ver, require_pinned)
+    if not ver or ver == "" then
+        if require_pinned then
+            return nil, "Security error: unpinned dependency detected in build mode. Exact pinned version (e.g. '1.2.3-1') is required for build reproducibility."
+        end
+        return nil, nil
+    end
+    if type(ver) ~= "string" then
+        return nil, "rock version must be a string"
+    end
+    if ver:find("[;&|`$><()\\!%c]") then
+        return nil, "Security error: invalid characters in rock version ('" .. ver .. "')"
+    end
+    if require_pinned and not is_pinned_version(ver) then
+        return nil, "Security error: rock version '" .. ver .. "' is not pinned. Build mode requires exact pinned versions (e.g. '1.2.3-1')."
+    end
     if not ver:match("^[a-zA-Z0-9%-_%.%~%s%<%>%=>%:]+$") then
         return nil, "Security error: invalid format for rock version '" .. ver .. "'"
     end
     return ver, nil
-end
-
-local function validate_rock_server(srv)
-    if not srv or srv == "" then return nil, nil end
-    local val, err_msg = validate_rock_identifier(srv, "rock server")
-    if not val then return nil, err_msg end
-    if not srv:match("^https?://[a-zA-Z0-9%-_%.%:/]+$") then
-        return nil, "Security error: rock server must be a valid HTTP/HTTPS URL ('" .. srv .. "')"
-    end
-    return srv, nil
 end
 
 local function get_rocks_tree_dir()
@@ -361,6 +408,105 @@ local function get_rocks_tree_dir()
         return "src-tauri/.rocks"
     end
     return ".rocks"
+end
+
+local function get_lockfile_path()
+    if file_exists("src-tauri") then
+        return "src-tauri/tauri.lock"
+    end
+    return "tauri.lock"
+end
+
+local function compute_file_checksum(filepath)
+    if not file_exists(filepath) then return "unknown" end
+    local cmd
+    if ffi.os == "OSX" then
+        cmd = "shasum -a 256 " .. shell_quote(filepath) .. " 2>/dev/null"
+    elseif ffi.os == "Linux" then
+        cmd = "sha256sum " .. shell_quote(filepath) .. " 2>/dev/null"
+    else
+        cmd = 'powershell -NoProfile -Command "(Get-FileHash -Path \'' .. filepath:gsub("/", "\\") .. '\' -Algorithm SHA256).Hash.ToLower()" 2>NUL'
+    end
+    local p = io.popen(cmd)
+    if p then
+        local out = p:read("*l")
+        p:close()
+        if out then
+            local hash = out:match("(%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x)")
+            if hash then return "sha256:" .. hash end
+        end
+    end
+    local content = read_file(filepath)
+    if content then
+        local h = 5381
+        for i = 1, #content do
+            h = (h * 33 + string.byte(content, i)) % 4294967296
+        end
+        return string.format("hash:%08x", h)
+    end
+    return "unknown"
+end
+
+local function get_installed_rock_details(rocks_dir, rock_name)
+    local base = rocks_dir .. "/lib/luarocks/rocks-5.1/" .. rock_name
+    if not file_exists(base) then return nil end
+    local p
+    if ffi.os == "Windows" then
+        p = io.popen('dir /b /ad "' .. base:gsub("/", "\\") .. '" 2>NUL')
+    else
+        p = io.popen("ls -1 " .. shell_quote(base) .. " 2>/dev/null")
+    end
+    if not p then return nil end
+    local versions = {}
+    for line in p:lines() do
+        local trimmed = line:match("^%s*(.-)%s*$")
+        if trimmed ~= "" and trimmed ~= "." and trimmed ~= ".." then
+            table.insert(versions, trimmed)
+        end
+    end
+    p:close()
+    if #versions == 0 then return nil end
+    local ver = versions[1]
+    local manifest_file = base .. "/" .. ver .. "/rock_manifest"
+    local checksum = "sha256:unknown"
+    if file_exists(manifest_file) then
+        checksum = compute_file_checksum(manifest_file)
+    end
+    return {
+        version = ver,
+        checksum = checksum
+    }
+end
+
+local function read_lockfile()
+    local lock_path = get_lockfile_path()
+    if not file_exists(lock_path) then return nil end
+    local content = read_file(lock_path)
+    if not content or content == "" then return nil end
+    return json.decode(content)
+end
+
+local function save_lockfile(lock_data)
+    local lock_path = get_lockfile_path()
+    local lines = {}
+    table.insert(lines, "{")
+    table.insert(lines, '  "version": 1,')
+    table.insert(lines, '  "rocks": {')
+    local keys = {}
+    for k in pairs(lock_data.rocks or {}) do table.insert(keys, k) end
+    table.sort(keys)
+    for i, k in ipairs(keys) do
+        local r = lock_data.rocks[k]
+        local comma = (i == #keys) and "" or ","
+        table.insert(lines, string.format('    "%s": {', k))
+        table.insert(lines, string.format('      "version": "%s",', r.version or ""))
+        table.insert(lines, string.format('      "checksum": "%s",', r.checksum or ""))
+        table.insert(lines, string.format('      "server": "%s"', r.server or "https://luarocks.org"))
+        table.insert(lines, string.format('    }%s', comma))
+    end
+    table.insert(lines, "  }")
+    table.insert(lines, "}")
+    write_file(lock_path, table.concat(lines, "\n") .. "\n")
 end
 
 local function find_rockspec_file()
@@ -477,20 +623,28 @@ local function is_rock_installed(rocks_dir, rock_name)
     return file_exists(manifest_dir)
 end
 
-local function install_single_rock(rock_def, rocks_dir, luarocks_bin)
+local function has_flag(args, flag)
+    if not args then return false end
+    for _, a in ipairs(args) do
+        if a == flag then return true end
+    end
+    return false
+end
+
+local function install_single_rock(rock_def, rocks_dir, luarocks_bin, allow_custom)
     local name, name_err = validate_rock_name(rock_def.name)
     if not name then
         err(name_err)
         return false
     end
 
-    local ver, ver_err = validate_rock_version(rock_def.version)
+    local ver, ver_err = validate_rock_version(rock_def.version, false)
     if ver_err then
         err(ver_err)
         return false
     end
 
-    local srv, srv_err = validate_rock_server(rock_def.server)
+    local srv, srv_err = validate_rock_server(rock_def.server, allow_custom)
     if srv_err then
         err(srv_err)
         return false
@@ -518,15 +672,40 @@ local function install_single_rock(rock_def, rocks_dir, luarocks_bin)
     end
 end
 
-local function ensure_rocks_installed(conf, force)
+local function ensure_rocks_installed(conf, force, is_build, allow_custom_server)
     local rocks = extract_luarocks_dependencies(conf)
     local rockspec_file = find_rockspec_file()
     if #rocks == 0 and not rockspec_file then
         return true
     end
 
+    local allow_custom = allow_custom_server or conf.allow_custom_rock_server or (conf.security and conf.security.allow_custom_rock_server) or false
+
+    -- 1. Validate all rocks
+    for _, rock_def in ipairs(rocks) do
+        local name, name_err = validate_rock_name(rock_def.name)
+        if not name then error(name_err) end
+        local ver, ver_err = validate_rock_version(rock_def.version, is_build)
+        if ver_err then error(ver_err) end
+        local srv, srv_err = validate_rock_server(rock_def.server, allow_custom)
+        if srv_err then error(srv_err) end
+    end
+
     local rocks_dir = get_rocks_tree_dir()
     local luarocks_bin = find_luarocks_bin()
+    local lock = read_lockfile()
+
+    -- In build mode, verify against lockfile if present
+    if is_build and lock and lock.rocks then
+        for _, rock_def in ipairs(rocks) do
+            local lock_entry = lock.rocks[rock_def.name]
+            if lock_entry then
+                if rock_def.version and lock_entry.version and rock_def.version ~= lock_entry.version then
+                    error("Lockfile mismatch for '" .. rock_def.name .. "': tauri.conf.json requires " .. rock_def.version .. " but tauri.lock specifies " .. lock_entry.version)
+                end
+            end
+        end
+    end
 
     if not luarocks_bin then
         local all_present = true
@@ -556,7 +735,7 @@ local function ensure_rocks_installed(conf, force)
         local installed_count = 0
         for _, rock_def in ipairs(rocks) do
             if force or not is_rock_installed(rocks_dir, rock_def.name) then
-                local ok = install_single_rock(rock_def, rocks_dir, luarocks_bin)
+                local ok = install_single_rock(rock_def, rocks_dir, luarocks_bin, allow_custom)
                 if not ok then
                     error("LuaRocks installation aborted due to dependency error.")
                 end
@@ -567,6 +746,22 @@ local function ensure_rocks_installed(conf, force)
         if installed_count > 0 then
             success("Hermetic LuaRocks tree synchronized (" .. installed_count .. " packages installed/updated).")
         end
+
+        -- Update or create lockfile
+        local lock_data = lock or { version = 1, rocks = {} }
+        lock_data.rocks = lock_data.rocks or {}
+        for _, rock_def in ipairs(rocks) do
+            local details = get_installed_rock_details(rocks_dir, rock_def.name)
+            local installed_ver = (details and details.version) or rock_def.version or "unknown"
+            local checksum = (details and details.checksum) or "sha256:unknown"
+            lock_data.rocks[rock_def.name] = {
+                version = installed_ver,
+                checksum = checksum,
+                server = rock_def.server or "https://luarocks.org"
+            }
+        end
+        save_lockfile(lock_data)
+        info("Saved dependency lockfile: " .. get_lockfile_path())
     end
     return true
 end
@@ -575,6 +770,7 @@ local function cmd_rocks(args)
     local conf, conf_path = load_config()
     local rocks_dir = get_rocks_tree_dir()
     local sub = args[1] or "install"
+    local allow_custom = has_flag(args, "--allow-custom-server")
 
     if sub == "install" then
         local rock_name = args[2]
@@ -586,10 +782,10 @@ local function cmd_rocks(args)
         end
 
         if rock_name then
-            local ok = install_single_rock({ name = rock_name, version = rock_ver }, rocks_dir, luarocks_bin)
+            local ok = install_single_rock({ name = rock_name, version = rock_ver }, rocks_dir, luarocks_bin, allow_custom)
             if not ok then os.exit(1) end
         else
-            ensure_rocks_installed(conf, true)
+            ensure_rocks_installed(conf, true, false, allow_custom)
         end
 
     elseif sub == "list" then
@@ -667,7 +863,7 @@ local function cmd_dev(args)
     info("Starting Tauri-Lua development for `" .. app_name .. "` v" .. version)
 
     -- Ensure hermetic LuaRocks dependencies are synchronized
-    ensure_rocks_installed(conf)
+    ensure_rocks_installed(conf, false, false, has_flag(args, "--allow-custom-server"))
 
     local dev_server_pid = nil
     local before_dev = build_conf.beforeDevCommand
@@ -782,7 +978,7 @@ local function cmd_build(args)
     info("Building application `" .. app_name .. "` v" .. version .. " (" .. identifier .. ")")
 
     -- Ensure hermetic LuaRocks dependencies are synchronized before bundle packaging
-    ensure_rocks_installed(conf)
+    ensure_rocks_installed(conf, false, true, has_flag(args, "--allow-custom-server"))
 
     local before_build = build_conf.beforeBuildCommand
     if before_build and before_build ~= "" then
@@ -2276,9 +2472,26 @@ SUBCOMMANDS:
 ]])
 end
 
-local cmd = arg[1] or "help"
+if _G.TAURI_CLI_TEST_MODE then
+    return {
+        parse_rock_server_url = parse_rock_server_url,
+        validate_rock_server = validate_rock_server,
+        validate_rock_name = validate_rock_name,
+        is_pinned_version = is_pinned_version,
+        validate_rock_version = validate_rock_version,
+        read_lockfile = read_lockfile,
+        save_lockfile = save_lockfile,
+        compute_file_checksum = compute_file_checksum,
+        get_installed_rock_details = get_installed_rock_details,
+        ensure_rocks_installed = ensure_rocks_installed,
+    }
+end
+
+local cmd = arg and arg[1] or "help"
 local subargs = {}
-for i = 2, #arg do table.insert(subargs, arg[i]) end
+if arg then
+    for i = 2, #arg do table.insert(subargs, arg[i]) end
+end
 
 if cmd == "create" then
     cmd_create(subargs)
