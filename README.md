@@ -1401,13 +1401,42 @@ Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
    - **Threat Model Scope:** This token acts as a defense-in-depth barrier against unauthorized child iframes and cross-origin subframes. It is **not** a same-origin security boundary (any malicious script executing within the same-origin document context can access JS window variables).
 4. **Native Origin Gating (Authoritative Security Boundary):**
    - The authoritative security boundary is enforced at the native C++ level on every IPC message (`get_native_window_origin` & `OriginValidator::is_allowed`). Requests originating from unapproved origins or external untrusted domains are unconditionally rejected before reaching Lua handlers. Strict Content Security Policy (CSP) reinforces same-origin isolation.
-5. **Capability & Program Whitelisting:**
-   - Tauri-Lua implements an integrated, declarative capability and scope validation engine directly in `tauri.conf.json` (`security.capabilities`). Sensitive native APIs (filesystem, dialogs, clipboard, shell) are rejected at the native boundary unless explicitly enabled in configuration.
-   - The shell engine supports an optional `allowed_programs` list to restrict command execution exclusively to approved executables.
+5. **Capability & Program Whitelisting (Deny-by-Default):**
+   - Tauri-Lua implements an integrated, declarative capability and scope validation engine directly in `tauri.conf.json` (`security.capabilities`). Sensitive native APIs (filesystem, dialogs, clipboard, shell, notifications) are rejected at the native boundary unless explicitly enabled in configuration.
+   - The shell engine enforces a mandatory `allowed_programs` list to restrict command execution exclusively to approved executables and permitted arguments.
+
+### Declarative Capabilities & Permission Matrix (Deny-by-Default)
+
+Tauri-Lua implements a strict **Deny-by-Default** security model for frontend IPC envelopes. If `security.capabilities` is empty or omitted, the frontend is strictly forbidden from executing any host system API. Every IPC invoke must be explicitly authorized:
+
+| Capability Identifier | Description | Default Policy |
+| :--- | :--- | :--- |
+| `core:default` | Basic window control (`close`, `minimize`, `maximize`, `show`, `hide`, `set_title`, `set_size`, `set_focus`), tray icon, shortcuts, updater, and menus | **Denied** (Requires explicit grant) |
+| `fs:read-text-file` | Reading file contents via `tauri:fs:read_text_file` (constrained by `security.scope`) | **Denied** |
+| `fs:write-text-file`| Writing file contents via `tauri:fs:write_text_file` and removing files via `tauri:fs:remove` | **Denied** |
+| `fs:read-dir` | Directory listing traversal via `tauri:fs:read_dir` | **Denied** |
+| `fs:*` | Wildcard grant for all filesystem capabilities (`read-text-file`, `write-text-file`, `read-dir`) | **Denied** |
+| `dialog:open` | Showing native file / folder open pickers via `tauri:dialog:open` | **Denied** |
+| `dialog:save` | Showing native file save destination pickers via `tauri:dialog:save` | **Denied** |
+| `dialog:message` | Showing native message and confirmation modals (`dialog:message`, `dialog:ask`) | **Denied** |
+| `dialog:*` | Wildcard grant for all dialog capabilities | **Denied** |
+| `clipboard:read-text` | Reading plain text and HTML from system clipboard | **Denied** |
+| `clipboard:write-text`| Writing plain text, HTML, image data, and clearing clipboard | **Denied** |
+| `clipboard:*` | Wildcard grant for all clipboard read/write capabilities | **Denied** |
+| `notification:send` | Dispatching system desktop notifications | **Denied** |
+| `notification:*` | Wildcard grant for notification APIs | **Denied** |
+| `shell:execute` | Spawning and executing external host processes (requires mandatory `allowed_programs` allowlist) | **Denied** |
+| `http:request` / `http:default` | Executing outgoing HTTP/HTTPS fetch requests via the HTTP plugin (requires URL scopes) | **Denied** |
+| `sql:execute` / `sql:default` | Executing SQL queries and mutations via the SQL plugin (requires DB connection scopes) | **Denied** |
+
+> [!IMPORTANT]
+> **Deny-by-Default Enforcement:**
+> Any IPC request originating from frontend JavaScript that requests an ungranted capability is immediately rejected at the native boundary with an authorization error (`Capability non autorizzata: <permission>`). Backend code in `main.lua` runs with full native privileges.
+
 6. **Path Scope Constraint Enforcement:**
    - Filesystem operations resolve path aliases (`$APPDATA`, `$DESKTOP`, `$HOME`) canonically to prevent directory traversal (`../`) attacks.
 7. **Transactional Atomic State Management (`app.state:update`):**
-   - In-memory shared state mutations are guarded by a recursive native mutex (`platform_state_lock` / `platform_state_unlock`), ensuring atomic read-modify-write transactions across concurrent threads or asynchronous callbacks without race conditions.
+   - In-memory shared state mutations are guarded by an optimistic CAS loop, ensuring user callbacks never hold the native mutex and preventing deadlocks.
 
 ---
 

@@ -485,9 +485,17 @@ function Security.new(config)
 end
 
 function Security:assert_capability(name)
-    if not self.capabilities[name] then
-        error(string.format("Capability non autorizzata: %s", name))
+    if self.capabilities[name] then
+        return true
     end
+    local prefix = name:match("^([^:]+):")
+    if prefix and (self.capabilities[prefix .. ":*"] or self.capabilities[prefix .. ":all"] or self.capabilities[prefix .. ":default"]) then
+        return true
+    end
+    if self.capabilities["core:default"] and (prefix == "core" or name:match("^tauri:window:") or name:match("^tauri:shortcut:") or name:match("^tauri:tray:") or name:match("^tauri:updater:") or name == "tauri:menu:set") then
+        return true
+    end
+    error(string.format("Capability non autorizzata: %s", name))
 end
 
 function Security:assert_program(program)
@@ -1736,12 +1744,14 @@ function Tauri:_register_builtins()
     end)
 
     self:register("tauri:window:close", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         local target = (payload and payload.label) or caller_label or "main"
         clib.platform_window_close(target)
         return true
     end)
 
     self:register("tauri:window:destroy", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         local target = (payload and payload.label) or caller_label or "main"
         clib.platform_window_force_close(target)
         self.windows[target] = nil
@@ -1749,6 +1759,7 @@ function Tauri:_register_builtins()
     end)
 
     self:register("tauri:window:force_close", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         local target = (payload and payload.label) or caller_label or "main"
         clib.platform_window_force_close(target)
         self.windows[target] = nil
@@ -1756,43 +1767,51 @@ function Tauri:_register_builtins()
     end)
 
     self:register("tauri:window:set_title", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         local target = payload.label or caller_label
         clib.platform_window_set_title(target, tostring(payload.title or ""))
         return true
     end)
 
     self:register("tauri:window:set_size", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         local target = payload.label or caller_label
         clib.platform_window_set_size(target, tonumber(payload.width) or 800, tonumber(payload.height) or 600)
         return true
     end)
 
     self:register("tauri:window:minimize", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         clib.platform_window_minimize(payload.label or caller_label)
         return true
     end)
 
     self:register("tauri:window:maximize", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         clib.platform_window_maximize(payload.label or caller_label)
         return true
     end)
 
     self:register("tauri:window:show", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         clib.platform_window_show(payload.label or caller_label)
         return true
     end)
 
     self:register("tauri:window:hide", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         clib.platform_window_hide(payload.label or caller_label)
         return true
     end)
 
     self:register("tauri:window:set_focus", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         clib.platform_window_set_focus(payload.label or caller_label)
         return true
     end)
 
     self:register("tauri:window:start_dragging", function(payload, caller_label)
+        self.security:assert_capability("core:default")
         clib.platform_window_start_dragging(caller_label)
         return true
     end)
@@ -1810,11 +1829,13 @@ function Tauri:_register_builtins()
     end)
 
     self:register("tauri:shortcut:unregister", function(payload)
+        self.security:assert_capability("core:default")
         clib.platform_shortcut_unregister(payload.shortcut or "")
         return true
     end)
 
     self:register("tauri:updater:check", function()
+        self.security:assert_capability("core:default")
         return {
             shouldUpdate = true,
             version = "1.0.1",
@@ -1824,6 +1845,7 @@ function Tauri:_register_builtins()
     end)
 
     self:register("tauri:updater:install", function()
+        self.security:assert_capability("core:default")
         local ok = clib.platform_updater_install("update.tar.gz")
         return ok == 1
     end)
@@ -1991,6 +2013,7 @@ function Tauri:_register_builtins()
     self:register("tauri:path:desktop_dir", function() return self.base_paths.desktop end)
 
     self:register("tauri:menu:set", function(payload)
+        self.security:assert_capability("core:default")
         if payload and payload.menu then
             return self:set_menu(payload.menu)
         end
