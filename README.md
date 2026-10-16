@@ -1052,11 +1052,11 @@ The Tauri-Lua SQL plugin provides complete feature parity with official `@tauri-
 3. **MySQL / MariaDB (`mysql://user:password@host:port/database`):**
    - Connects to remote or local MySQL and MariaDB servers.
 
-#### Atomic Schema Migrations (`_sqlx_migrations`)
-Schema migrations guarantee that your local and remote database tables stay in sync across client upgrades:
+#### Schema Migrations (`_sqlx_migrations`)
+Schema migrations ensure that your local and remote database tables stay in sync across application upgrades:
 - Migrations are declared as an array of versioned objects (`version`, `description`, `sql`).
-- The runtime creates and maintains an internal `_sqlx_migrations` table tracking applied version numbers and execution timestamps.
-- When the client connects, any unapplied migrations run sequentially within a transaction.
+- The runtime maintains an internal `_sqlx_migrations` table tracking applied version numbers, execution checksums, and execution timestamps.
+- **Transactionality Note:** On **SQLite** and **PostgreSQL**, schema migrations run within an atomic transaction. On **MySQL / MariaDB**, SQL DDL statements (`CREATE TABLE`, `ALTER TABLE`) trigger an implicit engine commit and cannot be rolled back. If a MySQL migration fails partially midway, the migration entry is marked with a dirty/failed status requiring manual correction before subsequent migrations can proceed.
 
 #### SQL Injection Immunity (OWASP CWE-89)
 All queries accept parameterized bindings using positional placeholders (`$1, $2, $3`) or standard question marks (`?`). User inputs are never concatenated directly into query strings, ensuring complete immunity from SQL injection:
