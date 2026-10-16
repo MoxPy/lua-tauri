@@ -46,16 +46,23 @@ local function setup_module_search_paths()
                 end
             elseif ffi.os == "Windows" then
                 ffi.cdef[[
-                    uint32_t GetModuleFileNameA(void* hModule, char* lpFilename, uint32_t nSize);
+                    uint32_t GetModuleFileNameW(void* hModule, uint16_t* lpFilename, uint32_t nSize);
+                    int WideCharToMultiByte(uint32_t CodePage, uint32_t dwFlags, const uint16_t* lpWideCharStr, int cchWideChar, char* lpMultiByteStr, int cbMultiByte, const char* lpDefaultChar, int* lpUsedDefaultChar);
                 ]]
                 local k32 = nil
                 pcall(function() k32 = ffi.load("kernel32") end)
-                local fn = (k32 and k32.GetModuleFileNameA) or ffi.C.GetModuleFileNameA
-                local buf = ffi.new("char[1024]")
-                local len = fn(nil, buf, 1024)
-                if len > 0 then
-                    local full_path = ffi.string(buf, len):gsub("\\", "/")
-                    dir = full_path:match("^(.*)/[^/]+$")
+                local fn = (k32 and k32.GetModuleFileNameW) or ffi.C.GetModuleFileNameW
+                local wbuf = ffi.new("uint16_t[1024]")
+                local wlen = fn(nil, wbuf, 1024)
+                if wlen > 0 then
+                    local wctomb = (k32 and k32.WideCharToMultiByte) or ffi.C.WideCharToMultiByte
+                    local ulen = wctomb(65001, 0, wbuf, wlen, nil, 0, nil, nil)
+                    if ulen > 0 then
+                        local ubuf = ffi.new("char[?]", ulen)
+                        wctomb(65001, 0, wbuf, wlen, ubuf, ulen, nil, nil)
+                        local full_path = ffi.string(ubuf, ulen):gsub("\\", "/")
+                        dir = full_path:match("^(.*)/[^/]+$")
+                    end
                 end
             end
         end)
@@ -280,7 +287,7 @@ typedef struct _FILETIME {
     unsigned long dwHighDateTime;
 } FILETIME;
 
-typedef struct _WIN32_FIND_DATAA {
+typedef struct _WIN32_FIND_DATAW {
     unsigned long dwFileAttributes;
     FILETIME ftCreationTime;
     FILETIME ftLastAccessTime;
@@ -289,13 +296,15 @@ typedef struct _WIN32_FIND_DATAA {
     unsigned long nFileSizeLow;
     unsigned long dwReserved0;
     unsigned long dwReserved1;
-    char cFileName[260];
-    char cAlternateFileName[14];
-} WIN32_FIND_DATAA;
+    uint16_t cFileName[260];
+    uint16_t cAlternateFileName[14];
+} WIN32_FIND_DATAW;
 
-void* FindFirstFileA(const char *lpFileName, WIN32_FIND_DATAA *lpFindFileData);
-int FindNextFileA(void *hFindFile, WIN32_FIND_DATAA *lpFindFileData);
+void* FindFirstFileW(const uint16_t *lpFileName, WIN32_FIND_DATAW *lpFindFileData);
+int FindNextFileW(void *hFindFile, WIN32_FIND_DATAW *lpFindFileData);
 int FindClose(void *hFindFile);
+int MultiByteToWideChar(uint32_t CodePage, uint32_t dwFlags, const char* lpMultiByteStr, int cbMultiByte, uint16_t* lpWideCharStr, int cchWideChar);
+int WideCharToMultiByte(uint32_t CodePage, uint32_t dwFlags, const uint16_t* lpWideCharStr, int cchWideChar, char* lpMultiByteStr, int cbMultiByte, const char* lpDefaultChar, int* lpUsedDefaultChar);
 
 typedef struct DIR DIR;
 typedef long off_t;
@@ -453,23 +462,22 @@ function Security.new(config)
     self.scopes = sec.scope or {}
 
     -- allowed_programs: list of strings or tables {name="cmd", args={"--allowed-flag", ...}}
-    -- String entry means: program allowed with ANY args.
+    -- String entry means: program allowed (subject to dangerous flag blocking).
     -- Table entry means: program allowed ONLY with args from the given list.
     self.allowed_programs = sec.allowed_programs or sec.allowed_commands or {}
-    -- Build a fast-lookup map: program_name -> arg_whitelist (nil = any args ok)
+    -- Build a fast-lookup map: program_name -> arg_whitelist (false = any args ok, table = strict args)
     self._program_map = {}
     for _, entry in ipairs(self.allowed_programs) do
         if type(entry) == "string" then
             if entry == "*" then
-                self._program_map["*"] = nil  -- wildcard: any program, any args
+                self._program_map["*"] = false  -- wildcard: any program
             else
-                self._program_map[entry] = nil  -- specific program, any args
+                self._program_map[entry] = false  -- specific program
             end
         elseif type(entry) == "table" then
             local prog = entry.name or entry.program or entry.cmd
             if prog then
-                -- args list: allowed literal arg values (OR patterns if marked regex)
-                self._program_map[prog] = entry.args or nil
+                self._program_map[prog] = entry.args or false
             end
         end
     end
@@ -486,36 +494,58 @@ function Security:assert_program(program)
     if not self.capabilities["shell:execute"] and not self.capabilities["shell:allow-execute"] then
         error("Capability non autorizzata: shell:execute")
     end
-    if #self.allowed_programs > 0 then
-        -- Check if wildcard "*" is present (any program allowed) or specific program is listed
-        local found = false
-        for k in pairs(self._program_map) do
-            if k == "*" or k == program then
-                found = true
-                break
-            end
-        end
-        if not found then
-            error(string.format("Shell: program not in allowlist: %s", program))
-        end
+
+    -- Windows .bat/.cmd injection protection: reject shell script wrappers
+    local prog_lower = tostring(program):lower()
+    if prog_lower:match("%.bat$") or prog_lower:match("%.cmd$") then
+        error(string.format("Shell: direct execution of .bat / .cmd files is blocked for security (CWE-78): %s", program))
+    end
+
+    -- Default-deny: allowed_programs is mandatory (empty list = nothing allowed)
+    if not self.allowed_programs or #self.allowed_programs == 0 then
+        error(string.format("Shell: execution denied (allowed_programs is empty or missing): %s", program))
+    end
+
+    -- Check if program is explicitly whitelisted or wildcard "*" is granted
+    if self._program_map["*"] == nil and self._program_map[program] == nil then
+        error(string.format("Shell: program not in allowlist: %s", program))
     end
 end
 
 -- Check that each arg in args[] is permitted for the given program.
--- No-op when: no allowed_programs configured, wildcard "*" entry, or program entry has no arg list.
 function Security:assert_args(program, args)
-    if #self.allowed_programs == 0 then return end
-    -- wildcard entry: any program + any args allowed
-    if self._program_map["*"] ~= nil then return end
-    local arg_whitelist = self._program_map[program]
-    -- Program entry with no args restriction: any args allowed for this program
-    if arg_whitelist == nil then return end
-    -- Strict mode: each arg must appear in the whitelist
-    local whiteset = {}
-    for _, a in ipairs(arg_whitelist) do whiteset[a] = true end
+    args = args or {}
+    local prog_base = tostring(program):match("[^/\\]+$") or tostring(program)
+
+    -- 1. Always block known high-risk command execution switches
     for _, arg in ipairs(args) do
-        if not whiteset[arg] then
-            error(string.format("Shell: argument not in allowlist for '%s': %s", program, arg))
+        local s = tostring(arg)
+        if (prog_base == "git" and (s == "-c" or s:match("^%-c") or s == "--exec-path" or s:match("^%-%-exec%-path") or s == "--upload-pack")) or
+           (prog_base == "find" and (s == "-exec" or s == "-execdir" or s == "-ok")) or
+           (prog_base == "xargs" and (s:match("^%-I") or s:match("^%-%-replace"))) or
+           (prog_base == "ssh" and (s:match("[pP]roxy[cC]ommand"))) then
+            error(string.format("Shell: blocked dangerous argument for '%s': %s", program, s))
+        end
+    end
+
+    -- 2. Whitelist check
+    if self._program_map["*"] ~= nil and self._program_map["*"] == false then
+        return -- wildcard any program and any args
+    end
+
+    local arg_whitelist = self._program_map[program]
+    if arg_whitelist == false or arg_whitelist == nil then
+        -- Allowed with general args (safe from known dangerous flags above)
+        return
+    end
+
+    if type(arg_whitelist) == "table" then
+        local whiteset = {}
+        for _, a in ipairs(arg_whitelist) do whiteset[tostring(a)] = true end
+        for _, arg in ipairs(args) do
+            if not whiteset[tostring(arg)] then
+                error(string.format("Shell: argument not in allowlist for '%s': %s", program, tostring(arg)))
+            end
         end
     end
 end
@@ -1805,20 +1835,39 @@ function Tauri:_register_builtins()
         local entries = {}
         if ffi.os == "Windows" then
             local search_path = payload.path:gsub("[/\\]+$", "") .. "\\*"
-            local find_data = ffi.new("WIN32_FIND_DATAA")
-            local hFind = clib.FindFirstFileA(search_path, find_data)
+            local k32 = clib
+            pcall(function() k32 = ffi.load("kernel32") end)
+            local mb2wc = (k32 and k32.MultiByteToWideChar) or clib.MultiByteToWideChar
+            local wc2mb = (k32 and k32.WideCharToMultiByte) or clib.WideCharToMultiByte
+            local fn_first = (k32 and k32.FindFirstFileW) or clib.FindFirstFileW
+            local fn_next = (k32 and k32.FindNextFileW) or clib.FindNextFileW
+            local fn_close = (k32 and k32.FindClose) or clib.FindClose
+
+            local wlen = mb2wc(65001, 0, search_path, #search_path, nil, 0)
+            local wsearch = ffi.new("uint16_t[?]", wlen + 1)
+            mb2wc(65001, 0, search_path, #search_path, wsearch, wlen)
+            wsearch[wlen] = 0
+
+            local find_data = ffi.new("WIN32_FIND_DATAW")
+            local hFind = fn_first(wsearch, find_data)
             if hFind ~= ffi.cast("void*", -1) and hFind ~= nil then
                 while true do
-                    local name = ffi.string(find_data.cFileName)
+                    local nlen = 0
+                    while find_data.cFileName[nlen] ~= 0 do nlen = nlen + 1 end
+                    local ulen = wc2mb(65001, 0, find_data.cFileName, nlen, nil, 0, nil, nil)
+                    local ubuf = ffi.new("char[?]", ulen + 1)
+                    wc2mb(65001, 0, find_data.cFileName, nlen, ubuf, ulen, nil, nil)
+                    ubuf[ulen] = 0
+                    local name = ffi.string(ubuf, ulen)
                     if name ~= "." and name ~= ".." then
                         local is_dir = (bit.band(find_data.dwFileAttributes, 0x10) ~= 0)
                         table.insert(entries, { name = name, isDirectory = is_dir })
                     end
-                    if clib.FindNextFileA(hFind, find_data) == 0 then
+                    if fn_next(hFind, find_data) == 0 then
                         break
                     end
                 end
-                clib.FindClose(hFind)
+                fn_close(hFind)
             else
                 error("Impossibile aprire la directory: " .. payload.path)
             end

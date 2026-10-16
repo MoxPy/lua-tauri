@@ -963,17 +963,18 @@ void platform_shortcut_unregister(const char *shortcut) {
 
 int platform_deeplink_register(const char *scheme) {
 #if defined(_WIN32)
-    char exe_path[MAX_PATH];
-    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
-    std::string key = "Software\\Classes\\" + std::string(scheme);
+    wchar_t exe_path_w[MAX_PATH];
+    GetModuleFileNameW(NULL, exe_path_w, MAX_PATH);
+    std::wstring scheme_w(scheme, scheme + strlen(scheme));
+    std::wstring key_w = L"Software\\Classes\\" + scheme_w;
     HKEY hKey;
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, key.c_str(), 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        std::string desc = "URL:" + std::string(scheme) + " Protocol";
-        RegSetValueExA(hKey, "", 0, REG_SZ, (const BYTE *)desc.c_str(), (DWORD)desc.size() + 1);
-        std::string cmd = "\"" + std::string(exe_path) + "\" \"%1\"";
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, key_w.c_str(), 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        std::wstring desc_w = L"URL:" + scheme_w + L" Protocol";
+        RegSetValueExW(hKey, L"", 0, REG_SZ, (const BYTE *)desc_w.c_str(), (DWORD)(desc_w.size() + 1) * sizeof(wchar_t));
+        std::wstring cmd_w = L"\"" + std::wstring(exe_path_w) + L"\" \"%1\"";
         HKEY hCmd;
-        RegCreateKeyExA(hKey, "shell\\open\\command", 0, NULL, 0, KEY_WRITE, NULL, &hCmd, NULL);
-        RegSetValueExA(hCmd, "", 0, REG_SZ, (const BYTE *)cmd.c_str(), (DWORD)cmd.size() + 1);
+        RegCreateKeyExW(hKey, L"shell\\open\\command", 0, NULL, 0, KEY_WRITE, NULL, &hCmd, NULL);
+        RegSetValueExW(hCmd, L"", 0, REG_SZ, (const BYTE *)cmd_w.c_str(), (DWORD)(cmd_w.size() + 1) * sizeof(wchar_t));
         RegCloseKey(hCmd);
         RegCloseKey(hKey);
         return 1;
@@ -989,13 +990,14 @@ int platform_deeplink_register(const char *scheme) {
 int platform_updater_install(const char *archive_path) {
     if (!archive_path || archive_path[0] == '\0') return 0;
 #if defined(_WIN32)
-    std::string cmd = "tar.exe -xf \"" + std::string(archive_path) + "\" -C .";
-    STARTUPINFOA si;
+    std::string arch_str = archive_path;
+    std::wstring cmd_w = L"tar.exe -xf \"" + std::wstring(arch_str.begin(), arch_str.end()) + L"\" -C .";
+    STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     ZeroMemory(&si, sizeof(si));
     ZeroMemory(&pi, sizeof(pi));
     si.cb = sizeof(si);
-    if (!CreateProcessA(NULL, const_cast<char *>(cmd.c_str()), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+    if (!CreateProcessW(NULL, const_cast<wchar_t *>(cmd_w.c_str()), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         return 0;
     }
     WaitForSingleObject(pi.hProcess, INFINITE);
@@ -1543,15 +1545,16 @@ void platform_notification_send(const char *title, const char *body) {
             "$toast = [Windows.UI.Notifications.ToastNotification]::new($template); "
             "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Tauri').Show($toast);";
 
-        std::string cmd = "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"" + ps + "\"";
-        STARTUPINFOA si;
+        std::wstring ps_w(ps.begin(), ps.end());
+        std::wstring cmd_w = L"powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"" + ps_w + L"\"";
+        STARTUPINFOW si;
         PROCESS_INFORMATION pi;
         ZeroMemory(&si, sizeof(si));
         si.cb = sizeof(si);
         si.dwFlags = STARTF_USESHOWWINDOW;
         si.wShowWindow = SW_HIDE;
         ZeroMemory(&pi, sizeof(pi));
-        if (CreateProcessA(NULL, (LPSTR)cmd.c_str(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        if (CreateProcessW(NULL, const_cast<wchar_t *>(cmd_w.c_str()), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
             WaitForSingleObject(pi.hProcess, 5000);
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
@@ -1946,6 +1949,14 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
     if (!program || strlen(program) == 0) return nullptr;
 
 #if defined(_WIN32)
+    std::string prog_str = program;
+    std::string prog_lower = prog_str;
+    for (char &c : prog_lower) c = ::tolower((unsigned char)c);
+    if (prog_lower.size() >= 4 && (prog_lower.substr(prog_lower.size() - 4) == ".bat" || prog_lower.substr(prog_lower.size() - 4) == ".cmd")) {
+        ::fprintf(stderr, "[tauri-lua] error: direct execution of .bat / .cmd files is blocked for security (CWE-78)\n");
+        return nullptr;
+    }
+
     SECURITY_ATTRIBUTES sa;
     sa.nLength = sizeof(SECURITY_ATTRIBUTES);
     sa.bInheritHandle = TRUE;
@@ -1958,29 +1969,36 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
     }
     SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
 
-    std::string cmd_line;
-    auto append_quoted = [&](const std::string &arg) {
-        if (!cmd_line.empty()) cmd_line += " ";
-        if (arg.find(' ') != std::string::npos || arg.find('\t') != std::string::npos || arg.find('\"') != std::string::npos || arg.empty()) {
-            cmd_line += "\"";
-            for (char c : arg) {
-                if (c == '\"') cmd_line += "\\\"";
-                else cmd_line += c;
+    // Resolve absolute path to the executable to avoid CWD binary hijacking
+    std::wstring prog_w(prog_str.begin(), prog_str.end());
+    wchar_t abs_path_w[MAX_PATH];
+    DWORD found = SearchPathW(NULL, prog_w.c_str(), L".exe", MAX_PATH, abs_path_w, NULL);
+    LPCWSTR app_name_ptr = (found > 0) ? abs_path_w : NULL;
+
+    std::wstring cmd_line_w;
+    auto append_quoted_w = [&](const std::string &arg) {
+        if (!cmd_line_w.empty()) cmd_line_w += L" ";
+        std::wstring warg(arg.begin(), arg.end());
+        if (warg.find(L' ') != std::wstring::npos || warg.find(L'\t') != std::wstring::npos || warg.find(L'\"') != std::wstring::npos || warg.empty()) {
+            cmd_line_w += L"\"";
+            for (wchar_t c : warg) {
+                if (c == L'\"') cmd_line_w += L"\\\"";
+                else cmd_line_w += c;
             }
-            cmd_line += "\"";
+            cmd_line_w += L"\"";
         } else {
-            cmd_line += arg;
+            cmd_line_w += warg;
         }
     };
 
-    append_quoted(program);
+    append_quoted_w(program);
     for (int i = 0; i < arg_count; ++i) {
         if (args && args[i]) {
-            append_quoted(args[i]);
+            append_quoted_w(args[i]);
         }
     }
 
-    STARTUPINFOA si;
+    STARTUPINFOW si;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     si.hStdError = hWrite;
@@ -1990,11 +2008,11 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
 
-    std::vector<char> cmd_buf(cmd_line.begin(), cmd_line.end());
-    cmd_buf.push_back('\0');
+    std::vector<wchar_t> cmd_buf(cmd_line_w.begin(), cmd_line_w.end());
+    cmd_buf.push_back(L'\0');
 
-    BOOL success = CreateProcessA(
-        NULL,
+    BOOL success = CreateProcessW(
+        app_name_ptr,
         cmd_buf.data(),
         NULL,
         NULL,

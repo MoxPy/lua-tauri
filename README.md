@@ -326,7 +326,14 @@ end
 
 -- 3. Register IPC Command (callable from JavaScript via invoke())
 app:register("calculate_fibonacci", function(payload)
-    local n = tonumber(payload.n) or 20
+    -- Input validation: n must be a non-negative integer in [0, 93].
+    -- LuaJIT numbers are doubles; fib(94) overflows int64 silently.
+    local n = tonumber(payload.n)
+    if not n or n ~= math.floor(n) or n < 0 then
+        error("Invalid input: 'n' must be a non-negative integer")
+    end
+    n = math.min(n, 93)  -- cap at max safe Lua 64-bit integer Fibonacci value
+
     local a, b = 0, 1
     for _ = 1, n do
         a, b = b, a + b
@@ -498,15 +505,20 @@ Direct kernel-level process spawning with zero shell interpolation and real-time
 **Frontend Usage (`JavaScript`):**
 ```javascript
 // 1. Discrete argument array (Recommended: immune to command injection)
+// Note: requires "shell:execute" capability and "ping" in allowed_programs in tauri.conf.json
 await window.__TAURI__.shell.execute("ping", ["-c", "3", "127.0.0.1"], (chunk) => {
   console.log("Live stdout:", chunk.line);
 });
 
-// 2. Safe string parsing (Tokenizes arguments without invoking /bin/sh)
-const result = await window.__TAURI__.shell.execute("git status -s");
+// 2. Separate program + args (tokenized without invoking /bin/sh)
+// Note: single-string form is tokenized safely, no /bin/sh is ever invoked
+const result = await window.__TAURI__.shell.execute("git", ["status", "-s"]);
 console.log("Exit code:", result.code);
 console.log("Output:\n", result.stdout);
 ```
+
+> **Security note:** `shell:execute` requires the `"shell:execute"` capability in `tauri.conf.json`.
+> Use the `allowed_programs` scope to restrict which executables (and optionally which arguments) are permitted.
 
 ### 7. Custom Native Menu Bar API (Tauri 2 / `muda` Parity)
 
@@ -792,7 +804,7 @@ window.__TAURI__.event.listen("tauri://theme-changed", (event) => {
 Provides native desktop file drag & drop into webview windows, extracting the **real absolute filesystem paths** without browser sandbox restrictions:
 
 * **macOS:** Swizzles `performDragOperation:` on `WKWebView` to capture `NSPasteboardTypeFileURL`, converting window coordinates and suppressing browser page navigation.
-* **Windows:** Registers `DragAcceptFiles` and processes `WM_DROPFILES` via `DragQueryFileA`.
+* **Windows:** Registers `DragAcceptFiles` and processes `WM_DROPFILES` via `DragQueryFileW`.
 * **Linux:** Configures `gtk_drag_dest_set` and listens to `"drag-data-received"`.
 
 #### 1. Backend Usage (`Lua`)
