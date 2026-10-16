@@ -452,13 +452,44 @@ Security.__index = Security
 
 function Security.new(config)
     local self = setmetatable({}, Security)
-    local sec = (config.tauri and config.tauri.security) or config.security or {}
+    local sec = (config.app and config.app.security) or (config.tauri and config.tauri.security) or config.security or {}
     self.capabilities = {}
     if sec.capabilities then
         for _, cap in ipairs(sec.capabilities) do
             self.capabilities[cap] = true
         end
     end
+
+    -- Support Tauri v2 style capability files: src-tauri/capabilities/*.json
+    local cap_dirs = { "src-tauri/capabilities", "capabilities" }
+    for _, cap_dir in ipairs(cap_dirs) do
+        local probe = (ffi.os == "Windows")
+            and ('dir /b "' .. cap_dir:gsub("/", "\\") .. '\\*.json" 2>NUL')
+            or ("ls -1 " .. cap_dir .. "/*.json 2>/dev/null")
+        local p = io.popen(probe)
+        if p then
+            for line in p:lines() do
+                local fname = line:match("^%s*(.-)%s*$")
+                if fname ~= "" then
+                    local full_path = (fname:find("/") or fname:find("\\")) and fname or (cap_dir .. "/" .. fname)
+                    local f = io.open(full_path, "r")
+                    if f then
+                        local content = f:read("*a")
+                        f:close()
+                        local parsed = json.decode(content)
+                        if parsed and (parsed.permissions or parsed.capabilities) then
+                            local list = parsed.permissions or parsed.capabilities
+                            for _, perm in ipairs(list) do
+                                self.capabilities[perm] = true
+                            end
+                        end
+                    end
+                end
+            end
+            p:close()
+        end
+    end
+
     self.scopes = sec.scope or {}
 
     -- allowed_programs: list of strings or tables {name="cmd", args={"--allowed-flag", ...}}

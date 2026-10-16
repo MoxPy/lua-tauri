@@ -1,5 +1,5 @@
 {
-  "$schema": "https://schema.tauri.app/v2",
+  "$schema": "../schemas/tauri-lua.schema.json",
   "productName": "tauri-lua-app",
   "version": "1.0.0",
   "identifier": "com.tauri.lua",

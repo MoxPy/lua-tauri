@@ -1,0 +1,160 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Tauri-Lua Application Configuration Schema",
+  "description": "Schema definition for tauri.conf.json in Tauri-Lua projects, including LuaRocks dependencies and security capabilities/scopes.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "productName": {
+      "type": "string",
+      "description": "The product name used in bundles and window titles."
+    },
+    "version": {
+      "type": "string",
+      "description": "The application semantic version string."
+    },
+    "identifier": {
+      "type": "string",
+      "description": "The unique application bundle identifier (e.g. com.company.app)."
+    },
+    "dependencies": {
+      "type": "object",
+      "description": "Hermetic dependency declarations.",
+      "properties": {
+        "luarocks": {
+          "type": "array",
+          "description": "Declared LuaRocks dependencies for hermetic bundling (e.g. 'inspect 3.1.3-1').",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "version": { "type": "string" },
+                  "server": { "type": "string" }
+                },
+                "required": ["name"]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "description": "Build configuration and dev server commands.",
+      "properties": {
+        "frontendDist": {
+          "type": "string",
+          "description": "Path to the distribution directory containing web assets."
+        },
+        "devUrl": {
+          "type": "string",
+          "description": "Development server URL (e.g. http://localhost:5173)."
+        },
+        "beforeDevCommand": {
+          "type": "string",
+          "description": "Command to run before starting the dev server."
+        },
+        "beforeBuildCommand": {
+          "type": "string",
+          "description": "Command to run before compiling the release bundle."
+        }
+      }
+    },
+    "app": {
+      "type": "object",
+      "description": "Application runtime settings including window definitions and security.",
+      "properties": {
+        "windows": {
+          "type": "array",
+          "description": "Initial window configurations.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "width": { "type": "integer" },
+              "height": { "type": "integer" },
+              "resizable": { "type": "boolean" },
+              "decorations": { "type": "boolean" },
+              "transparent": { "type": "boolean" },
+              "fullscreen": { "type": "boolean" }
+            }
+          }
+        },
+        "security": {
+          "type": "object",
+          "description": "Security capabilities, scopes, CSP, and program execution allowlists.",
+          "properties": {
+            "capabilities": {
+              "type": "array",
+              "description": "Granted capabilities for frontend IPC (deny-by-default).",
+              "items": {
+                "type": "string"
+              }
+            },
+            "scope": {
+              "type": "array",
+              "description": "Filesystem path scopes (e.g. $APPDATA/*, $DESKTOP/*).",
+              "items": {
+                "type": "string"
+              }
+            },
+            "csp": {
+              "type": "string",
+              "description": "Content-Security-Policy HTTP header and DOM meta tag."
+            },
+            "allowed_programs": {
+              "type": "array",
+              "description": "Allowlist of executables and permitted arguments for shell:execute.",
+              "items": {
+                "oneOf": [
+                  { "type": "string" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "name": { "type": "string" },
+                      "args": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                      }
+                    },
+                    "required": ["name"]
+                  }
+                ]
+              }
+            },
+            "allow_custom_rock_server": {
+              "type": "boolean",
+              "description": "Allow custom HTTPS LuaRocks repositories."
+            }
+          }
+        }
+      }
+    },
+    "package": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "properties": {
+        "active": { "type": "boolean" },
+        "targets": { "type": "string" },
+        "identifier": { "type": "string" },
+        "icon": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
