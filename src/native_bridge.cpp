@@ -23,6 +23,7 @@
 #import <WebKit/WebKit.h>
 #import <UserNotifications/UserNotifications.h>
 #import <objc/runtime.h>
+#include <sys/param.h>
 #include <sys/ucred.h>
 #endif
 
@@ -1620,13 +1621,17 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     if (runtime_dir && strlen(runtime_dir) > 0) {
         sock_path = std::string(runtime_dir) + "/" + safe_id + ".sock";
     } else {
-        // No XDG_RUNTIME_DIR (e.g. macOS, or stripped env): fall back to
-        // ~/.local/run/<id>.sock (user-private, not world-writable /tmp).
+        // No XDG_RUNTIME_DIR (e.g. macOS or stripped env): fall back to
+        // user-private ~/.local/run/<id>.sock (mode 0700). Refuse world-writable /tmp.
         const char *home = getenv("HOME");
-        std::string run_dir = home ? (std::string(home) + "/.local/run") : "/tmp/.tauri-lua-run";
-        // Ensure the directory exists with 0700 permissions.
-        ::mkdir(run_dir.c_str(), 0700);
-        sock_path = run_dir + "/" + safe_id + ".sock";
+        if (home && strlen(home) > 0) {
+            std::string run_dir = std::string(home) + "/.local/run";
+            ::mkdir(run_dir.c_str(), 0700);
+            sock_path = run_dir + "/" + safe_id + ".sock";
+        } else {
+            ::fprintf(stderr, "[tauri-lua] error: single-instance requires XDG_RUNTIME_DIR or HOME; refusing /tmp fallback\n");
+            return -1;
+        }
     }
 
     // Try connecting as a secondary instance first
@@ -1680,9 +1685,8 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     }
 
     // Restrict socket to owner only (0600) — prevents other users from sending
-    // activation messages even if XDG_RUNTIME_DIR is world-accessible on some distros.
+    // activation messages even if directory is shared.
     if (chmod(sock_path.c_str(), 0600) < 0) {
-        // Non-fatal on macOS where the dir is already 0700, but warn.
         ::perror("[tauri-lua] warning: chmod 0600 on single-instance socket failed");
     }
 
@@ -1709,21 +1713,22 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
             }
 
             // Verify peer UID: reject connections from other users.
-#if defined(SO_PEERCRED)
-            struct ucred peer_cred;
+#if defined(__APPLE__) && defined(LOCAL_PEERCRED)
+            struct xucred peer_cred;
             socklen_t cred_len = sizeof(peer_cred);
-            if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer_cred, &cred_len) == 0) {
-                if (peer_cred.uid != owner_uid) {
+            memset(&peer_cred, 0, sizeof(peer_cred));
+            peer_cred.cr_version = XUCRED_VERSION;
+            if (getsockopt(client_fd, SOL_LOCAL, LOCAL_PEERCRED, &peer_cred, &cred_len) == 0) {
+                if (peer_cred.cr_uid != owner_uid) {
                     close(client_fd);
                     continue; // Drop — different user
                 }
             }
-#elif defined(LOCAL_PEERCRED) // macOS
-            struct xucred peer_cred;
+#elif defined(SO_PEERCRED)
+            struct ucred peer_cred;
             socklen_t cred_len = sizeof(peer_cred);
-            peer_cred.cr_version = XUCRED_VERSION;
-            if (getsockopt(client_fd, SOL_LOCAL, LOCAL_PEERCRED, &peer_cred, &cred_len) == 0) {
-                if (peer_cred.cr_uid != owner_uid) {
+            if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer_cred, &cred_len) == 0) {
+                if (peer_cred.uid != owner_uid) {
                     close(client_fd);
                     continue; // Drop — different user
                 }
@@ -1733,9 +1738,14 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
             std::string buffer;
             char chunk[512];
             ssize_t bytes_read = 0;
+            const size_t MAX_MSG_BYTES = 65536; // Cap incoming payload at 64KB
             while ((bytes_read = recv(client_fd, chunk, sizeof(chunk) - 1, 0)) > 0) {
                 chunk[bytes_read] = '\0';
                 buffer += chunk;
+                if (buffer.size() > MAX_MSG_BYTES) {
+                    buffer.clear();
+                    break;
+                }
                 if (buffer.find('\n') != std::string::npos) break;
             }
             close(client_fd);
@@ -1757,9 +1767,10 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     return 1; // Primary instance initialized!
 
 #else // Windows
-    std::string pipe_name = "\\\\.\\pipe\\" + safe_id + "-single-instance";
+    std::wstring safe_id_w(safe_id.begin(), safe_id.end());
+    std::wstring pipe_name_w = L"\\\\.\\pipe\\" + safe_id_w + L"-single-instance";
 
-    HANDLE hPipe = CreateFileA(pipe_name.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    HANDLE hPipe = CreateFileW(pipe_name_w.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (hPipe != INVALID_HANDLE_VALUE) {
         std::string msg = payload + "\n";
         DWORD bytesWritten = 0;
@@ -1768,10 +1779,10 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
         return 0; // Secondary instance!
     }
 
-    HANDLE server_pipe = CreateNamedPipeA(
-        pipe_name.c_str(),
+    HANDLE server_pipe = CreateNamedPipeW(
+        pipe_name_w.c_str(),
         PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
         PIPE_UNLIMITED_INSTANCES,
         4096, 4096, 0, NULL
     );
@@ -1781,12 +1792,12 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     g_single_instance_running = true;
     g_single_instance_initialized = true;
 
-    g_single_instance_thread = std::thread([pipe_name]() {
+    g_single_instance_thread = std::thread([pipe_name_w]() {
         while (g_single_instance_running) {
-            HANDLE hInstPipe = CreateNamedPipeA(
-                pipe_name.c_str(),
+            HANDLE hInstPipe = CreateNamedPipeW(
+                pipe_name_w.c_str(),
                 PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
                 4096, 4096, 0, NULL
             );
@@ -1799,9 +1810,15 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
                 char buf[4096];
                 DWORD bytesRead = 0;
                 std::string buffer;
-                if (ReadFile(hInstPipe, buf, sizeof(buf) - 1, &bytesRead, NULL) && bytesRead > 0) {
+                const size_t MAX_MSG_BYTES = 65536;
+                while (ReadFile(hInstPipe, buf, sizeof(buf) - 1, &bytesRead, NULL) && bytesRead > 0) {
                     buf[bytesRead] = '\0';
-                    buffer = buf;
+                    buffer.append(buf, bytesRead);
+                    if (buffer.size() > MAX_MSG_BYTES) {
+                        buffer.clear();
+                        break;
+                    }
+                    if (buffer.find('\n') != std::string::npos) break;
                 }
                 DisconnectNamedPipe(hInstPipe);
                 CloseHandle(hInstPipe);
