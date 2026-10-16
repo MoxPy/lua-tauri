@@ -1473,17 +1473,38 @@ On macOS, running `./lua-tauri build` produces two artifacts:
 2. **Apple Disk Image (`.dmg`):** A compressed, read-only disk image ready for user distribution generated via `hdiutil`.
 
 #### Production Code Signing & Notarization (Apple Gatekeeper)
-To distribute outside the Mac App Store without triggering Gatekeeper warnings:
+To distribute outside the Mac App Store without triggering Gatekeeper warnings, sign your application using Apple Hardened Runtime with inside-out signing (avoiding the deprecated `--deep` flag):
+
 ```bash
-# 1. Sign bundle with your Apple Developer ID
-codesign --deep --force --options runtime --sign "Developer ID Application: Your Name (TEAMID)" target/bundle/macos/tauri-lua-app.app
+SIGN_ID="Developer ID Application: Your Name (TEAMID)"
+APP_PATH="target/bundle/macos/tauri-lua-app.app"
+DMG_PATH="target/bundle/dmg/tauri-lua-app.dmg"
 
-# 2. Package into signed DMG
-hdiutil create -volname "tauri-lua-app" -srcfolder target/bundle/macos/tauri-lua-app.app -ov -format UDZO target/bundle/dmg/tauri-lua-app.dmg
+# 1. Sign embedded libraries and frameworks from the inside out
+if [ -d "${APP_PATH}/Contents/Frameworks" ]; then
+  find "${APP_PATH}/Contents/Frameworks" -type f \( -name "*.dylib" -o -name "*.so" \) -exec \
+    codesign --force --options runtime --timestamp --sign "${SIGN_ID}" {} +
+fi
 
-# 3. Submit for Apple Notarization
-xcrun notarytool submit target/bundle/dmg/tauri-lua-app.dmg --keychain-profile "AC_PASSWORD" --wait
-xcrun stapler staple target/bundle/dmg/tauri-lua-app.dmg
+# 2. Sign main executable and app bundle with Hardened Runtime entitlements
+codesign --force --options runtime --timestamp --entitlements entitlements.plist \
+  --sign "${SIGN_ID}" "${APP_PATH}/Contents/MacOS/tauri-lua-app"
+
+codesign --force --options runtime --timestamp --entitlements entitlements.plist \
+  --sign "${SIGN_ID}" "${APP_PATH}"
+
+# 3. Verify bundle signature and Gatekeeper policy
+codesign --verify --strict --verbose=4 "${APP_PATH}"
+spctl --assess --type execute --verbose "${APP_PATH}"
+
+# 4. Package and sign Apple Disk Image (.dmg)
+hdiutil create -volname "tauri-lua-app" -srcfolder "${APP_PATH}" -ov -format UDZO "${DMG_PATH}"
+codesign --force --timestamp --sign "${SIGN_ID}" "${DMG_PATH}"
+codesign --verify --strict "${DMG_PATH}"
+
+# 5. Submit for Apple Notarization
+xcrun notarytool submit "${DMG_PATH}" --keychain-profile "AC_PASSWORD" --wait
+xcrun stapler staple "${DMG_PATH}"
 ```
 
 ---

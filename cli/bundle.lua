@@ -15,9 +15,14 @@ if os_name == "OSX" then
     local bundle_dir = "build/" .. app_name .. ".app"
     local macos_dir = bundle_dir .. "/Contents/MacOS"
     local res_dir = bundle_dir .. "/Contents/Resources"
+    local fw_dir = bundle_dir .. "/Contents/Frameworks"
     exec("mkdir -p " .. macos_dir)
     exec("mkdir -p " .. res_dir)
+    exec("mkdir -p " .. fw_dir)
     exec("cp build/tauri_app " .. macos_dir .. "/" .. app_name)
+    if file_exists("build/libtaurilua.dylib") then
+        exec("cp build/libtaurilua.dylib " .. fw_dir .. "/")
+    end
     exec("cp -r dist " .. res_dir .. "/")
     
     local plist = string.format([[<?xml version="1.0" encoding="UTF-8"?>
