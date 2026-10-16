@@ -270,6 +270,6 @@ if not __IS_ISOLATE_WORKER__ then
     app:on_menu(function(event)
         print("[NATIVE MENU CLICKED]", event.id)
     end)
-end
 
-app:create_main_window()
+    app:create_main_window()
+end

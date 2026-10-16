@@ -22,7 +22,12 @@ class IsolatePool {
 public:
     IsolatePool(size_t num_workers = 0) : stop_(false) {
         if (num_workers == 0) {
-            num_workers = std::max(2u, std::thread::hardware_concurrency());
+            const char *env_w = getenv("TAURILUA_WORKERS");
+            if (env_w) {
+                num_workers = (size_t)std::max(0, atoi(env_w));
+            } else {
+                num_workers = 2;
+            }
         }
         for (size_t i = 0; i < num_workers; ++i) {
             workers_.emplace_back(&IsolatePool::worker_loop, this, i);
@@ -144,6 +149,7 @@ private:
     }
 
     void worker_loop(size_t id) {
+        if (stop_) return;
         lua_State *L = create_worker_state(id);
         if (!L) return;
 

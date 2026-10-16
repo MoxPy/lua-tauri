@@ -324,23 +324,26 @@ void Sleep(unsigned long dwMilliseconds);
 ]])
 
 local clib = ffi.C
-pcall(function()
-    local candidates = {
-        "libtaurilua",
-        "./build/libtaurilua.dylib",
-        "./build/libtaurilua.so",
-        "./build/Release/taurilua.dll",
-        "./build/taurilua.dll",
-        "taurilua"
-    }
-    for _, name in ipairs(candidates) do
-        local ok, lib = pcall(ffi.load, name)
-        if ok and lib then
-            clib = lib
-            break
+local has_sym = pcall(function() return ffi.C.platform_state_has end)
+if not has_sym then
+    pcall(function()
+        local candidates = {
+            "libtaurilua",
+            "./build/libtaurilua.dylib",
+            "./build/libtaurilua.so",
+            "./build/Release/taurilua.dll",
+            "./build/taurilua.dll",
+            "taurilua"
+        }
+        for _, name in ipairs(candidates) do
+            local ok, lib = pcall(ffi.load, name)
+            if ok and lib then
+                clib = lib
+                break
+            end
         end
-    end
-end)
+    end)
+end
 
 local json = {}
 

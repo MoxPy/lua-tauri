@@ -4,6 +4,11 @@
 #include "taurilua.h"
 
 int main() {
+#ifdef _WIN32
+    _putenv("TAURILUA_WORKERS=0");
+#else
+    setenv("TAURILUA_WORKERS", "0", 0);
+#endif
     printf("[Smoke Test] Starting Tauri-Lua headless smoke test...\n");
     taurilua_config_t cfg;
     taurilua_config_init(&cfg);
