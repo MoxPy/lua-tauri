@@ -31,14 +31,14 @@ Building small-to-medium desktop applications with Electron produces 150+ MB ins
 * **Microscopic Footprint:** Production executable binary is **~175 KB**, with bundle disk images under **100 KB**.
 * **Embeddable Scripting Host (`libtaurilua`):** Turn any C/C++ desktop software or Game Engine (**Godot, Unreal Engine, SDL2, GLFW**) into a hybrid web-UI app via our pure C ABI (`include/taurilua.h`) in one line of code.
 * **Hermetic LuaRocks Package Ecosystem:** Seamless zero-config integration with the global LuaRocks ecosystem. Declare packages directly in `tauri.conf.json` (`luasocket`, `lsqlite3`, `lua-cjson`), build them into isolated local trees (`src-tauri/.rocks/`), and bundle them automatically into release installers with zero DLL search-order hijacking.
-* **Complete Official Plugin Suite (1:1 Tauri 2 Parity):**
-  - **`plugin-sql`**: Multi-database engine supporting **SQLite**, **PostgreSQL**, and **MySQL** with transactional schema migrations (`_sqlx_migrations`) and SQL-injection-proof parameter bindings.
+* **Official Plugin Suite (Inspired by & largely compatible with Tauri 2):**
+  - **`plugin-sql`**: Multi-database engine supporting **SQLite**, **PostgreSQL**, and **MySQL** with schema migrations (`_sqlx_migrations`) and parameterized parameter bindings (`?`, `$n`).
   - **`plugin-http`**: Native `libcurl` engine delivering complete CORS bypass for desktop frontends with granular security scopes (`allow`/`deny`).
   - **`plugin-autostart`**: OS-native login persistence on macOS (LaunchAgent), Linux (XDG Autostart), and Windows (Registry Run keys).
-  - **`plugin-window-state`**: Zero-flicker restoration of window coordinates and fullscreen states across app launches.
-* **Enterprise Cybersecurity:** Hardened process spawning (zero command injection), dual-layer Content Security Policy (CSP), Origin Isolation, and Capability/Scope gating modeled after Tauri v2.
+  - **`plugin-window-state`**: Restoration of window coordinates and fullscreen states across app launches.
+* **Defense-in-Depth Security Model:** Hardened direct process spawning (bypassing raw subshells), dual-layer Content Security Policy (CSP), Native Origin Gating, and declarative Capability/Scope access controls modeled after Tauri v2.
 * **Instant App Scaffolding:** Interactive `lua-tauri create` command supporting Vanilla, React, Vue, Svelte, and Tailwind CSS with pre-wired Vite templates.
-* **Custom Native Menu Bar (Tauri 2 / `muda` Parity):** Fluent OOP & declarative menus (`Menu`, `Submenu`, `MenuItem`, `CheckMenuItem`, `PredefinedMenuItem`) with OS responder chain integration and dual Lua/JS event routing.
+* **Custom Native Menu Bar:** Fluent OOP & declarative menus (`Menu`, `Submenu`, `MenuItem`, `CheckMenuItem`, `PredefinedMenuItem`) with OS responder chain integration and dual Lua/JS event routing.
 * **Non-Blocking Multi-Core Concurrency:** Built-in Worker Isolate Pool distributes CPU-heavy workloads across hardware threads without stalling the 60/120 FPS UI loop.
 
 ---
@@ -1055,9 +1055,9 @@ console.log("Restored dimensions:", savedState.width, savedState.height);
 
 ---
 
-### 5. Plugin Deep Dive: Multi-Database SQL Engine (@tauri-apps/plugin-sql Parity)
+### 5. Plugin Deep Dive: Multi-Database SQL Engine (@tauri-apps/plugin-sql Compatible)
 
-The Tauri-Lua SQL plugin provides complete feature parity with official `@tauri-apps/plugin-sql`. It supports **SQLite**, **PostgreSQL**, and **MySQL / MariaDB** under a unified, declarative connection string interface.
+The Tauri-Lua SQL plugin provides an API largely compatible with `@tauri-apps/plugin-sql`. It supports **SQLite**, **PostgreSQL**, and **MySQL / MariaDB** under a unified, declarative connection string interface.
 
 ```text
        Frontend Webview (JavaScript / TypeScript)
@@ -1074,7 +1074,7 @@ The Tauri-Lua SQL plugin provides complete feature parity with official `@tauri-
          (Atomic Versioned Schema Track)
                           │
              Parameterized Bindings ($1, ?)
-           (OWASP CWE-89 Injection Immunity)
+           (OWASP CWE-89 Parameter Binding)
 ```
 
 #### Supported Database URI Formats
@@ -1093,8 +1093,8 @@ Schema migrations ensure that your local and remote database tables stay in sync
 - The runtime maintains an internal `_sqlx_migrations` table tracking applied version numbers, execution checksums, and execution timestamps.
 - **Transactionality Note:** On **SQLite** and **PostgreSQL**, schema migrations run within an atomic transaction. On **MySQL / MariaDB**, SQL DDL statements (`CREATE TABLE`, `ALTER TABLE`) trigger an implicit engine commit and cannot be rolled back. If a MySQL migration fails partially midway, the migration entry is marked with a dirty/failed status requiring manual correction before subsequent migrations can proceed.
 
-#### SQL Injection Immunity (OWASP CWE-89)
-All queries accept parameterized bindings using positional placeholders (`$1, $2, $3`) or standard question marks (`?`). User inputs are never concatenated directly into query strings, ensuring complete immunity from SQL injection:
+#### Parameterized Query Binding (Mitigating SQL Injection / CWE-89)
+All driver queries support parameterized bindings using positional placeholders (`$1, $2, $3`) or standard question marks (`?`). Prepared statements bind caller parameters separately from the SQL statement grammar:
 
 ```javascript
 // Safe parameterized query across all engines:
