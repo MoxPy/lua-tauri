@@ -334,13 +334,13 @@ end
 
 -- 3. Register IPC Command (callable from JavaScript via invoke())
 app:register("calculate_fibonacci", function(payload)
-    -- Input validation: n must be a non-negative integer in [0, 93].
-    -- LuaJIT numbers are doubles; fib(94) overflows int64 silently.
+    -- Input validation: n must be a non-negative integer in [0, 78].
+    -- Lua numbers are IEEE-754 doubles (53-bit integer precision);
+    -- fib(78) is 5,527,939,700,884,757 < 2^53. Beyond n=78, doubles lose precision.
     local n = tonumber(payload.n)
-    if not n or n ~= math.floor(n) or n < 0 then
-        error("Invalid input: 'n' must be a non-negative integer")
+    if not n or n ~= math.floor(n) or n < 0 or n > 78 then
+        error("Invalid input: 'n' must be an integer between 0 and 78")
     end
-    n = math.min(n, 93)  -- cap at max safe Lua 64-bit integer Fibonacci value
 
     local a, b = 0, 1
     for _ = 1, n do
