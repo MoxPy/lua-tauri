@@ -1274,8 +1274,8 @@ local TAURI_CLIENT_SCRIPT = [[
     dialog: {
       open: function(o) { return makeInvoke("tauri:dialog:open", o || {}); },
       save: function(o) { return makeInvoke("tauri:dialog:save", o || {}); },
-      message: function(m, o) { o = o || {}; return makeInvoke("tauri:dialog:message", { message: m, title: o.title || "Message" }); },
-      ask: function(m, o) { o = o || {}; return makeInvoke("tauri:dialog:ask", { message: m, title: o.title || "Confirm" }); }
+      message: function(m, o) { o = o || {}; return makeInvoke("tauri:dialog:message", { message: m, title: o.title || "Message", kind: o.kind || o.type }); },
+      ask: function(m, o) { o = o || {}; return makeInvoke("tauri:dialog:ask", { message: m, title: o.title || "Confirm", kind: o.kind || o.type }); }
     },
     clipboard: {
       readText: function() { return makeInvoke("tauri:clipboard:read_text", {}); },

@@ -66,7 +66,7 @@ Building small-to-medium desktop applications with Electron produces 150+ MB ins
 flowchart TB
     subgraph Frontend["Frontend Layer (Chromeless Webview)"]
         UI["UI (HTML5 / CSS3 / React / Vite)"]
-        Client["window.__TAURI__.invoke(cmd, args)"]
+        Client["window.__TAURI__.core.invoke(cmd, args)"]
     end
 
     subgraph Bridge["System Webview & IPC Bridge (C++17)"]
@@ -369,11 +369,11 @@ app:create_main_window()
 Invoke registered commands from any frontend framework using the standard Tauri IPC interface:
 
 ```javascript
-import { invoke } from '@tauri-apps/api/core'; // Or window.__TAURI__.invoke
+import { invoke } from '@tauri-apps/api/core'; // Or window.__TAURI__.core.invoke (window.__TAURI__.invoke supported as legacy alias)
 
 async function calculate() {
   try {
-    const response = await window.__TAURI__.invoke('calculate_fibonacci', { n: 40 });
+    const response = await window.__TAURI__.core.invoke('calculate_fibonacci', { n: 40 });
     console.log('Result from Lua backend:', response.result);
     console.log('Processed by worker:', response.workerId);
   } catch (error) {
@@ -404,7 +404,7 @@ const channel = new window.__TAURI__.Channel((data) => {
   console.log("Received stream chunk:", data.message);
 });
 
-const result = await window.__TAURI__.invoke("stream_countdown", {
+const result = await window.__TAURI__.core.invoke("stream_countdown", {
   onProgress: channel
 });
 console.log("Stream finished:", result.status);
@@ -489,7 +489,7 @@ await appWindow.onCloseRequested(async (event) => {
 
     const saveChanges = await window.__TAURI__.dialog.ask(
       "You have unsaved changes. Do you want to save before closing?",
-      { title: "Unsaved Changes", type: "warning" }
+      { title: "Unsaved Changes", kind: "warning" }
     );
 
     if (saveChanges) {
