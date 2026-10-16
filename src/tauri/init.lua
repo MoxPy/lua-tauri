@@ -600,29 +600,48 @@ State.__index = State
 function State.new(json_codec)
     local self = setmetatable({}, State)
     self.json = json_codec
+    self._versions = {}
     return self
 end
 
-function State:update(key, callback)
+function State:update(key, callback, max_retries)
     if type(callback) ~= "function" then
         error("State:update requires a function callback")
     end
-    clib.platform_state_lock()
-    local ok, res = pcall(function()
-        local current = self:get(key)
-        local next_val = callback(current)
-        if next_val ~= nil then
-            self:set(key, next_val)
-        else
-            self:delete(key)
+    max_retries = max_retries or 50
+    local skey = tostring(key)
+
+    for _ = 1, max_retries do
+        -- 1. Read current value and version snapshot under brief lock
+        clib.platform_state_lock()
+        local current = self:get(skey)
+        local ver = self._versions[skey] or 0
+        clib.platform_state_unlock()
+
+        -- 2. Execute user callback strictly WITHOUT holding the mutex (prevents deadlocks during I/O)
+        local ok, next_val = pcall(callback, current)
+        if not ok then
+            error(next_val)
         end
-        return next_val
-    end)
-    clib.platform_state_unlock()
-    if not ok then
-        error(res)
+
+        -- 3. Atomic CAS commit: verify version hasn't changed, then write and increment version
+        clib.platform_state_lock()
+        local current_ver = self._versions[skey] or 0
+        if current_ver == ver then
+            if next_val ~= nil then
+                self:set(skey, next_val)
+            else
+                self:delete(skey)
+            end
+            self._versions[skey] = current_ver + 1
+            clib.platform_state_unlock()
+            return next_val
+        end
+        clib.platform_state_unlock()
+        -- Version changed: conflict detected, retry CAS loop
     end
-    return res
+
+    error(string.format("State:update failed: CAS conflict retry limit exceeded (%d attempts) for key '%s'", max_retries, skey))
 end
 
 function State:set(key, value)
