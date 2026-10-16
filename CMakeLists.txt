@@ -138,6 +138,17 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/host_c/main.c)
     target_link_libraries(host_c_example PRIVATE taurilua)
 endif()
 
+# 4. CI Smoke Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke_test.c)
+    add_executable(smoke_test
+        tests/smoke_test.c
+    )
+    target_include_directories(smoke_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(smoke_test PRIVATE taurilua)
+endif()
+
 if(APPLE)
     target_compile_definitions(taurilua PRIVATE WEBVIEW_COCOA)
     enable_language(OBJCXX)
@@ -164,6 +175,12 @@ if(APPLE)
     )
     if(TARGET host_c_example)
         set_target_properties(host_c_example PROPERTIES
+            BUILD_WITH_INSTALL_RPATH TRUE
+            INSTALL_RPATH "@executable_path;@executable_path/../Frameworks;@loader_path"
+        )
+    endif()
+    if(TARGET smoke_test)
+        set_target_properties(smoke_test PROPERTIES
             BUILD_WITH_INSTALL_RPATH TRUE
             INSTALL_RPATH "@executable_path;@executable_path/../Frameworks;@loader_path"
         )

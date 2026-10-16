@@ -2301,6 +2301,7 @@ Tauri.PredefinedMenuItem = PredefinedMenuItem
 
 return {
     init = Tauri.new,
+    new = Tauri.new,
     sleep = Tauri.sleep,
     json = json,
     notification = {

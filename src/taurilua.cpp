@@ -346,7 +346,12 @@ struct lua_State *taurilua_get_lua_state(taurilua_app_t *app) {
 
 int taurilua_eval_lua(taurilua_app_t *app, const char *lua_code) {
     if (!app || !app->L || !lua_code) return -1;
-    return luaL_dostring(app->L, lua_code);
+    int res = luaL_dostring(app->L, lua_code);
+    if (res != 0) {
+        std::cerr << "[taurilua_eval_lua error]: " << lua_tostring(app->L, -1) << std::endl;
+        lua_pop(app->L, 1);
+    }
+    return res;
 }
 
 void taurilua_eval_js(taurilua_app_t *app, const char *window_label, const char *javascript) {
