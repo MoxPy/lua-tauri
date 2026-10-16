@@ -159,9 +159,13 @@ my-app/
 
 ### Prerequisites
 
-* **macOS:** `clang` (Xcode Command Line Tools), `cmake`, `luajit` (`brew install luajit cmake`).
-* **Linux (Debian/Ubuntu):** `build-essential`, `cmake`, `luajit`, `libgtk-3-dev`, and WebKitGTK (`libwebkit2gtk-4.1-dev` for Ubuntu 24.04+ or `libwebkit2gtk-4.0-dev` for older distributions).
-* **Windows:** Visual Studio C++ Build Tools, `cmake`, `luajit`, Microsoft Edge WebView2 (pre-installed on Win 10/11).
+* **macOS:** `clang` (Xcode Command Line Tools), `cmake`, `luajit`, `luarocks` (`brew install luajit cmake luarocks`). Native `libcurl` is provided by the OS.
+* **Linux (Debian/Ubuntu):**
+  - **Core Runtime & Webview:** `build-essential`, `cmake`, `luajit` (`libluajit-5.1-dev`), `libgtk-3-dev`, and WebKitGTK (`libwebkit2gtk-4.1-dev` for modern distributions or `libwebkit2gtk-4.0-dev`).
+  - **System Notifications & HTTP:** `libnotify-bin` (for desktop notifications), `libcurl4-openssl-dev` (for HTTP plugin requests).
+  - **Package Management:** `luarocks` (for hermetic Lua package synchronization).
+  - **Remote SQL Drivers (Optional):** `libpq-dev` (PostgreSQL), `default-libmysqlclient-dev` (MySQL / MariaDB) if using remote database connections with the SQL plugin.
+* **Windows:** Visual Studio 2022 C++ Build Tools (MSVC), `cmake`, `luajit`, `luarocks`, Microsoft Edge WebView2 (pre-installed on Windows 10/11).
 
 ### Quickstart
 
