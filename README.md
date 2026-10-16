@@ -165,18 +165,40 @@ my-app/
 
 ### Quickstart
 
-Scaffold a new project in seconds or run the development environment:
+#### 1. Obtain and Build the Engine
+
+Clone the repository and compile the native runtime and shared library:
 
 ```bash
-# 1. Create a project interactively (Vanilla, React, Vue, Svelte, Tailwind)
-./lua-tauri create my-app
+# Clone repository
+git clone https://github.com/MoxPy/lua-tauri.git
+cd lua-tauri
 
-# 2. Enter project and start development mode (Hot Reload enabled)
+# Build runtime engine and shared library
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# (Optional) Install CLI globally to run from any directory:
+sudo ln -sf $(pwd)/lua-tauri /usr/local/bin/lua-tauri
+```
+
+#### 2. Scaffold and Run an Application
+
+Scaffold a new project in seconds and launch the live development environment:
+
+```bash
+# Global CLI usage:
+lua-tauri create my-app
+cd my-app
+lua-tauri dev
+
+# Or relative usage from cloned repository:
+./lua-tauri create my-app
 cd my-app
 ../lua-tauri dev
 
-# 3. Package for production (.dmg / .app on macOS, .deb on Linux)
-../lua-tauri build
+# Package for production (.dmg / .app on macOS, .deb on Linux, standalone on Windows):
+lua-tauri build  # (or ../lua-tauri build)
 ```
 
 ---
