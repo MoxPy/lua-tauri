@@ -727,7 +727,7 @@ window.__TAURI__.event.listen("tauri://single-instance", (event) => {
 
 Tauri-Lua delivers non-blocking, operating-system-native desktop notifications with zero external subshell injection:
 
-* **macOS:** Cocoa `NSUserNotification` via `NSUserNotificationCenter` with a custom delegate (`userNotificationCenter:shouldPresentNotification:` returning `YES`), displaying notification banners with default system sound even when the application is active in the foreground.
+* **macOS:** Modern Apple **`UserNotifications`** framework (`UNUserNotificationCenter`, `UNNotificationRequest`, and `ModernNotificationCenterDelegate` displaying banners even when foregrounded), with automatic authorization requests and a non-blocking `osascript` fallback for unpackaged terminal development.
 * **Windows:** Asynchronous Windows 10/11 Toast Notifications via WinRT `ToastNotificationManager` dispatched with `SW_HIDE` (avoiding intrusive modal message boxes).
 * **Linux:** Non-blocking `posix_spawnp` of `notify-send` with discrete `argv` arrays (zero shell interpolation).
 
