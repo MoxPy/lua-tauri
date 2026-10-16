@@ -208,7 +208,7 @@ end
 
 setup_module_search_paths()
 
-ffi.cdef[[
+pcall(ffi.cdef, [[
 typedef void (*ipc_callback_fn)(const char *window_label, const char *seq, const char *req);
 typedef void (*tray_callback_fn)(int id);
 typedef void (*shortcut_callback_fn)(const char *shortcut);
@@ -321,9 +321,26 @@ int closedir(DIR *dirp);
 int remove(const char *pathname);
 int usleep(unsigned int usec);
 void Sleep(unsigned long dwMilliseconds);
-]]
+]])
 
 local clib = ffi.C
+pcall(function()
+    local candidates = {
+        "libtaurilua",
+        "./build/libtaurilua.dylib",
+        "./build/libtaurilua.so",
+        "./build/Release/taurilua.dll",
+        "./build/taurilua.dll",
+        "taurilua"
+    }
+    for _, name in ipairs(candidates) do
+        local ok, lib = pcall(ffi.load, name)
+        if ok and lib then
+            clib = lib
+            break
+        end
+    end
+end)
 
 local json = {}
 
