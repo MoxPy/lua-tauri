@@ -1169,15 +1169,15 @@ Declare your required rocks directly in `tauri.conf.json` using the `dependencie
   "productName": "my-tauri-app",
   "dependencies": {
     "luarocks": [
-      "inspect",
+      "inspect 3.1.3-1",
       "luasocket 3.1.0-1",
       {
         "name": "lua-cjson",
-        "version": "2.1.0"
+        "version": "2.1.0.10-1"
       },
       {
-        "name": "lua-resty-jwt",
-        "server": "https://luarocks.org/dev"
+        "name": "luaossl",
+        "version": "20220711-0"
       }
     ]
   }
