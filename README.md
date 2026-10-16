@@ -1428,9 +1428,9 @@ target/bundle/
 │           ├── dist/               # Webview frontend assets
 │           └── rocks/              # Bundled hermetic LuaRocks & C modules
 ├── dmg/
-│   └── tauri-lua-app_1.0.0_x64.dmg # Compressed mountable Apple Disk Image
+│   └── tauri-lua-app_1.0.0_universal.dmg # Mountable Apple Disk Image (or _arm64 / _x86_64)
 ├── deb/
-│   └── tauri-lua-app_1.0.0_amd64.deb # Standard Debian / Ubuntu package
+│   └── tauri-lua-app_1.0.0_amd64.deb # Debian / Ubuntu package (or _arm64 for ARM / Raspberry Pi)
 │       └── usr/share/<app-name>/
 │           ├── dist/
 │           └── rocks/
