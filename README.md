@@ -100,6 +100,14 @@ Tauri-Lua maintains a strict, decoupled boundary between the **Core Framework En
 | **Core Runtime Engine** | `src/` (C++17) & `src/tauri/init.lua` | **Permanent System Layer.** Contains the OS window host (Cocoa/GTK/Win32), isolation token generator, origin validator, thread-safe Isolate Worker Pool, IPC router, `window.__TAURI__.Channel` streaming pipeline, file-system drivers, and native dialog wrappers. This layer is compiled into the binary and is permanently active. |
 | **User Application Space** | `src-tauri/src/main.lua` & `tauri.conf.json` | **Developer Logic.** Where you define application state (`app.state`), register business logic endpoints (`app:register(...)`), and configure capabilities. If you remove or refactor any user command (e.g. removing a streaming demo handler), the underlying engine capabilities remain completely intact and ready for future handlers with zero overhead. |
 
+### Isolate Worker Architecture & Threading Model
+
+Tauri-Lua implements a multi-VM isolate architecture designed for thread safety and responsiveness:
+
+1. **Main UI Thread Affinity:** All UI operations (creating windows, dialogs, menu bars, tray icons, notifications) run strictly on the platform's native main thread (`dispatch_sync` on Cocoa/macOS, GTK main loop on Linux, Win32 message thread on Windows) via `run_on_main_sync`.
+2. **Worker Isolation (`__IS_ISOLATE_WORKER__`):** Worker threads run independent, pre-warmed LuaJIT VM states to execute CPU-intensive handlers in parallel. The runtime sets `__IS_ISOLATE_WORKER__ = true` in worker states, preventing duplicate window initialization (`app:create_main_window()`), duplicated tray creation, or redundant plugin hooks.
+3. **Serialized Shared State:** The shared state engine (`app.state`) stores primitives and JSON-serialized structured tables guarded by native mutexes. Arbitrary Lua functions or coroutines cannot cross isolate VM boundaries, maintaining memory safety and avoiding race conditions.
+
 ---
 
 ## When to Use Tauri-Lua
