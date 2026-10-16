@@ -426,7 +426,28 @@ function Security.new(config)
         end
     end
     self.scopes = sec.scope or {}
+
+    -- allowed_programs: list of strings or tables {name="cmd", args={"--allowed-flag", ...}}
+    -- String entry means: program allowed with ANY args.
+    -- Table entry means: program allowed ONLY with args from the given list.
     self.allowed_programs = sec.allowed_programs or sec.allowed_commands or {}
+    -- Build a fast-lookup map: program_name -> arg_whitelist (nil = any args ok)
+    self._program_map = {}
+    for _, entry in ipairs(self.allowed_programs) do
+        if type(entry) == "string" then
+            if entry == "*" then
+                self._program_map["*"] = nil  -- wildcard: any program, any args
+            else
+                self._program_map[entry] = nil  -- specific program, any args
+            end
+        elseif type(entry) == "table" then
+            local prog = entry.name or entry.program or entry.cmd
+            if prog then
+                -- args list: allowed literal arg values (OR patterns if marked regex)
+                self._program_map[prog] = entry.args or nil
+            end
+        end
+    end
     return self
 end
 
@@ -441,15 +462,35 @@ function Security:assert_program(program)
         error("Capability non autorizzata: shell:execute")
     end
     if #self.allowed_programs > 0 then
-        local allowed = false
-        for _, p in ipairs(self.allowed_programs) do
-            if p == program or p == "*" then
-                allowed = true
+        -- Check if wildcard "*" is present (any program allowed) or specific program is listed
+        local found = false
+        for k in pairs(self._program_map) do
+            if k == "*" or k == program then
+                found = true
                 break
             end
         end
-        if not allowed then
-            error(string.format("Esecuzione comando non autorizzata dallo Scope: %s", program))
+        if not found then
+            error(string.format("Shell: program not in allowlist: %s", program))
+        end
+    end
+end
+
+-- Check that each arg in args[] is permitted for the given program.
+-- No-op when: no allowed_programs configured, wildcard "*" entry, or program entry has no arg list.
+function Security:assert_args(program, args)
+    if #self.allowed_programs == 0 then return end
+    -- wildcard entry: any program + any args allowed
+    if self._program_map["*"] ~= nil then return end
+    local arg_whitelist = self._program_map[program]
+    -- Program entry with no args restriction: any args allowed for this program
+    if arg_whitelist == nil then return end
+    -- Strict mode: each arg must appear in the whitelist
+    local whiteset = {}
+    for _, a in ipairs(arg_whitelist) do whiteset[a] = true end
+    for _, arg in ipairs(args) do
+        if not whiteset[arg] then
+            error(string.format("Shell: argument not in allowlist for '%s': %s", program, arg))
         end
     end
 end
@@ -1554,7 +1595,7 @@ function Tauri:_register_builtins()
         end
 
         self.security:assert_program(program)
-
+        self.security:assert_args(program, args)
         local arg_count = #args
         local c_args = nil
         if arg_count > 0 then
