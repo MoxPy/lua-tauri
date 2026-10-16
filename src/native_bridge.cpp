@@ -23,6 +23,7 @@
 #import <WebKit/WebKit.h>
 #import <UserNotifications/UserNotifications.h>
 #import <objc/runtime.h>
+#include <sys/ucred.h>
 #endif
 
 #define WEBVIEW_STATIC
@@ -50,6 +51,8 @@ using namespace Microsoft::WRL;
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 extern char **environ;
 #endif
 
@@ -1617,7 +1620,13 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     if (runtime_dir && strlen(runtime_dir) > 0) {
         sock_path = std::string(runtime_dir) + "/" + safe_id + ".sock";
     } else {
-        sock_path = "/tmp/" + safe_id + ".sock";
+        // No XDG_RUNTIME_DIR (e.g. macOS, or stripped env): fall back to
+        // ~/.local/run/<id>.sock (user-private, not world-writable /tmp).
+        const char *home = getenv("HOME");
+        std::string run_dir = home ? (std::string(home) + "/.local/run") : "/tmp/.tauri-lua-run";
+        // Ensure the directory exists with 0700 permissions.
+        ::mkdir(run_dir.c_str(), 0700);
+        sock_path = run_dir + "/" + safe_id + ".sock";
     }
 
     // Try connecting as a secondary instance first
@@ -1644,8 +1653,14 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
         close(client_sock);
     }
 
-    // If connect failed, remove any stale dead socket file
-    unlink(sock_path.c_str());
+    // If connect failed, remove any stale dead socket file.
+    // Use lstat + verify it is a socket before unlinking (symlink safety).
+    {
+        struct stat st;
+        if (lstat(sock_path.c_str(), &st) == 0 && S_ISSOCK(st.st_mode)) {
+            unlink(sock_path.c_str());
+        }
+    }
 
     // Become primary instance server
     int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1664,6 +1679,13 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
         return -1;
     }
 
+    // Restrict socket to owner only (0600) — prevents other users from sending
+    // activation messages even if XDG_RUNTIME_DIR is world-accessible on some distros.
+    if (chmod(sock_path.c_str(), 0600) < 0) {
+        // Non-fatal on macOS where the dir is already 0700, but warn.
+        ::perror("[tauri-lua] warning: chmod 0600 on single-instance socket failed");
+    }
+
     if (listen(server_fd, 5) < 0) {
         close(server_fd);
         unlink(sock_path.c_str());
@@ -1676,6 +1698,7 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     g_single_instance_initialized = true;
 
     g_single_instance_thread = std::thread([server_fd]() {
+        const uid_t owner_uid = getuid();
         while (g_single_instance_running) {
             struct sockaddr_un client_addr;
             socklen_t client_len = sizeof(client_addr);
@@ -1684,6 +1707,29 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
                 if (!g_single_instance_running) break;
                 continue;
             }
+
+            // Verify peer UID: reject connections from other users.
+#if defined(SO_PEERCRED)
+            struct ucred peer_cred;
+            socklen_t cred_len = sizeof(peer_cred);
+            if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer_cred, &cred_len) == 0) {
+                if (peer_cred.uid != owner_uid) {
+                    close(client_fd);
+                    continue; // Drop — different user
+                }
+            }
+#elif defined(LOCAL_PEERCRED) // macOS
+            struct xucred peer_cred;
+            socklen_t cred_len = sizeof(peer_cred);
+            peer_cred.cr_version = XUCRED_VERSION;
+            if (getsockopt(client_fd, SOL_LOCAL, LOCAL_PEERCRED, &peer_cred, &cred_len) == 0) {
+                if (peer_cred.cr_uid != owner_uid) {
+                    close(client_fd);
+                    continue; // Drop — different user
+                }
+            }
+#endif
+
             std::string buffer;
             char chunk[512];
             ssize_t bytes_read = 0;
