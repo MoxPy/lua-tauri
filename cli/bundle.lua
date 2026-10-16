@@ -103,11 +103,17 @@ Description: Tauri-Lua - LuaJIT-powered desktop application runtime
 elseif os_name == "Windows" then
     local out_dir = "build\\" .. app_name .. "-standalone"
     exec("mkdir " .. out_dir)
-    exec("copy build\\Release\\tauri_app.exe " .. out_dir .. "\\")
+    exec("copy build\\Release\\tauri_app.exe " .. out_dir .. "\\ 2>NUL || copy build\\tauri_app.exe " .. out_dir .. "\\")
     if file_exists("build\\Release\\taurilua.dll") then
         exec("copy build\\Release\\taurilua.dll " .. out_dir .. "\\")
     elseif file_exists("build\\taurilua.dll") then
         exec("copy build\\taurilua.dll " .. out_dir .. "\\")
+    end
+    -- Include LuaJIT DLL (lua51.dll / luajit.dll) for execution on machines without toolchains
+    exec("copy build\\Release\\lua51.dll " .. out_dir .. "\\ 2>NUL || copy build\\lua51.dll " .. out_dir .. "\\ 2>NUL || copy build\\Release\\luajit.dll " .. out_dir .. "\\ 2>NUL || copy build\\luajit.dll " .. out_dir .. "\\ 2>NUL || rem")
+    local luajit_env = os.getenv("LUAJIT_ROOT")
+    if luajit_env then
+        exec('copy "' .. luajit_env .. '\\bin\\lua51.dll" ' .. out_dir .. '\\ 2>NUL || copy "' .. luajit_env .. '\\lua51.dll" ' .. out_dir .. '\\ 2>NUL || rem')
     end
     exec("xcopy /E /I dist " .. out_dir .. "\\dist")
     exec("tar -czf build\\" .. app_name .. "-windows-x64.zip -C build " .. app_name .. "-standalone")

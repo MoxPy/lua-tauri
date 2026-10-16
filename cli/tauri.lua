@@ -1095,6 +1095,12 @@ Description: %s built with Tauri-Lua
         exec("mkdir " .. win_dir)
         exec("copy build\\Release\\tauri_app.exe " .. win_dir .. "\\ 2>NUL || copy build\\tauri_app.exe " .. win_dir .. "\\")
         exec("copy build\\Release\\taurilua.dll " .. win_dir .. "\\ 2>NUL || copy build\\taurilua.dll " .. win_dir .. "\\ 2>NUL || rem")
+        -- Bundle LuaJIT DLL (lua51.dll / luajit.dll) so the standalone runs on machines without a developer toolchain
+        exec("copy build\\Release\\lua51.dll " .. win_dir .. "\\ 2>NUL || copy build\\lua51.dll " .. win_dir .. "\\ 2>NUL || copy build\\Release\\luajit.dll " .. win_dir .. "\\ 2>NUL || copy build\\luajit.dll " .. win_dir .. "\\ 2>NUL || rem")
+        local luajit_env = os.getenv("LUAJIT_ROOT")
+        if luajit_env then
+            exec('copy "' .. luajit_env .. '\\bin\\lua51.dll" ' .. win_dir .. '\\ 2>NUL || copy "' .. luajit_env .. '\\lua51.dll" ' .. win_dir .. '\\ 2>NUL || rem')
+        end
         exec("xcopy /E /I " .. frontend_dist .. " " .. win_dir .. "\\" .. frontend_dist)
 
         local rocks_tree = get_rocks_tree_dir()
