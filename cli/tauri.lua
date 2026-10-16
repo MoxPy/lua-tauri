@@ -711,7 +711,9 @@ local function cmd_dev(args)
 
     local function spawn_app()
         running(bin_path)
-        local p = io.popen(bin_path .. " & echo $!")
+        -- TAURILUA_DEV=1 activates cwd-relative module discovery (./plugins, ../lua-tauri-plugins, etc.)
+        -- which is deliberately excluded from release builds for security.
+        local p = io.popen("TAURILUA_DEV=1 " .. bin_path .. " & echo $!")
         local pid = p and tonumber(p:read("*l"))
         if p then p:close() end
         return pid

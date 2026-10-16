@@ -3,8 +3,24 @@ local bit = bit or require("bit")
 
 -- ============================================================================
 -- Module & Plugin Search Paths (Auto-Discovery)
+-- In RELEASE builds only absolute exec-relative paths are added.
+-- Relative cwd paths (./  ../) are restricted to DEV mode only, activated
+-- by setting the TAURILUA_DEV=1 environment variable (set by `lua-tauri dev`).
 -- ============================================================================
 local function setup_module_search_paths()
+    -- Detect dev mode via env variable (set before Lua state is created).
+    -- __TAURI_DEV__ is injected later by the C host, so we cannot use it here.
+    local function is_dev_mode()
+        -- Check env via os.getenv (available before ffi.cdef redeclaration)
+        local ok, val = pcall(os.getenv, "TAURILUA_DEV")
+        if ok and val and val ~= "" and val ~= "0" then
+            return true
+        end
+        return false
+    end
+
+    local dev_mode = is_dev_mode()
+
     local function get_executable_dir()
         local dir = nil
         pcall(function()
@@ -48,67 +64,82 @@ local function setup_module_search_paths()
 
     local exec_dir = get_executable_dir()
 
-    local extra_lua_paths = {
-        "./?.lua",
-        "./?/init.lua",
-        "./src-tauri/?.lua",
-        "./src-tauri/?/init.lua",
-        "./plugins/?.lua",
-        "./plugins/?/init.lua",
-        "./plugins/?/src/?.lua",
-        "../lua-tauri-plugins/plugins/?.lua",
-        "../lua-tauri-plugins/plugins/?/init.lua",
-        "../lua-tauri-plugins/plugins/?/src/?.lua",
-        "../plugins/?.lua",
-        "../plugins/?/init.lua",
-        "./node_modules/?/init.lua",
-        "./node_modules/@tauri-apps/plugin-?/init.lua",
-        "./node_modules/lua-tauri-plugin-?/init.lua",
-        -- Local Hermetic LuaRocks tree paths (development)
-        "./src-tauri/.rocks/share/lua/5.1/?.lua",
-        "./src-tauri/.rocks/share/lua/5.1/?/init.lua",
-        "./.rocks/share/lua/5.1/?.lua",
-        "./.rocks/share/lua/5.1/?/init.lua",
-        "../src-tauri/.rocks/share/lua/5.1/?.lua",
-        "../src-tauri/.rocks/share/lua/5.1/?/init.lua",
-        "../.rocks/share/lua/5.1/?.lua",
-        "../.rocks/share/lua/5.1/?/init.lua"
-    }
+    -- Paths that are safe in both dev and release (absolute, exec-relative)
+    local extra_lua_paths = {}
+    local extra_c_paths = {}
 
-    local extra_c_paths = {
-        "./?.so",
-        "./?.dylib",
-        "./?.dll",
-        "./plugins/?.so",
-        "./plugins/?.dylib",
-        "./plugins/?.dll",
-        "../lua-tauri-plugins/plugins/?/?.so",
-        "../lua-tauri-plugins/plugins/?/?.dylib",
-        "../lua-tauri-plugins/plugins/?/?.dll",
-        -- Local Hermetic LuaRocks C modules (development)
-        "./src-tauri/.rocks/lib/lua/5.1/?.so",
-        "./src-tauri/.rocks/lib/lua/5.1/?.dylib",
-        "./src-tauri/.rocks/lib/lua/5.1/?.dll",
-        "./.rocks/lib/lua/5.1/?.so",
-        "./.rocks/lib/lua/5.1/?.dylib",
-        "./.rocks/lib/lua/5.1/?.dll",
-        "../src-tauri/.rocks/lib/lua/5.1/?.so",
-        "../src-tauri/.rocks/lib/lua/5.1/?.dylib",
-        "../src-tauri/.rocks/lib/lua/5.1/?.dll",
-        "../.rocks/lib/lua/5.1/?.so",
-        "../.rocks/lib/lua/5.1/?.dylib",
-        "../.rocks/lib/lua/5.1/?.dll"
-    }
+    -- -----------------------------------------------------------------------
+    -- DEV-ONLY relative paths (cwd-relative, sibling repos, node_modules).
+    -- These are NOT included in production releases to prevent module hijacking
+    -- via a malicious cwd or PATH-adjacent directory.
+    -- -----------------------------------------------------------------------
+    if dev_mode then
+        local dev_lua_paths = {
+            "./?.lua",
+            "./?/init.lua",
+            "./src-tauri/?.lua",
+            "./src-tauri/?/init.lua",
+            "./plugins/?.lua",
+            "./plugins/?/init.lua",
+            "./plugins/?/src/?.lua",
+            "../lua-tauri-plugins/plugins/?.lua",
+            "../lua-tauri-plugins/plugins/?/init.lua",
+            "../lua-tauri-plugins/plugins/?/src/?.lua",
+            "../plugins/?.lua",
+            "../plugins/?/init.lua",
+            "./node_modules/?/init.lua",
+            "./node_modules/@tauri-apps/plugin-?/init.lua",
+            "./node_modules/lua-tauri-plugin-?/init.lua",
+            -- Local hermetic LuaRocks tree (development)
+            "./src-tauri/.rocks/share/lua/5.1/?.lua",
+            "./src-tauri/.rocks/share/lua/5.1/?/init.lua",
+            "./.rocks/share/lua/5.1/?.lua",
+            "./.rocks/share/lua/5.1/?/init.lua",
+            "../src-tauri/.rocks/share/lua/5.1/?.lua",
+            "../src-tauri/.rocks/share/lua/5.1/?/init.lua",
+            "../.rocks/share/lua/5.1/?.lua",
+            "../.rocks/share/lua/5.1/?/init.lua"
+        }
+        local dev_c_paths = {
+            "./?.so",
+            "./?.dylib",
+            "./?.dll",
+            "./plugins/?.so",
+            "./plugins/?.dylib",
+            "./plugins/?.dll",
+            "../lua-tauri-plugins/plugins/?/?.so",
+            "../lua-tauri-plugins/plugins/?/?.dylib",
+            "../lua-tauri-plugins/plugins/?/?.dll",
+            -- Local hermetic LuaRocks C modules (development)
+            "./src-tauri/.rocks/lib/lua/5.1/?.so",
+            "./src-tauri/.rocks/lib/lua/5.1/?.dylib",
+            "./src-tauri/.rocks/lib/lua/5.1/?.dll",
+            "./.rocks/lib/lua/5.1/?.so",
+            "./.rocks/lib/lua/5.1/?.dylib",
+            "./.rocks/lib/lua/5.1/?.dll",
+            "../src-tauri/.rocks/lib/lua/5.1/?.so",
+            "../src-tauri/.rocks/lib/lua/5.1/?.dylib",
+            "../src-tauri/.rocks/lib/lua/5.1/?.dll",
+            "../.rocks/lib/lua/5.1/?.so",
+            "../.rocks/lib/lua/5.1/?.dylib",
+            "../.rocks/lib/lua/5.1/?.dll"
+        }
+        for _, p in ipairs(dev_lua_paths) do table.insert(extra_lua_paths, p) end
+        for _, p in ipairs(dev_c_paths)   do table.insert(extra_c_paths, p)   end
+    end
 
-    -- Bundled production runtime discovery
+    -- -----------------------------------------------------------------------
+    -- PRODUCTION absolute paths (exec-relative bundle layout).
+    -- Safe in both dev and release; always included.
+    -- -----------------------------------------------------------------------
     if exec_dir then
         if exec_dir:match("/Contents/MacOS$") then
             -- macOS App Bundle (.app/Contents/Resources/rocks)
             local res_dir = exec_dir:gsub("/MacOS$", "/Resources")
             table.insert(extra_lua_paths, res_dir .. "/rocks/share/lua/5.1/?.lua")
             table.insert(extra_lua_paths, res_dir .. "/rocks/share/lua/5.1/?/init.lua")
-            table.insert(extra_c_paths, res_dir .. "/rocks/lib/lua/5.1/?.so")
-            table.insert(extra_c_paths, res_dir .. "/rocks/lib/lua/5.1/?.dylib")
+            table.insert(extra_c_paths,   res_dir .. "/rocks/lib/lua/5.1/?.so")
+            table.insert(extra_c_paths,   res_dir .. "/rocks/lib/lua/5.1/?.dylib")
         else
             -- Linux / Windows standalone or installed packages
             table.insert(extra_lua_paths, exec_dir .. "/rocks/share/lua/5.1/?.lua")
@@ -117,12 +148,12 @@ local function setup_module_search_paths()
             table.insert(extra_lua_paths, exec_dir .. "/../Resources/rocks/share/lua/5.1/?/init.lua")
             table.insert(extra_lua_paths, exec_dir .. "/../share/rocks/share/lua/5.1/?.lua")
             table.insert(extra_lua_paths, exec_dir .. "/../share/rocks/share/lua/5.1/?/init.lua")
-            table.insert(extra_c_paths, exec_dir .. "/rocks/lib/lua/5.1/?.so")
-            table.insert(extra_c_paths, exec_dir .. "/rocks/lib/lua/5.1/?.dylib")
-            table.insert(extra_c_paths, exec_dir .. "/rocks/lib/lua/5.1/?.dll")
-            table.insert(extra_c_paths, exec_dir .. "/../Resources/rocks/lib/lua/5.1/?.so")
-            table.insert(extra_c_paths, exec_dir .. "/../Resources/rocks/lib/lua/5.1/?.dylib")
-            table.insert(extra_c_paths, exec_dir .. "/../share/rocks/lib/lua/5.1/?.so")
+            table.insert(extra_c_paths,   exec_dir .. "/rocks/lib/lua/5.1/?.so")
+            table.insert(extra_c_paths,   exec_dir .. "/rocks/lib/lua/5.1/?.dylib")
+            table.insert(extra_c_paths,   exec_dir .. "/rocks/lib/lua/5.1/?.dll")
+            table.insert(extra_c_paths,   exec_dir .. "/../Resources/rocks/lib/lua/5.1/?.so")
+            table.insert(extra_c_paths,   exec_dir .. "/../Resources/rocks/lib/lua/5.1/?.dylib")
+            table.insert(extra_c_paths,   exec_dir .. "/../share/rocks/lib/lua/5.1/?.so")
         end
     end
 
