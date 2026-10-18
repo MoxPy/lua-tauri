@@ -63,6 +63,7 @@ static bool g_has_main_window = false;
 @implementation TauriBridgeScriptHandler
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message {
+    if (!message.frameInfo.isMainFrame) return; // REJECT SUBFRAMES!
     if (!self.impl) return;
     if (![message.body isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *dict = (NSDictionary *)message.body;
@@ -243,7 +244,7 @@ static inline webview_t webview_create(int debug, void *window) {
 
         WKUserScript *script = [[WKUserScript alloc] initWithSource:bridge_js
                                                       injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                                                    forMainFrameOnly:NO];
+                                                    forMainFrameOnly:YES];
         [impl->ucc addUserScript:script];
 
         NSRect frame = NSMakeRect(0, 0, 960, 640);
@@ -338,7 +339,7 @@ static inline void webview_init(webview_t w, const char *js) {
         NSString *src = [NSString stringWithUTF8String:s_js.c_str()];
         WKUserScript *script = [[WKUserScript alloc] initWithSource:src
                                                       injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                                                   forMainFrameOnly:NO];
+                                                   forMainFrameOnly:YES];
         [impl->ucc addUserScript:script];
     });
 }
@@ -349,12 +350,6 @@ static inline void webview_eval(webview_t w, const char *js) {
     run_on_main_async(^{
         WebviewImpl *impl = static_cast<WebviewImpl *>(w);
         NSString *src = [NSString stringWithUTF8String:s_js.c_str()];
-        if (s_js.find("window.__TAURI__") != std::string::npos) {
-            WKUserScript *script = [[WKUserScript alloc] initWithSource:src
-                                                          injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                                                       forMainFrameOnly:NO];
-            [impl->ucc addUserScript:script];
-        }
         [impl->wk evaluateJavaScript:src completionHandler:nil];
     });
 }
@@ -547,18 +542,39 @@ static inline webview_t webview_create(int debug, void *window) {
                                                 WideCharToMultiByte(CP_UTF8, 0, json_str, -1, &u8[0], len, NULL, NULL);
                                                 CoTaskMemFree(json_str);
 
-                                                auto extract_field = [](const std::string &str, const std::string &key) -> std::string {
-                                                    std::string needle = "\"" + key + "\":";
+                                                auto extract_json_string = [](const std::string &str, const std::string &key) -> std::string {
+                                                    std::string needle = "\"" + key + "\"";
                                                     size_t pos = str.find(needle);
                                                     if (pos == std::string::npos) return "";
                                                     pos += needle.length();
-                                                    while (pos < str.size() && (str[pos] == ' ' || str[pos] == '\"')) pos++;
-                                                    size_t end = str.find_first_of("\",}", pos);
-                                                    return end != std::string::npos ? str.substr(pos, end - pos) : "";
+                                                    while (pos < str.size() && (str[pos] == ' ' || str[pos] == ':')) pos++;
+                                                    if (pos >= str.size() || str[pos] != '"') return "";
+                                                    pos++; // skip opening quote
+                                                    std::string val;
+                                                    while (pos < str.size()) {
+                                                        char c = str[pos];
+                                                        if (c == '"') {
+                                                            return val;
+                                                        } else if (c == '\\' && pos + 1 < str.size()) {
+                                                            pos++;
+                                                            char esc = str[pos];
+                                                            if (esc == '"') val += '"';
+                                                            else if (esc == '\\') val += '\\';
+                                                            else if (esc == '/') val += '/';
+                                                            else if (esc == 'n') val += '\n';
+                                                            else if (esc == 'r') val += '\r';
+                                                            else if (esc == 't') val += '\t';
+                                                            else val += esc;
+                                                        } else {
+                                                            val += c;
+                                                        }
+                                                        pos++;
+                                                    }
+                                                    return "";
                                                 };
-                                                std::string name = extract_field(u8, "name");
-                                                std::string seq = extract_field(u8, "seq");
-                                                std::string req = extract_field(u8, "req");
+                                                std::string name = extract_json_string(u8, "name");
+                                                std::string seq = extract_json_string(u8, "seq");
+                                                std::string req = extract_json_string(u8, "req");
 
                                                 auto it = impl->bindings.find(name);
                                                 if (it != impl->bindings.end() && it->second.fn) {

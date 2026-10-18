@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_program(LUAJIT_BIN luajit REQUIRED)
 
 find_path(LUAJIT_INCLUDE_DIR lua.hpp
+    REQUIRED
     HINTS
     /usr/include/luajit-2.1
     /usr/local/include/luajit-2.1
@@ -16,12 +17,25 @@ find_path(LUAJIT_INCLUDE_DIR lua.hpp
 
 find_library(LUAJIT_LIB
     NAMES luajit-5.1 luajit lua51
+    REQUIRED
     HINTS
     /usr/lib
     /usr/local/lib
     /opt/homebrew/lib
     ${LUAJIT_ROOT}/lib
 )
+
+# Compiler warnings and security hardening flags
+if(MSVC)
+    add_compile_options(/W4 /GS /guard:cf)
+    add_link_options(/guard:cf /DYNAMICBASE /NXCOMPAT)
+else()
+    add_compile_options(-Wall -Wextra -Wformat -Wformat-security -fstack-protector-strong)
+    if(NOT APPLE)
+        add_compile_definitions(_FORTIFY_SOURCE=2)
+        add_link_options(-Wl,-z,relro -Wl,-z,now)
+    endif()
+endif()
 
 set(GEN_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GEN_DIR})
@@ -32,25 +46,9 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/tauri/init.lua
 )
 
-if(NOT DEFINED APP_DIR)
-    set(APP_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-endif()
-
-if(EXISTS ${APP_DIR}/src-tauri/src/main.lua)
-    set(MAIN_LUA_FILE ${APP_DIR}/src-tauri/src/main.lua)
-elseif(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src-tauri/src/main.lua)
-    set(MAIN_LUA_FILE ${CMAKE_CURRENT_SOURCE_DIR}/src-tauri/src/main.lua)
-else()
-    set(MAIN_LUA_FILE ${CMAKE_CURRENT_SOURCE_DIR}/src/main.lua)
-endif()
-
-add_custom_command(
-    OUTPUT ${GEN_DIR}/main_bc.h
-    COMMAND ${LUAJIT_BIN} -b -n main ${MAIN_LUA_FILE} ${GEN_DIR}/main_bc.h
-    DEPENDS ${MAIN_LUA_FILE}
-)
-
-file(WRITE ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedFile.cmake "
+# Generate EmbedFile helper inside build directory (never modify source tree)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/cmake)
+file(WRITE ${CMAKE_BINARY_DIR}/cmake/EmbedFile.cmake "
 file(READ \${INPUT_FILE} HEX_CONTENT HEX)
 string(LENGTH \"\${HEX_CONTENT}\" HEX_LEN)
 math(EXPR BYTE_COUNT \"\${HEX_LEN} / 2\")
@@ -71,19 +69,38 @@ function(embed_file INPUT_FILE OUTPUT_HEADER VAR_NAME)
             -DINPUT_FILE=${INPUT_FILE}
             -DOUTPUT_HEADER=${OUTPUT_HEADER}
             -DVAR_NAME=${VAR_NAME}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedFile.cmake
+            -P ${CMAKE_BINARY_DIR}/cmake/EmbedFile.cmake
         DEPENDS ${INPUT_FILE}
     )
 endfunction()
 
-if(EXISTS ${APP_DIR}/src-tauri/tauri.conf.json)
+# Default embedded fallback is minimal and deny-all (never embed the demo app by default)
+option(BUILD_DEMO "Build demo application into embedded runtime" OFF)
+
+if(DEFINED APP_DIR AND EXISTS ${APP_DIR}/src-tauri/src/main.lua)
+    set(MAIN_LUA_FILE ${APP_DIR}/src-tauri/src/main.lua)
+elseif(DEFINED APP_DIR AND EXISTS ${APP_DIR}/src/main.lua)
+    set(MAIN_LUA_FILE ${APP_DIR}/src/main.lua)
+elseif(BUILD_DEMO AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src-tauri/src/main.lua)
+    set(MAIN_LUA_FILE ${CMAKE_CURRENT_SOURCE_DIR}/src-tauri/src/main.lua)
+else()
+    set(MAIN_LUA_FILE ${CMAKE_CURRENT_SOURCE_DIR}/src/embedded_fallback/main.lua)
+endif()
+
+add_custom_command(
+    OUTPUT ${GEN_DIR}/main_bc.h
+    COMMAND ${LUAJIT_BIN} -b -n main ${MAIN_LUA_FILE} ${GEN_DIR}/main_bc.h
+    DEPENDS ${MAIN_LUA_FILE}
+)
+
+if(DEFINED APP_DIR AND EXISTS ${APP_DIR}/src-tauri/tauri.conf.json)
     set(TAURI_CONF_FILE ${APP_DIR}/src-tauri/tauri.conf.json)
-elseif(EXISTS ${APP_DIR}/tauri.conf.json)
+elseif(DEFINED APP_DIR AND EXISTS ${APP_DIR}/tauri.conf.json)
     set(TAURI_CONF_FILE ${APP_DIR}/tauri.conf.json)
-elseif(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src-tauri/tauri.conf.json)
+elseif(BUILD_DEMO AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src-tauri/tauri.conf.json)
     set(TAURI_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/src-tauri/tauri.conf.json)
 else()
-    set(TAURI_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/tauri.conf.json)
+    set(TAURI_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/src/embedded_fallback/tauri.conf.json)
 endif()
 
 embed_file(${TAURI_CONF_FILE} ${GEN_DIR}/config_json.h tauri_conf_json)
@@ -148,6 +165,37 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke_test.c)
     )
     target_link_libraries(smoke_test PRIVATE taurilua)
 endif()
+
+# 5. Native Security Unit Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_security.cpp)
+    add_executable(test_native_security
+        tests/test_native_security.cpp
+    )
+    target_include_directories(test_native_security PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+endif()
+
+# Automated CTest Registration
+enable_testing()
+
+if(TARGET smoke_test)
+    add_test(NAME smoke_test COMMAND smoke_test)
+endif()
+
+if(TARGET test_native_security)
+    add_test(NAME test_native_security COMMAND test_native_security)
+endif()
+
+add_test(NAME test_security_set1 COMMAND ${LUAJIT_BIN} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_security_set1.lua)
+set_tests_properties(test_security_set1 PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_test(NAME test_json_rfc8259 COMMAND ${LUAJIT_BIN} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_json_rfc8259.lua)
+set_tests_properties(test_json_rfc8259 PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_test(NAME test_audit COMMAND ${LUAJIT_BIN} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_audit.lua)
+set_tests_properties(test_audit PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(APPLE)
     target_compile_definitions(taurilua PRIVATE WEBVIEW_COCOA)

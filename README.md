@@ -1,71 +1,59 @@
 # Tauri-Lua ⚡️
 
-> **Ultra-lightweight, memory-efficient desktop runtime combining the modern architecture of Tauri with the raw execution speed and developer ergonomics of LuaJIT.**
+> **Experimental desktop runtime combining an OS system webview with a lightweight C++17 native bridge and LuaJIT.**
 
-[![Platform](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg)](#cross-platform-implementation-details)
+[![Platform](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows%20(Experimental)-blue.svg)](#platform--capability-support-matrix)
 [![Engine](https://img.shields.io/badge/Engine-LuaJIT%202.1%20%2B%20C%2B%2B17-orange.svg)](#architecture-overview)
 [![LuaRocks](https://img.shields.io/badge/LuaRocks-Hermetic%20Ecosystem-blueviolet.svg)](#hermetic-luarocks-integration--dependency-ecosystem)
 [![Host Embedding](https://img.shields.io/badge/Host%20Embedding-libtaurilua%20(C%20ABI)-blue.svg)](#scripting-engine-host--cc-embedding-libtaurilua)
-[![Plugins](https://img.shields.io/badge/Plugins-SQL%20(SQLite%2C%20PG%2C%20MySQL)%20%7C%20HTTP%20%7C%20Autostart-success.svg)](#first-class-plugin-architecture-tauri-2-parity)
+[![Plugins](https://img.shields.io/badge/Plugins-lua--tauri--plugins-success.svg)](#plugin-system--extensibility)
 [![License](https://img.shields.io/badge/License-MIT-purple.svg)](#license)
 
 > [!NOTE]
-> **Educational & Research Exploration**  
-> This project is an independent engineering proof-of-concept demonstrating how Tauri's architecture, security sandbox, and developer experience can be implemented using a minimal C++17 native bridge and LuaJIT. It is not affiliated with or endorsed by The Tauri Programme.
+> **Experimental Project Notice**<br>
+> This project is an independent engineering exploration demonstrating how a webview-based desktop application architecture, security controls, and developer workflows can be implemented using a minimal C++17 native bridge and LuaJIT. It is research-oriented and not affiliated with or endorsed by The Tauri Programme.
 
 ---
 
 ## Executive Summary
 
-**Tauri-Lua** bridges modern web frontends (Vite, React, Vue, Svelte, or Vanilla JS) with an ultra-fast, native backend written in Lua, running on **LuaJIT** and backed by a lightweight C++17 system bridge.
+**Tauri-Lua** combines modern web frontends with a desktop backend written in Lua, running on **LuaJIT** with a C++17 system bridge.
 
-It faithfully replicates the **Tauri specification, directory layout, and Developer Experience (DX)**—including capabilities-based security, IPC envelopes, and native packaging—while bypassing the heavy Rust compilation pipeline.
+It explores Tauri-inspired patterns—including capabilities-based security, IPC envelopes, native packaging, and LuaRocks dependency isolation—in an interpreted, scripting-driven environment.
 
-### Why does this exist?
-
-Building small-to-medium desktop applications with Electron produces 150+ MB installers and consumes 200+ MB of RAM at idle. Tauri with Rust is vastly superior in resource usage, but Cargo build times (often 2–5 minutes) and gigabyte-sized toolchains introduce significant friction for developers seeking instant feedback loops.
-
-**Tauri-Lua delivers the best of both worlds:**
-* **Instant Builds:** Native runtime compiles in **~3 seconds**.
-* **Zero-Recompile Backend Reloading:** Backend Lua changes reload in **~50 milliseconds**.
-* **Microscopic Footprint:** Production executable binary is **~175 KB**, with bundle disk images under **100 KB**.
-* **Embeddable Scripting Host (`libtaurilua`):** Turn any C/C++ desktop software or Game Engine (**Godot, Unreal Engine, SDL2, GLFW**) into a hybrid web-UI app via our pure C ABI (`include/taurilua.h`) in one line of code.
-* **Hermetic LuaRocks Package Ecosystem:** Seamless zero-config integration with the global LuaRocks ecosystem. Declare packages directly in `tauri.conf.json` (`luasocket`, `lsqlite3`, `lua-cjson`), build them into isolated local trees (`src-tauri/.rocks/`), and bundle them automatically into release installers with zero DLL search-order hijacking.
-* **Official Plugin Suite (Inspired by & largely compatible with Tauri 2):**
-  - **`plugin-sql`**: Multi-database engine supporting **SQLite**, **PostgreSQL**, and **MySQL** with schema migrations (`_sqlx_migrations`) and parameterized parameter bindings (`?`, `$n`).
-  - **`plugin-http`**: Native `libcurl` engine delivering complete CORS bypass for desktop frontends with granular security scopes (`allow`/`deny`).
-  - **`plugin-autostart`**: OS-native login persistence on macOS (LaunchAgent), Linux (XDG Autostart), and Windows (Registry Run keys).
-  - **`plugin-window-state`**: Restoration of window coordinates and fullscreen states across app launches.
-* **Defense-in-Depth Security Model:** Hardened direct process spawning (bypassing raw subshells), dual-layer Content Security Policy (CSP), Native Origin Gating, and declarative Capability/Scope access controls modeled after Tauri v2.
-* **Instant App Scaffolding:** Interactive `lua-tauri create` command supporting Vanilla, React, Vue, Svelte, and Tailwind CSS with pre-wired Vite templates.
-* **Custom Native Menu Bar:** Fluent OOP & declarative menus (`Menu`, `Submenu`, `MenuItem`, `CheckMenuItem`, `PredefinedMenuItem`) with OS responder chain integration and dual Lua/JS event routing.
-* **Non-Blocking Multi-Core Concurrency:** Built-in Worker Isolate Pool distributes CPU-heavy workloads across hardware threads without stalling the 60/120 FPS UI loop.
+### Core Architecture Highlights:
+* **Embeddable Scripting Host (`libtaurilua`):** Integrates into host C/C++ applications via a clean C ABI (`include/taurilua.h`).
+* **Hermetic LuaRocks Package Ecosystem:** Installs and isolates Lua modules into local project trees (`src-tauri/.rocks/`), packaging them into release bundles.
+* **Defense-in-Depth Security Model:** Direct process spawning (bypassing raw subshells for frontend commands), Content Security Policy (CSP) enforcement, strict Native Origin Gating, and declarative capability & scope access controls.
+* **Non-Blocking Multi-Core Concurrency:** Worker Isolate Pool distributes CPU-heavy workloads across pre-warmed background Lua states.
+* **Custom Native Menu Bar:** Object-oriented menus compiling into native OS menu bar items (Cocoa `NSMenu` on macOS, Win32 `HMENU` on Windows, and GTK3 `GtkMenuBar` on Linux).
 
 ---
 
-## Benchmarks & Performance Profile
+## Platform & Capability Support Matrix
 
-| Metric | Tauri-Lua | Tauri v2 (Rust) | Electron v30 |
-| :--- | :---: | :---: | :---: |
-| **Clean Native Build Time** | **~3 seconds** | 2 – 5 minutes | N/A (Prebuilt runtime; ~15–45s npm packaging) |
-| **Incremental Build Time** | **< 1.0 second** *(CMake)* / **0 ms** *(Lua)* | 5 – 20 seconds *(Cargo)* | ~1 – 2 seconds *(Node restart)* |
-| **Backend Hot-Reload** | **~50 ms** *(in-process script swap)* | 10 – 30 seconds *(cargo rebuild)* | 1 – 3 seconds *(process restart)* |
-| **Standalone Launcher Binary** | **~175 KB** *(launcher stub only)* | ~8 – 15 MB *(monolithic binary)* | ~130 – 180 MB *(bundled Chromium + Node)* |
-| **Self-Contained Bundle Size** | **~2.5 – 4.0 MB** *(with runtime libs)* | ~10 – 18 MB | ~140 – 200 MB |
-| **RAM at Idle** | **~35 MB** *(system webview)* | ~35 MB *(system webview)* | ~150 – 250 MB *(bundled chromium)* |
-| **Shared Library Host Embedding** | **Yes (`libtaurilua` C ABI)** | Complex / Experimental FFI | No *(Heavyweight IPC subprocess)* |
-| **Native Dependency Management** | **Hermetic LuaRocks (`tauri.conf.json`)** | Cargo / crates.io | npm / node-gyp C++ builds |
-| **SQL Database Support** | **SQLite, PostgreSQL & MySQL** | SQLite, PostgreSQL & MySQL | Heavy native npm addons |
-| **Cross-Origin HTTP Requests** | **Native `libcurl` (Zero CORS friction)** | `reqwest` (Zero CORS) | Browser CORS / Fetch limitations |
-| **Toolchain Dependencies** | **`luajit` + `cmake`** | `rustc` + `cargo` + platform SDKs | `node` + `npm` + Python + build-tools |
-| **Scripting Engine** | **LuaJIT 2.1** *(Near C performance)* | Native Machine Code | V8 JavaScript Engine |
+The table below documents the verification status and implementation state of capabilities shipped in this repository:
+
+| Capability / Subsystem | macOS (WebKit) | Linux (WebKitGTK) | Windows (WebView2) | Implementation Details & Validation |
+| :--- | :---: | :---: | :---: | :--- |
+| **Window & Webview Management** | **Implemented** | **Implemented** | **Experimental** | macOS tested on Sonoma 14+; Linux supports WebKitGTK 4.1 (with 4.0 fallback); Windows requires WebView2 runtime. |
+| **Frontend-to-Native IPC** | **Implemented** | **Implemented** | **Experimental / Unverified** | macOS/Linux verified in automated smoke and regression suites; Windows IPC message parser was updated but requires live WebView2 validation. |
+| **Origin & Frame Isolation** | **Implemented** | **Platform-Dependent** | **Platform-Dependent** | macOS enforces `message.frameInfo.isMainFrame`; Linux and Windows mitigate frame access via strict CSP (`frame-src 'none'`). |
+| **Filesystem Access (`fs:*`)** | **Implemented** | **Implemented** | **Implemented** | Deny-by-default for empty scopes; canonical resolution; single (`*`) and recursive (`**`) globs; `fs:remove` requires explicit capability. |
+| **Desktop Notifications** | **Implemented** | **Implemented** | **Implemented** | macOS uses `UNUserNotificationCenter` with parameterized fallback; Linux uses `notify-send --`; Windows uses `Shell_NotifyIconW`. |
+| **System Theme & Events** | **Implemented** | **Implemented** | **Implemented** | System theme detection and window event dispatching across active windows. |
+| **System Tray & Menus** | **Implemented** | **Implemented** | **Implemented** | Native menu bars (Cocoa / GTK3 / Win32) and system tray icon support. |
+| **Process Spawning (`shell:execute`)** | **Implemented** | **Implemented** | **Implemented** | Mandatory `allowed_programs` allowlist, argument policy checks, dangerous flag filtering, and 1 MB output cap. |
+| **C Embedding (`libtaurilua`)** | **Implemented** | **Implemented** | **Implemented** | C ABI defined in `include/taurilua.h`; validated by `tests/smoke_test.c` and `examples/host_c/`. |
+| **Application Updater** | **Not Implemented** | **Not Implemented** | **Not Implemented** | Disabled for security. Unauthenticated archive extraction removed; calls return a fail-closed error. |
+| **Companion Plugins (`sql`, `http`, etc.)** | **External** | **External** | **External** | Companion plugins are maintained in the separate [`lua-tauri-plugins`](https://github.com/MoxPy/lua-tauri-plugins) workspace. |
 
 > [!NOTE]
-> **Reproducible Benchmark Methodology & Test Environment:**
-> - **Hardware Environment:** Apple Silicon M2 Max (12 CPU cores, 32 GB unified memory, 1 TB NVMe SSD) and Ubuntu 22.04 LTS (x86_64, 8-core AMD Ryzen 7, 16 GB RAM).
-> - **Webview Stacks:** macOS 14 Sonoma (WebKit / Safari 17.4), Linux Ubuntu 22.04 (WebKit2GTK 4.1.0), Windows 11 23H2 (Microsoft Edge WebView2 125.0).
-> - **Binary Footprint Scope Clarification:** The **~175 KB** figure refers strictly to the stripped native launcher executable (`tauri_app` / `entry.cpp`), excluding dynamically linked runtime libraries (`libtaurilua.dylib`/`.so` ~550 KB, `libluajit-5.1` ~520 KB) and user frontend assets in `dist/`. The total self-contained package including all required shared libraries is approximately 2.5–3.5 MB, compared to 10–18 MB for Tauri-Rust and 140–200 MB for Electron.
-> - **Build Measurement:** Clean build measures full compilation from a clean directory (`cmake -B build && cmake --build build`). Incremental build measures recompiling a single modified backend handler. Idle memory is sampled with a single window showing a standard DOM document.
+> **Status Definitions:**
+> - **Implemented:** Feature has complete implementation in this repository and passes local automated regression tests.
+> - **Experimental / Unverified:** Feature has native implementation in source but has not been verified on end-to-end hardware or automated CI in this repository.
+> - **Platform-Dependent:** Feature implementation is constrained by underlying OS webview engine capabilities.
+> - **Not Implemented:** Feature is intentionally disabled or not yet implemented.
 
 ---
 
@@ -135,7 +123,7 @@ Tauri-Lua implements a multi-VM isolate architecture designed for thread safety 
 
 ---
 
-## Project Structure (1:1 with Tauri Spec)
+## Project Structure
 
 Tauri-Lua adopts the official Tauri layout. The application backend and configurations are strictly separated from frontend assets:
 
@@ -191,6 +179,9 @@ cd lua-tauri
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
+# Run automated regression test suite:
+ctest --test-dir build --output-on-failure
+
 # (Optional) Install CLI globally to run from any directory:
 sudo ln -sf $(pwd)/lua-tauri /usr/local/bin/lua-tauri
 ```
@@ -218,7 +209,7 @@ lua-tauri build  # (or ../lua-tauri build)
 
 ## The CLI: Developer Workflow
 
-The included `./lua-tauri` CLI provides full workflow parity with `@tauri-apps/cli`:
+The included `./lua-tauri` CLI provides essential developer workflows inspired by `@tauri-apps/cli`:
 
 ### `lua-tauri create [app-name]`
 Interactive and automated project scaffolder. Generates a modern Vite frontend pre-wired to `src-tauri/` with zero configuration needed.
@@ -244,7 +235,7 @@ Starts the development cycle:
 1. Executes `build.beforeDevCommand` (e.g. `npm run dev`) if specified.
 2. Polls `build.devUrl` until your frontend dev server (e.g., Vite) is ready.
 3. Launches the native desktop runtime pointed to your dev server.
-4. Activates the **Backend File Watcher**: any modification in `src-tauri/src/*.lua` or `tauri.conf.json` automatically triggers a hot restart in **~50ms**.
+4. Activates the **Backend File Watcher**: any modification in `src-tauri/src/*.lua` or `tauri.conf.json` automatically triggers a hot backend restart.
 5. Automatically terminates the development session when the application window is closed by the user.
 
 ```bash
@@ -417,7 +408,7 @@ async function calculate() {
 }
 ```
 
-### Real-Time Streaming Channels (`Tauri v2 Parity`)
+### Real-Time Streaming Channels
 
 Stream live progress, shell logs, or continuous data chunks from Lua to JavaScript without global event bus pollution:
 
@@ -563,9 +554,9 @@ console.log("Output:\n", result.stdout);
 > **Security note:** `shell:execute` requires the `"shell:execute"` capability in `tauri.conf.json`.
 > Use the `allowed_programs` scope to restrict which executables (and optionally which arguments) are permitted.
 
-### 7. Custom Native Menu Bar API (Tauri 2 / `muda` Parity)
+### 7. Custom Native Menu Bar API
 
-Tauri-Lua delivers 100% ergonomic parity with the **Tauri 2 (`muda`) Menu Specification** directly in Lua and C++17, compiling into native OS menu bar items (**Cocoa `NSMenu`** on macOS, **Win32 `HMENU`** on Windows, and **GTK3 `GtkMenuBar`** on Linux) without external dependencies or Electron bloat.
+Tauri-Lua provides an object-oriented menu API inspired by the **Tauri 2 (`muda`) Menu Specification** directly in Lua and C++17, compiling into native OS menu bar items (**Cocoa `NSMenu`** on macOS, **Win32 `HMENU`** on Windows, and **GTK3 `GtkMenuBar`** on Linux) without external dependencies.
 
 #### Architecture Highlights
 * **Native OS Responder Chain:** Standard items (`undo`, `copy`, `paste`, `quit`, `minimize`, etc.) are wired directly to native OS handlers (Cocoa selectors on macOS, `WM_COMMAND` / `WM_CLOSE` on Windows, and GTK window actions on Linux) requiring zero manual JS/Lua code to handle clipboard and window shortcuts.
@@ -704,11 +695,11 @@ await window.__TAURI__.menu.setMenu({
 });
 ```
 
-### 8. Single-Instance Application Lock (`single-instance` Parity)
+### 8. Single-Instance Application Lock
 
 Tauri-Lua guarantees that only a single instance of your application runs at any time, preventing duplicate windows, split-brain state, or file database corruption:
 
-* **POSIX (macOS & Linux):** Manages a dedicated Unix domain socket (`/tmp/<app_id>.sock` or `$XDG_RUNTIME_DIR/<app_id>.sock`) with automatic stale socket cleanup.
+* **POSIX (macOS & Linux):** Manages a dedicated Unix domain socket placed securely in `$XDG_RUNTIME_DIR` or `~/.local/run/` with permissions `0700` (explicitly refusing insecure shared directories like `/tmp`) with automatic stale socket cleanup.
 * **Windows (Win32):** Operates a system-wide Named Pipe (`\\.\pipe\<app_id>-single-instance`).
 * **Instant Handshake & Forwarding:** When a user opens a second instance (e.g. clicking the app icon again or double-clicking an associated file):
   1. The second instance forwards its CLI `argv` arguments and `cwd` to the running primary instance.
@@ -766,12 +757,12 @@ window.__TAURI__.event.listen("tauri://single-instance", (event) => {
 
 ---
 
-### 9. Native Desktop Notifications (`notification` Parity)
+### 9. Native Desktop Notifications
 
 Tauri-Lua delivers non-blocking, operating-system-native desktop notifications with zero external subshell injection:
 
 * **macOS:** Modern Apple **`UserNotifications`** framework (`UNUserNotificationCenter`, `UNNotificationRequest`, and `ModernNotificationCenterDelegate` displaying banners even when foregrounded), with automatic authorization requests and a non-blocking `osascript` fallback for unpackaged terminal development.
-* **Windows:** Asynchronous Windows 10/11 Toast Notifications via WinRT `ToastNotificationManager` dispatched with `SW_HIDE` (avoiding intrusive modal message boxes).
+* **Windows:** Native notifications dispatched using `Shell_NotifyIconW` buffer structures.
 * **Linux:** Non-blocking `posix_spawnp` of `notify-send` with discrete `argv` arrays (zero shell interpolation).
 
 #### 1. Backend Usage (`Lua`)
@@ -807,7 +798,7 @@ await window.__TAURI__.notification.sendNotification({
 
 ---
 
-### 10. Real-Time OS System Theme Detection (`theme` Parity)
+### 10. Real-Time OS System Theme Detection
 
 Tauri-Lua continuously tracks the host operating system's appearance mode and informs both backend and frontend immediately when the user toggles dark or light mode in system settings:
 
@@ -842,7 +833,7 @@ window.__TAURI__.event.listen("tauri://theme-changed", (event) => {
 
 ---
 
-### 11. Native File Drag & Drop (`file-drop` Parity)
+### 11. Native File Drag & Drop
 
 Provides native desktop file drag & drop into webview windows, extracting the **real absolute filesystem paths** without browser sandbox restrictions:
 
@@ -884,7 +875,7 @@ window.__TAURI__.event.listen("tauri://drag-drop", (event) => {
 
 ### 12. Advanced Native Clipboard (Text, HTML, Images & Clear)
 
-Full parity with `@tauri-apps/plugin-clipboard-manager`, supporting rich HTML and Base64-encoded image bitmaps:
+Comprehensive clipboard API supporting rich HTML and Base64-encoded image bitmaps:
 
 * **Text:** UTF-8 string read and write (`NSPasteboardTypeString`, `CF_TEXT`, `GtkClipboard`).
 * **HTML:** Rich formatted markup (`NSPasteboardTypeHTML`, Windows `CF_HTML`, Linux `text/html`).
@@ -929,7 +920,7 @@ await window.__TAURI__.clipboard.clear();
 
 ---
 
-## Plugin System & Extensibility (Tauri v2 Parity)
+## Plugin System & Extensibility
 
 Tauri-Lua implements a decoupled, first-class **Plugin Architecture** matching the design patterns of [Tauri 2 plugins](https://github.com/tauri-apps/plugins-workspace). The core runtime remains lean and bloat-free, while domain-specific capabilities can be loaded modularly from the official [**`lua-tauri-plugins`**](https://github.com/MoxPy/lua-tauri-plugins) workspace.
 
@@ -962,12 +953,12 @@ flowchart LR
 
 All official plugins are maintained in the sibling repository [`lua-tauri-plugins`](https://github.com/MoxPy/lua-tauri-plugins):
 
-| Plugin | Features & Security Architecture | Parity Status | Supported Drivers / Backends |
+| Plugin | Features & Security Architecture | Implementation Status | Supported Drivers / Backends |
 | :--- | :--- | :---: | :--- |
-| [**`sql`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/sql) | **Multi-Database SQL Engine:** Transactional schema migrations (`_sqlx_migrations`), prepared statements with parameterized binds (`$1, $2` and `?`) against SQL injection, and automatic AppData sandboxing. | ✅ 1:1 Tauri 2 | **SQLite3** (`sqlite:...`), **PostgreSQL** (`postgres://...`), **MySQL** (`mysql://...`) |
-| [**`http`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/http) | **Native `libcurl` Client:** Complete CORS bypass for desktop frontends, native OS SSL/TLS certificate validation, connection pooling, and strict `allow`/`deny` URL scope enforcement. | ✅ 1:1 Tauri 2 | Native `libcurl` (HTTP/1.1, HTTP/2) |
-| [**`autostart`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/autostart) | **Launch at System Login:** macOS LaunchAgent `.plist` (`~/Library/LaunchAgents`), Linux XDG Autostart (`~/.config/autostart`), and Windows User Registry (`HKCU\...\Run`). | ✅ 1:1 Tauri 2 | Native OS Startup Handlers |
-| [**`window-state`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/window-state) | **Window State Persistence:** Automatically remembers and restores window dimensions, coordinates, and maximize/fullscreen states across restarts via `on_window_close` hook. | ✅ 1:1 Tauri 2 | OS Window Rect & State Cache |
+| [**`sql`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/sql) | **Multi-Database SQL Engine:** Transactional schema migrations (`_sqlx_migrations`), prepared statements with parameterized binds (`$1, $2` and `?`) against SQL injection, and automatic AppData sandboxing. | External (`lua-tauri-plugins`) | **SQLite3** (`sqlite:...`), **PostgreSQL** (`postgres://...`), **MySQL** (`mysql://...`) |
+| [**`http`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/http) | **Native `libcurl` Client:** Complete CORS bypass for desktop frontends, native OS SSL/TLS certificate validation, connection pooling, and strict `allow`/`deny` URL scope enforcement. | External (`lua-tauri-plugins`) | Native `libcurl` (HTTP/1.1, HTTP/2) |
+| [**`autostart`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/autostart) | **Launch at System Login:** macOS LaunchAgent `.plist` (`~/Library/LaunchAgents`), Linux XDG Autostart (`~/.config/autostart`), and Windows User Registry (`HKCU\...\Run`). | External (`lua-tauri-plugins`) | Native OS Startup Handlers |
+| [**`window-state`**](https://github.com/MoxPy/lua-tauri-plugins/tree/main/plugins/window-state) | **Window State Persistence:** Automatically remembers and restores window dimensions, coordinates, and maximize/fullscreen states across restarts via `on_window_close` hook. | External (`lua-tauri-plugins`) | OS Window Rect & State Cache |
 
 ---
 
@@ -977,10 +968,13 @@ The runtime automatically configures Lua search paths to locate plugins without 
 
 | Location | Path Pattern | Use Case |
 | :--- | :--- | :--- |
-| **External Monorepo** | `../lua-tauri-plugins/plugins/?/init.lua` | Sibling repository for development (recommended) |
+| **External Monorepo** | `../lua-tauri-plugins/plugins/?/init.lua` | Sibling repository for development (active when `TAURILUA_DEV=1`) |
 | **Project Local** | `./plugins/?.lua` & `./plugins/?/init.lua` | Project-specific or private plugins |
 | **Node Modules** | `./node_modules/@tauri-apps/plugin-?/init.lua` | Installed via npm/pnpm/yarn |
 | **Native Binaries** | `?.dylib` (macOS), `?.so` (Linux), `?.dll` (Windows) | Compiled C/C++ FFI extensions |
+
+> [!NOTE]
+> Relative sibling paths (`../lua-tauri-plugins/plugins/?/init.lua`) are active during local development mode when `TAURILUA_DEV=1`. In production distributions, plugins must be bundled into application resources or installed via `.rocks/`.
 
 ---
 
@@ -1030,25 +1024,25 @@ app:run()
 Frontend code interacts with plugins using standard Tauri 2 `@tauri-apps/plugin-*` guest APIs or pre-injected globals:
 
 ```javascript
-// 1. SQL Plugin (@tauri-apps/plugin-sql parity)
+// 1. SQL Plugin (@tauri-apps/plugin-sql compatible API)
 const db = await window.__TAURI__.sql.Database.load('sqlite:app.db');
 await db.execute('INSERT INTO users (name, email) VALUES ($1, $2);', ['Alice', 'alice@company.com']);
 const users = await db.select('SELECT * FROM users WHERE email = $1;', ['alice@company.com']);
 console.table(users);
 
-// 2. HTTP Plugin (@tauri-apps/plugin-http parity - CORS Bypassed!)
+// 2. HTTP Plugin (CORS Bypassed)
 const response = await window.__TAURI__.http.fetch('https://api.github.com/zen');
 if (response.ok) {
   console.log("GitHub Zen:", await response.text());
 }
 
-// 3. Autostart Plugin (@tauri-apps/plugin-autostart parity)
+// 3. Autostart Plugin
 const isAuto = await window.__TAURI__.autostart.isEnabled();
 if (!isAuto) {
   await window.__TAURI__.autostart.enable();
 }
 
-// 4. Window State Plugin (@tauri-apps/plugin-window-state parity)
+// 4. Window State Plugin
 const savedState = await window.__TAURI__.windowState.restore('main');
 console.log("Restored dimensions:", savedState.width, savedState.height);
 ```
@@ -1279,7 +1273,7 @@ This empowers existing C/C++ software, native desktop applications, internal ent
 * In-game configuration windows and HUD overlays
 * Modding tools, visual inspectors, and script debuggers
 * Launcher screens and account authentication flows
-* Native tools needing an elegant webview UI without Electron bloat
+* Native tools needing an elegant webview UI without bundling a heavy Chromium browser runtime
 
 ```text
   ┌─────────────────────────────────────────────────────────────┐
@@ -1419,21 +1413,22 @@ cl /O2 main.c /Iinclude /link build\taurilua.lib
 
 ---
 
-## Security Architecture (Tauri v2 Parity)
+## Security Architecture
 
-Following the **Tauri v2 Defense-in-Depth** cybersecurity standard:
+Tauri-Lua implements a multi-layered **Defense-in-Depth** security model:
 
-1. **Zero Command-Injection Architecture:**
-   - Raw shell invocations (`io.popen`, `os.execute`, `system()`) are completely eliminated across both core and plugins in favor of direct OS process creation (`posix_spawnp` on POSIX, `CreateProcessA` on Windows, and Win32 `FindFirstFileA` for directory operations).
+1. **Direct Process Spawning (Zero Subshell Injection for Frontend Commands):**
+   - Frontend command execution (`shell:execute`) bypasses intermediate subshells (`/bin/sh` or `cmd.exe`) and invokes OS process creation directly (`posix_spawnp` on POSIX, `CreateProcessW` on Windows).
    - Shell control metacharacters (`;`, `&&`, `|`, `$()`, backticks) cannot trigger shell command injection.
-   - Synchronous, thread-safe line buffering (`platform_process_read_line`) streams output chunks to `window.__TAURI__.Channel` in real time.
+   - Output chunks are buffered and streamed to `window.__TAURI__.Channel` in real time, capped at 1 MB to prevent memory exhaustion. (Developer CLI commands such as `lua-tauri dev` execute user-specified build scripts in the developer's shell environment).
 2. **Dual-Layer Content Security Policy (CSP):**
    - Automatically injected as an HTTP response header (`Content-Security-Policy`) on custom scheme requests (`tauri://localhost`, `asset://`) and as a dynamic DOM `<meta http-equiv="Content-Security-Policy">` tag in all served HTML documents.
    - Default policy enforces strict script origin restrictions without `'unsafe-inline'` in `script-src` (`default-src 'self' tauri: asset:; script-src 'self' tauri: asset:; style-src 'self' 'unsafe-inline'; ...`), neutralizing Cross-Site Scripting (XSS) vectors.
    - Configurable declaratively in `tauri.conf.json` (`security.csp`) or dynamically via `app:set_csp("...")`.
-3. **Session Verification Tokens (`window.__TAURI_TOKEN__`):**
-   - A cryptographically random 32-character session token is attached to `window.__TAURI_TOKEN__` at initialization.
+3. **Session Verification Tokens & Frame Isolation:**
+   - A cryptographically random 256-bit session token (64 hex characters) is generated via OS CSPRNG (`SecRandomCopyBytes` on macOS, `/dev/urandom` on Linux, `BCryptGenRandom` on Windows) and attached to `window.__TAURI_TOKEN__` at initialization.
    - **Threat Model Scope:** This token acts as a defense-in-depth barrier against unauthorized child iframes and cross-origin subframes. It is **not** a same-origin security boundary (any malicious script executing within the same-origin document context can access JS window variables).
+   - **Frame Isolation:** macOS WebKit verifies `message.frameInfo.isMainFrame`. On platforms where webview frame metadata is unavailable, strict CSP (`frame-src 'none'`) prevents framing attacks.
 4. **Native Origin Gating (Authoritative Security Boundary):**
    - The authoritative security boundary is enforced at the native C++ level on every IPC message (`get_native_window_origin` & `OriginValidator::is_allowed`). Requests originating from unapproved origins or external untrusted domains are unconditionally rejected before reaching Lua handlers. Strict Content Security Policy (CSP) reinforces same-origin isolation.
 5. **Capability & Program Whitelisting (Deny-by-Default):**
@@ -1446,11 +1441,12 @@ Tauri-Lua implements a strict **Deny-by-Default** security model for frontend IP
 
 | Capability Identifier | Description | Default Policy |
 | :--- | :--- | :--- |
-| `core:default` | Basic window control (`close`, `minimize`, `maximize`, `show`, `hide`, `set_title`, `set_size`, `set_focus`), tray icon, shortcuts, updater, and menus | **Denied** (Requires explicit grant) |
+| `core:default` | Basic window control (`close`, `minimize`, `maximize`, `show`, `hide`, `set_title`, `set_size`, `set_focus`), tray icon, shortcuts, and menus | **Denied** (Requires explicit grant) |
 | `fs:read-text-file` | Reading file contents via `tauri:fs:read_text_file` (constrained by `security.scope`) | **Denied** |
-| `fs:write-text-file`| Writing file contents via `tauri:fs:write_text_file` and removing files via `tauri:fs:remove` | **Denied** |
+| `fs:write-text-file`| Writing file contents via `tauri:fs:write_text_file` | **Denied** |
+| `fs:remove` | Deleting files via `tauri:fs:remove` (requires explicit `fs:remove` or `fs:*`) | **Denied** |
 | `fs:read-dir` | Directory listing traversal via `tauri:fs:read_dir` | **Denied** |
-| `fs:*` | Wildcard grant for all filesystem capabilities (`read-text-file`, `write-text-file`, `read-dir`) | **Denied** |
+| `fs:*` | Wildcard grant for all filesystem capabilities (`read-text-file`, `write-text-file`, `remove`, `read-dir`) | **Denied** |
 | `dialog:open` | Showing native file / folder open pickers via `tauri:dialog:open` | **Denied** |
 | `dialog:save` | Showing native file save destination pickers via `tauri:dialog:save` | **Denied** |
 | `dialog:message` | Showing native message and confirmation modals (`dialog:message`, `dialog:ask`) | **Denied** |
@@ -1461,6 +1457,7 @@ Tauri-Lua implements a strict **Deny-by-Default** security model for frontend IP
 | `notification:send` | Dispatching system desktop notifications | **Denied** |
 | `notification:*` | Wildcard grant for notification APIs | **Denied** |
 | `shell:execute` | Spawning and executing external host processes (requires mandatory `allowed_programs` allowlist) | **Denied** |
+| `updater` / `updater:*`| Application updater (disabled for security reasons) | **Not Implemented** |
 | `http:request` / `http:default` | Executing outgoing HTTP/HTTPS fetch requests via the HTTP plugin (requires URL scopes) | **Denied** |
 | `sql:execute` / `sql:default` | Executing SQL queries and mutations via the SQL plugin (requires DB connection scopes) | **Denied** |
 
@@ -1469,7 +1466,7 @@ Tauri-Lua implements a strict **Deny-by-Default** security model for frontend IP
 > Any IPC request originating from frontend JavaScript that requests an ungranted capability is immediately rejected at the native boundary with an authorization error (`Capability non autorizzata: <permission>`). Backend code in `main.lua` runs with full native privileges.
 
 6. **Path Scope Constraint Enforcement:**
-   - Filesystem operations resolve path aliases (`$APPDATA`, `$DESKTOP`, `$HOME`) canonically to prevent directory traversal (`../`) attacks.
+   - Filesystem operations enforce deny-by-default on empty scopes, resolve path aliases (`$APPDATA`, `$DESKTOP`, `$HOME`) canonically to prevent directory traversal (`../`) attacks, evaluate single (`*`) and recursive (`**`) globs, and strictly reject paths containing NUL bytes (`\0`).
 7. **Transactional Atomic State Management (`app.state:update`):**
    - In-memory shared state mutations are guarded by an optimistic CAS loop, ensuring user callbacks never hold the native mutex and preventing deadlocks.
 

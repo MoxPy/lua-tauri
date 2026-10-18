@@ -9,16 +9,6 @@
 #include <unistd.h>
 #endif
 
-static bool file_exists(const std::string &path) {
-    std::ifstream f(path);
-    return f.good();
-}
-
-static std::string read_file_string(const std::string &path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return "";
-    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-}
 
 static std::string make_instance_payload(int argc, char **argv) {
     std::string cwd = "";
@@ -97,6 +87,8 @@ static std::string extract_app_identifier(const std::string &conf) {
     return "com.tauri.lua";
 }
 
+#include "resource_resolver.hpp"
+
 #if defined(_WIN32)
 #include <windows.h>
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
@@ -105,9 +97,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 #else
 int main(int argc, char **argv) {
 #endif
-    std::string config_content = "";
-    if (file_exists("src-tauri/tauri.conf.json")) config_content = read_file_string("src-tauri/tauri.conf.json");
-    else if (file_exists("tauri.conf.json")) config_content = read_file_string("tauri.conf.json");
+    bool dev_mode = ResourceResolver::is_dev_mode();
+    std::string config_content = ResourceResolver::resolve_config_json(dev_mode, nullptr, 0);
 
     std::string instance_payload = make_instance_payload(argc, argv);
 
@@ -122,6 +113,7 @@ int main(int argc, char **argv) {
 
     taurilua_config_t cfg;
     taurilua_config_init(&cfg);
+    cfg.dev_mode = dev_mode ? 1 : 0;
     if (!config_content.empty()) {
         cfg.config_json = config_content.c_str();
     }

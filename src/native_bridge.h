@@ -26,9 +26,11 @@ const char *platform_get_theme();
 void platform_file_drop_set_callback(file_drop_callback_fn cb);
 void platform_set_menu(const char *json_menu);
 void bridge_set_dev_mode(int dev);
+void bridge_set_dev_url(const char *url);
 void bridge_run_loop();
 void bridge_terminate();
 
+int platform_list_dir(const char *dir_path, char *out_buf, int max_len);
 void platform_set_assets_path(const char *path);
 
 int platform_window_create(const char *label, const char *title, const char *url, int width, int height, int resizable, int decorations, int transparent);

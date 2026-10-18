@@ -2,14 +2,14 @@
 #include <fstream>
 #include <string>
 #include <cstring>
+#include <mutex>
 #include <lua.hpp>
 
 #include "taurilua.h"
 #include "native_bridge.h"
-#include "tauri_bc.h"
-#include "main_bc.h"
-#include "config_json.h"
 #include "isolate_pool.hpp"
+
+#include "resource_resolver.hpp"
 
 struct taurilua_app {
     lua_State *L = nullptr;
@@ -22,28 +22,26 @@ struct taurilua_app {
 };
 
 static taurilua_app *g_active_app = nullptr;
+static std::recursive_mutex g_main_lua_mutex;
 
-static bool file_exists(const std::string &path) {
-    std::ifstream f(path);
-    return f.good();
-}
-
-static std::string read_file_string(const std::string &path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return "";
-    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-}
-
-static std::string resolve_main_lua() {
-    if (file_exists("src-tauri/src/main.lua")) return "src-tauri/src/main.lua";
-    if (file_exists("src/main.lua")) return "src/main.lua";
-    return "";
-}
-
-static std::string resolve_config_json() {
-    if (file_exists("src-tauri/tauri.conf.json")) return read_file_string("src-tauri/tauri.conf.json");
-    if (file_exists("tauri.conf.json")) return read_file_string("tauri.conf.json");
-    return std::string((const char *)tauri_conf_json, tauri_conf_json_len);
+static std::string lua_quote_string(const std::string &str) {
+    std::string out = "\"";
+    for (char c : str) {
+        if (c == '"') out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else if ((unsigned char)c < 32) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "\\%03d", (unsigned char)c);
+            out += buf;
+        } else {
+            out += c;
+        }
+    }
+    out += "\"";
+    return out;
 }
 
 static void on_bridge_ipc(const char *window_label, const char *seq, const char *req) {
@@ -53,6 +51,7 @@ static void on_bridge_ipc(const char *window_label, const char *seq, const char 
 }
 
 static void on_bridge_tray(int id) {
+    std::lock_guard<std::recursive_mutex> lock(g_main_lua_mutex);
     if (!g_active_app || !g_active_app->L) return;
     lua_getglobal(g_active_app->L, "__TAURI_DISPATCH_TRAY__");
     if (lua_isfunction(g_active_app->L, -1)) {
@@ -66,6 +65,7 @@ static void on_bridge_tray(int id) {
 }
 
 static void on_bridge_shortcut(const char *shortcut) {
+    std::lock_guard<std::recursive_mutex> lock(g_main_lua_mutex);
     if (!g_active_app || !g_active_app->L) return;
     lua_getglobal(g_active_app->L, "__TAURI_DISPATCH_SHORTCUT__");
     if (lua_isfunction(g_active_app->L, -1)) {
@@ -79,6 +79,7 @@ static void on_bridge_shortcut(const char *shortcut) {
 }
 
 static void on_bridge_deeplink(const char *url) {
+    std::lock_guard<std::recursive_mutex> lock(g_main_lua_mutex);
     if (!g_active_app || !g_active_app->L) return;
     lua_getglobal(g_active_app->L, "__TAURI_DISPATCH_DEEPLINK__");
     if (lua_isfunction(g_active_app->L, -1)) {
@@ -92,6 +93,7 @@ static void on_bridge_deeplink(const char *url) {
 }
 
 static void on_bridge_menu(const char *id) {
+    std::lock_guard<std::recursive_mutex> lock(g_main_lua_mutex);
     if (!g_active_app || !g_active_app->L) return;
     lua_getglobal(g_active_app->L, "__TAURI_DISPATCH_MENU__");
     if (lua_isfunction(g_active_app->L, -1)) {
@@ -106,6 +108,7 @@ static void on_bridge_menu(const char *id) {
 }
 
 static int on_bridge_window_close(const char *label) {
+    std::lock_guard<std::recursive_mutex> lock(g_main_lua_mutex);
     if (!g_active_app || !g_active_app->L) return 0;
     lua_getglobal(g_active_app->L, "__TAURI_DISPATCH_WINDOW_CLOSE__");
     if (lua_isfunction(g_active_app->L, -1)) {
@@ -125,6 +128,7 @@ static int on_bridge_window_close(const char *label) {
 }
 
 static void on_bridge_single_instance(const char *payload_json) {
+    std::lock_guard<std::recursive_mutex> lock(g_main_lua_mutex);
     if (!g_active_app || !g_active_app->L) return;
     lua_getglobal(g_active_app->L, "__TAURI_DISPATCH_SINGLE_INSTANCE__");
     if (lua_isfunction(g_active_app->L, -1)) {
@@ -139,6 +143,7 @@ static void on_bridge_single_instance(const char *payload_json) {
 }
 
 static void on_bridge_theme_changed(const char *theme) {
+    std::lock_guard<std::recursive_mutex> lock(g_main_lua_mutex);
     if (!g_active_app || !g_active_app->L) return;
     lua_getglobal(g_active_app->L, "__TAURI_DISPATCH_THEME__");
     if (lua_isfunction(g_active_app->L, -1)) {
@@ -153,6 +158,7 @@ static void on_bridge_theme_changed(const char *theme) {
 }
 
 static void on_bridge_file_drop(const char *label, const char *event_type, const char *payload_json) {
+    std::lock_guard<std::recursive_mutex> lock(g_main_lua_mutex);
     if (!g_active_app || !g_active_app->L) return;
     lua_getglobal(g_active_app->L, "__TAURI_DISPATCH_FILE_DROP__");
     if (lua_isfunction(g_active_app->L, -1)) {
@@ -169,18 +175,24 @@ static void on_bridge_file_drop(const char *label, const char *event_type, const
 }
 
 static int preload_tauri(lua_State *L) {
-    if (file_exists("src/tauri/init.lua")) {
-        if (luaL_loadfile(L, "src/tauri/init.lua") != 0) {
-            return lua_error(L);
+    bool dev_mode = g_active_app ? g_active_app->dev_mode : ResourceResolver::is_dev_mode();
+    if (dev_mode) {
+        if (ResourceResolver::file_exists("src/tauri/init.lua")) {
+            if (luaL_loadfile(L, "src/tauri/init.lua") != 0) {
+                return lua_error(L);
+            }
+            lua_call(L, 0, 1);
+            return 1;
+        } else if (ResourceResolver::file_exists("src-tauri/src/tauri/init.lua")) {
+            if (luaL_loadfile(L, "src-tauri/src/tauri/init.lua") != 0) {
+                return lua_error(L);
+            }
+            lua_call(L, 0, 1);
+            return 1;
         }
-    } else if (file_exists("src-tauri/src/tauri/init.lua")) {
-        if (luaL_loadfile(L, "src-tauri/src/tauri/init.lua") != 0) {
-            return lua_error(L);
-        }
-    } else {
-        if (luaL_loadbuffer(L, (const char *)luaJIT_BC_tauri, sizeof(luaJIT_BC_tauri), "tauri") != 0) {
-            return lua_error(L);
-        }
+    }
+    if (luaL_loadbuffer(L, (const char *)luaJIT_BC_tauri, sizeof(luaJIT_BC_tauri), "tauri") != 0) {
+        return lua_error(L);
     }
     lua_call(L, 0, 1);
     return 1;
@@ -205,17 +217,17 @@ taurilua_app_t *taurilua_create(const taurilua_config_t *config) {
     taurilua_app *app = new taurilua_app();
     g_active_app = app;
 
+    app->dev_mode = config ? (config->dev_mode != 0) : ResourceResolver::is_dev_mode();
+
     if (config && config->config_json && strlen(config->config_json) > 0) {
         app->config_json = config->config_json;
     } else {
-        app->config_json = resolve_config_json();
+        app->config_json = ResourceResolver::resolve_config_json(app->dev_mode, tauri_conf_json, tauri_conf_json_len);
     }
 
     if (config && config->custom_script && strlen(config->custom_script) > 0) {
         app->script_path = config->custom_script;
     }
-
-    app->dev_mode = config ? (config->dev_mode != 0) : false;
 
     // Initialize platform bridge callbacks
     bridge_init(on_bridge_ipc, on_bridge_tray, on_bridge_shortcut, on_bridge_deeplink);
@@ -223,6 +235,7 @@ taurilua_app_t *taurilua_create(const taurilua_config_t *config) {
     platform_window_set_close_callback(on_bridge_window_close);
     platform_theme_set_callback(on_bridge_theme_changed);
     platform_file_drop_set_callback(on_bridge_file_drop);
+    platform_single_instance_set_callback(on_bridge_single_instance);
     bridge_set_dev_mode(app->dev_mode ? 1 : 0);
 
     // Initialize isolate thread pool
@@ -289,11 +302,11 @@ int taurilua_run(taurilua_app_t *app) {
     int load_res = 0;
     if (!app->inline_script.empty()) {
         load_res = luaL_loadbuffer(app->L, app->inline_script.data(), app->inline_script.size(), "host_inline");
-    } else if (!app->script_path.empty() && file_exists(app->script_path)) {
+    } else if (!app->script_path.empty() && ResourceResolver::file_exists(app->script_path)) {
         load_res = luaL_loadfile(app->L, app->script_path.c_str());
     } else {
-        std::string resolved = resolve_main_lua();
-        if (!resolved.empty()) {
+        std::string resolved = ResourceResolver::resolve_main_lua(app->dev_mode);
+        if (!resolved.empty() && app->dev_mode) {
             load_res = luaL_loadfile(app->L, resolved.c_str());
         } else {
             load_res = luaL_loadbuffer(app->L, (const char *)luaJIT_BC_main, sizeof(luaJIT_BC_main), "main");
@@ -362,6 +375,7 @@ void taurilua_eval_js(taurilua_app_t *app, const char *window_label, const char 
 }
 
 void taurilua_emit(taurilua_app_t *app, const char *event_name, const char *payload_json) {
+    std::lock_guard<std::recursive_mutex> lock(g_main_lua_mutex);
     if (!app || !app->L || !event_name) return;
     lua_getglobal(app->L, "__TAURI_DISPATCH_EMIT__");
     if (lua_isfunction(app->L, -1)) {
@@ -372,24 +386,25 @@ void taurilua_emit(taurilua_app_t *app, const char *event_name, const char *payl
         }
     } else {
         lua_pop(app->L, 1);
-        // Fallback: evaluate window.__TAURI__.event.emit across windows
-        std::string js = std::string("if(window.__TAURI__&&window.__TAURI__.event){window.__TAURI__.event.emit('") +
-                         event_name + "'," + (payload_json ? payload_json : "{}") + ");}";
+        // Fallback: evaluate window.__TAURI__.event.emit across windows safely quoted
+        std::string safe_event = lua_quote_string(event_name);
+        std::string js = std::string("if(window.__TAURI__&&window.__TAURI__.event){window.__TAURI__.event.emit(") +
+                         safe_event + "," + (payload_json ? payload_json : "{}") + ");}";
         platform_window_eval("main", js.c_str());
     }
 }
 
 int taurilua_open_window(const char *title, const char *url, int width, int height) {
-    std::string safe_title = title ? title : "Tauri-Lua Window";
-    std::string safe_url = url ? url : "";
+    std::string safe_title = lua_quote_string(title ? title : "Tauri-Lua Window");
+    std::string safe_url = lua_quote_string(url ? url : "");
     int w = width > 0 ? width : 1024;
     int h = height > 0 ? height : 720;
 
     std::string script = "local Tauri = require('tauri')\n"
                          "local app = Tauri.init({\n"
                          "    app = { windows = { {\n"
-                         "        title = '" + safe_title + "',\n"
-                         "        url = '" + safe_url + "',\n"
+                         "        title = " + safe_title + ",\n"
+                         "        url = " + safe_url + ",\n"
                          "        width = " + std::to_string(w) + ",\n"
                          "        height = " + std::to_string(h) + ",\n"
                          "        resizable = true\n"

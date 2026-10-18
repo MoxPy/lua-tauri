@@ -1,0 +1,9 @@
+{
+  "productName": "tauri-lua-runtime",
+  "version": "0.1.0",
+  "identifier": "dev.tauri-lua.runtime",
+  "security": {
+    "capabilities": [],
+    "scope": []
+  }
+}

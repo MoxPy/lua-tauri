@@ -57,21 +57,95 @@ using namespace Microsoft::WRL;
 extern char **environ;
 #endif
 
-static std::string g_csp_policy = "default-src 'self' tauri: asset:; script-src 'self' tauri: asset:; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: tauri:; connect-src 'self' tauri: ipc: http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:* https://tauri.localhost;";
+#include <algorithm>
+#include <filesystem>
+#include <cctype>
+
+#if defined(_WIN32)
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
+#elif !defined(__APPLE__)
+#include <sys/random.h>
+#endif
+
+static int g_dev_mode = 0;
+static std::string g_dev_url = "";
+static std::string g_csp_policy_custom = "";
+
+static const std::string g_csp_policy_release = "default-src 'self' tauri: asset:; script-src 'self' tauri: asset:; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: tauri:; connect-src 'self' tauri: ipc: https://tauri.localhost;";
+
+static std::string get_effective_csp() {
+    if (!g_csp_policy_custom.empty()) return g_csp_policy_custom;
+    if (g_dev_mode) {
+        return "default-src 'self' tauri: asset:; script-src 'self' tauri: asset: 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: tauri:; connect-src 'self' tauri: ipc: https://tauri.localhost http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:*;";
+    }
+    return g_csp_policy_release;
+}
 
 static std::string generate_session_token() {
-    static const char chars[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(0, sizeof(chars) - 2);
-    std::string token;
-    for (int i = 0; i < 32; ++i) {
-        token += chars[dis(gen)];
+    unsigned char buf[32];
+#if defined(__APPLE__)
+    arc4random_buf(buf, sizeof(buf));
+#elif defined(_WIN32)
+    BCryptGenRandom(NULL, buf, sizeof(buf), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+#else
+    ssize_t ret = getrandom(buf, sizeof(buf), 0);
+    if (ret != sizeof(buf)) {
+        int fd = open("/dev/urandom", O_RDONLY);
+        if (fd >= 0) {
+            ssize_t r = read(fd, buf, sizeof(buf));
+            (void)r;
+            close(fd);
+        }
     }
-    return token;
+#endif
+    char hex[65];
+    for (size_t i = 0; i < sizeof(buf); ++i) {
+        snprintf(hex + (i * 2), 3, "%02x", buf[i]);
+    }
+    hex[64] = '\0';
+    return std::string(hex);
 }
 
 static std::string g_session_token = generate_session_token();
+
+static bool constant_time_eq(const std::string &a, const std::string &b) {
+    if (a.length() != b.length()) return false;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.length(); ++i) {
+        diff |= (static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]));
+    }
+    return diff == 0;
+}
+
+static bool verify_envelope_token(const std::string &req, const std::string &expected_token) {
+    if (expected_token.empty()) return false;
+    size_t rbracket = req.rfind(']');
+    if (rbracket == std::string::npos) return false;
+    size_t q_end = req.rfind('"', rbracket);
+    if (q_end == std::string::npos || q_end == 0) return false;
+    size_t q_start = q_end;
+    while (q_start > 0) {
+        q_start--;
+        if (req[q_start] == '"') {
+            size_t bsl = 0;
+            size_t b = q_start;
+            while (b > 0 && req[b - 1] == '\\') { bsl++; b--; }
+            if (bsl % 2 == 0) break;
+        }
+    }
+    if (q_start >= q_end) return false;
+    size_t comma = req.rfind(',', q_start);
+    if (comma == std::string::npos) return false;
+    for (size_t i = comma + 1; i < q_start; ++i) {
+        if (!isspace(static_cast<unsigned char>(req[i]))) return false;
+    }
+    for (size_t i = q_end + 1; i < rbracket; ++i) {
+        if (!isspace(static_cast<unsigned char>(req[i]))) return false;
+    }
+    std::string token_in_req = req.substr(q_start + 1, q_end - (q_start + 1));
+    return constant_time_eq(token_in_req, expected_token);
+}
 
 static std::string get_isolation_bootstrap_script() {
     return "Object.defineProperty(window, '__TAURI_TOKEN__', {"
@@ -175,15 +249,84 @@ static NSStatusItem *g_status_item = nil;
 #endif
 
 static std::string get_mime(const std::string &path) {
-    if (path.rfind(".html") != std::string::npos) return "text/html";
-    if (path.rfind(".js") != std::string::npos) return "application/javascript";
-    if (path.rfind(".css") != std::string::npos) return "text/css";
-    if (path.rfind(".json") != std::string::npos) return "application/json";
-    if (path.rfind(".png") != std::string::npos) return "image/png";
-    if (path.rfind(".jpg") != std::string::npos || path.rfind(".jpeg") != std::string::npos) return "image/jpeg";
-    if (path.rfind(".svg") != std::string::npos) return "image/svg+xml";
-    if (path.rfind(".wasm") != std::string::npos) return "application/wasm";
+    size_t dot = path.rfind('.');
+    if (dot == std::string::npos) return "application/octet-stream";
+    std::string ext = path.substr(dot);
+    for (char &c : ext) c = tolower((unsigned char)c);
+    if (ext == ".html" || ext == ".htm") return "text/html";
+    if (ext == ".js" || ext == ".mjs") return "application/javascript";
+    if (ext == ".css") return "text/css";
+    if (ext == ".json") return "application/json";
+    if (ext == ".png") return "image/png";
+    if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+    if (ext == ".svg") return "image/svg+xml";
+    if (ext == ".wasm") return "application/wasm";
+    if (ext == ".ico") return "image/x-icon";
+    if (ext == ".txt") return "text/plain";
     return "application/octet-stream";
+}
+
+static bool resolve_contained_asset(const std::string &assets_root, const std::string &raw_path, std::string &out_real_path) {
+    if (raw_path.empty()) return false;
+    // Decode percent-encoded characters
+    std::string path;
+    for (size_t i = 0; i < raw_path.size(); ++i) {
+        if (raw_path[i] == '%' && i + 2 < raw_path.size() && isxdigit((unsigned char)raw_path[i+1]) && isxdigit((unsigned char)raw_path[i+2])) {
+            char hex[3] = { raw_path[i+1], raw_path[i+2], '\0' };
+            int val = (int)strtol(hex, nullptr, 16);
+            if (val == 0) return false; // NUL byte injection rejected
+            path += (char)val;
+            i += 2;
+        } else {
+            path += raw_path[i];
+        }
+    }
+    if (path.find('\0') != std::string::npos) return false;
+    if (path.find('\\') != std::string::npos || path.find(':') != std::string::npos) return false;
+
+    // Default to /index.html if empty or root
+    if (path.empty() || path == "/") path = "/index.html";
+
+    // Split components and verify no traversal
+    std::vector<std::string> parts;
+    std::stringstream ss(path);
+    std::string part;
+    while (std::getline(ss, part, '/')) {
+        if (part.empty() || part == ".") continue;
+        if (part == "..") return false; // Traversal attempt rejected
+        parts.push_back(part);
+    }
+    if (parts.empty()) parts.push_back("index.html");
+
+    std::filesystem::path root_p(assets_root);
+    std::error_code ec;
+    std::filesystem::path canonical_root = std::filesystem::weakly_canonical(root_p, ec);
+    if (ec) return false;
+
+    std::filesystem::path target = canonical_root;
+    for (const auto &p : parts) {
+        target /= p;
+    }
+
+    std::filesystem::path canonical_target = std::filesystem::weakly_canonical(target, ec);
+    if (ec) return false;
+
+    // Verify canonical target is within canonical root
+    auto root_str = canonical_root.string();
+    auto target_str = canonical_target.string();
+    if (target_str.size() < root_str.size() || target_str.compare(0, root_str.size(), root_str) != 0) {
+        return false;
+    }
+    if (target_str.size() > root_str.size() && target_str[root_str.size()] != '/' && target_str[root_str.size()] != '\\') {
+        return false;
+    }
+
+    if (!std::filesystem::exists(canonical_target, ec) || std::filesystem::is_directory(canonical_target, ec)) {
+        return false;
+    }
+
+    out_real_path = canonical_target.string();
+    return true;
 }
 
 static bool read_file_bytes(const std::string &full_path, std::string &out_data) {
@@ -203,33 +346,55 @@ static bool read_file_bytes(const std::string &full_path, std::string &out_data)
 - (void)webView:(WKWebView *)webView startURLSchemeTask:(id<WKURLSchemeTask>)urlSchemeTask {
     NSURL *url = urlSchemeTask.request.URL;
     NSString *path = [url path];
-    if ([path length] == 0 || [path isEqualToString:@"/"]) {
-        path = @"/index.html";
-    }
+    std::string req_path = path ? [path UTF8String] : "/index.html";
 
-    std::string full_path = g_assets_root + [path UTF8String];
-    std::string data;
-    if (!read_file_bytes(full_path, data)) {
+    std::string full_path;
+    bool found = resolve_contained_asset(g_assets_root, req_path, full_path);
+    if (!found) {
         NSString *resPath = [[NSBundle mainBundle] resourcePath];
         if (resPath) {
-            std::string bundle_path = std::string([resPath UTF8String]) + "/" + g_assets_root + [path UTF8String];
-            read_file_bytes(bundle_path, data);
+            std::string bundle_root = std::string([resPath UTF8String]) + "/" + g_assets_root;
+            found = resolve_contained_asset(bundle_root, req_path, full_path);
         }
-        if (data.empty()) {
-            full_path = g_assets_root + "/index.html";
-            if (!read_file_bytes(full_path, data) && resPath) {
-                std::string bundle_fallback = std::string([resPath UTF8String]) + "/" + g_assets_root + "/index.html";
-                read_file_bytes(bundle_fallback, data);
-            }
-        }
+    }
+
+    if (!found) {
+        NSURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:url
+                                                              statusCode:404
+                                                             HTTPVersion:@"HTTP/1.1"
+                                                            headerFields:@{
+                                                                @"Content-Type": @"text/plain",
+                                                                @"X-Content-Type-Options": @"nosniff"
+                                                            }];
+        [urlSchemeTask didReceiveResponse:response];
+        NSData *err_data = [@"404 Not Found" dataUsingEncoding:NSUTF8StringEncoding];
+        [urlSchemeTask didReceiveData:err_data];
+        [urlSchemeTask didFinish];
+        return;
+    }
+
+    std::string data;
+    if (!read_file_bytes(full_path, data)) {
+        NSURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:url
+                                                              statusCode:404
+                                                             HTTPVersion:@"HTTP/1.1"
+                                                            headerFields:@{
+                                                                @"Content-Type": @"text/plain",
+                                                                @"X-Content-Type-Options": @"nosniff"
+                                                            }];
+        [urlSchemeTask didReceiveResponse:response];
+        [urlSchemeTask didFinish];
+        return;
     }
 
     std::string mime = get_mime(full_path);
+    std::string csp = get_effective_csp();
+
     if (mime == "text/html") {
         size_t head_pos = data.find("<head>");
         if (head_pos == std::string::npos) head_pos = data.find("<HEAD>");
         if (head_pos != std::string::npos && data.find("Content-Security-Policy") == std::string::npos) {
-            std::string meta_tag = "\n  <meta http-equiv=\"Content-Security-Policy\" content=\"" + g_csp_policy + "\">";
+            std::string meta_tag = "\n  <meta http-equiv=\"Content-Security-Policy\" content=\"" + csp + "\">";
             data.insert(head_pos + 6, meta_tag);
         }
     }
@@ -239,8 +404,8 @@ static bool read_file_bytes(const std::string &full_path, std::string &out_data)
                                                          HTTPVersion:@"HTTP/1.1"
                                                         headerFields:@{
                                                             @"Content-Type": [NSString stringWithUTF8String:mime.c_str()],
-                                                            @"Access-Control-Allow-Origin": @"*",
-                                                            @"Content-Security-Policy": [NSString stringWithUTF8String:g_csp_policy.c_str()]
+                                                            @"X-Content-Type-Options": @"nosniff",
+                                                            @"Content-Security-Policy": [NSString stringWithUTF8String:csp.c_str()]
                                                         }];
 
     [urlSchemeTask didReceiveResponse:response];
@@ -346,22 +511,32 @@ static void platform_dispatch_file_drop(const char *label, const char *event_typ
 #if !defined(_WIN32) && !defined(__APPLE__)
 static void gtk_uri_scheme_request_cb(WebKitURISchemeRequest *request, gpointer user_data) {
     const gchar *path_str = webkit_uri_scheme_request_get_path(request);
-    std::string path = (path_str && strlen(path_str) > 0) ? path_str : "/index.html";
-    if (path == "/") path = "/index.html";
+    std::string req_path = (path_str && strlen(path_str) > 0) ? path_str : "/index.html";
 
-    std::string full_path = g_assets_root + path;
+    std::string full_path;
+    if (!resolve_contained_asset(g_assets_root, req_path, full_path)) {
+        GError *error = g_error_new_literal(G_FILE_ERROR, G_FILE_ERROR_NOENT, "404 Not Found");
+        webkit_uri_scheme_request_finish_error(request, error);
+        g_error_free(error);
+        return;
+    }
+
     std::string data;
     if (!read_file_bytes(full_path, data)) {
-        full_path = g_assets_root + "/index.html";
-        read_file_bytes(full_path, data);
+        GError *error = g_error_new_literal(G_FILE_ERROR, G_FILE_ERROR_NOENT, "404 Not Found");
+        webkit_uri_scheme_request_finish_error(request, error);
+        g_error_free(error);
+        return;
     }
 
     std::string mime = get_mime(full_path);
+    std::string csp = get_effective_csp();
+
     if (mime == "text/html") {
         size_t head_pos = data.find("<head>");
         if (head_pos == std::string::npos) head_pos = data.find("<HEAD>");
         if (head_pos != std::string::npos && data.find("Content-Security-Policy") == std::string::npos) {
-            std::string meta_tag = "\n  <meta http-equiv=\"Content-Security-Policy\" content=\"" + g_csp_policy + "\">";
+            std::string meta_tag = "\n  <meta http-equiv=\"Content-Security-Policy\" content=\"" + csp + "\">";
             data.insert(head_pos + 6, meta_tag);
         }
     }
@@ -386,12 +561,17 @@ static bool get_native_window_origin(webview_t w, std::string &out_origin) {
     if (SUCCEEDED(controller->get_CoreWebView2(&core)) && core) {
         LPWSTR uri_w = nullptr;
         if (SUCCEEDED(core->get_Source(&uri_w)) && uri_w) {
-            char buf[1024];
-            WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, buf, sizeof(buf), NULL, NULL);
+            int len = WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, NULL, 0, NULL, NULL);
+            if (len > 0) {
+                std::string u8(len - 1, '\0');
+                WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, &u8[0], len, NULL, NULL);
+                out_origin = u8;
+            } else {
+                out_origin = "";
+            }
             CoTaskMemFree(uri_w);
             core->Release();
-            out_origin = std::string(buf);
-            return true;
+            return !out_origin.empty();
         }
         core->Release();
     }
@@ -443,10 +623,41 @@ void platform_set_assets_path(const char *path) {
     }
 }
 
-static int g_dev_mode = 0;
-
 void bridge_set_dev_mode(int dev) {
     g_dev_mode = dev;
+}
+
+void bridge_set_dev_url(const char *url) {
+    g_dev_url = url ? url : "";
+}
+
+int platform_list_dir(const char *dir_path, char *out_buf, int max_len) {
+    if (!dir_path || !out_buf || max_len <= 0) return 0;
+    out_buf[0] = '\0';
+    try {
+        std::filesystem::path p(dir_path);
+        std::error_code ec;
+        if (!std::filesystem::exists(p, ec) || !std::filesystem::is_directory(p, ec)) {
+            return 0;
+        }
+        std::vector<std::string> entries;
+        for (const auto &entry : std::filesystem::directory_iterator(p, ec)) {
+            if (entry.is_regular_file(ec)) {
+                entries.push_back(entry.path().filename().string());
+            }
+        }
+        std::sort(entries.begin(), entries.end());
+        std::string joined;
+        for (const auto &name : entries) {
+            joined += name + "\n";
+        }
+        int copy_len = std::min(max_len - 1, static_cast<int>(joined.size()));
+        memcpy(out_buf, joined.data(), copy_len);
+        out_buf[copy_len] = '\0';
+        return copy_len;
+    } catch (...) {
+        return 0;
+    }
 }
 
 void bridge_init(ipc_callback_fn on_ipc, tray_callback_fn on_tray, shortcut_callback_fn on_shortcut, deeplink_callback_fn on_deeplink) {
@@ -508,13 +719,13 @@ static void common_bind_handler(const char *seq, const char *req, void *arg) {
     }
 
     std::string current_origin;
-    if (!get_native_window_origin(target_w, current_origin) || !OriginValidator::is_allowed(current_origin)) {
+    if (!get_native_window_origin(target_w, current_origin) || !OriginValidator::is_allowed(current_origin, g_dev_mode != 0, g_dev_url)) {
         std::string err_payload = "{\"error\":\"Accesso negato: Origin non autorizzato (" + current_origin + ")\"}";
         platform_window_return_async(label.c_str(), s_seq.c_str(), 1, err_payload.c_str());
         return;
     }
 
-    if (s_req.find("\"" + g_session_token + "\"") == std::string::npos) {
+    if (!verify_envelope_token(s_req, g_session_token)) {
         std::string err_payload = "{\"error\":\"Accesso negato: Token di isolamento mancante o non valido\"}";
         platform_window_return_async(label.c_str(), s_seq.c_str(), 1, err_payload.c_str());
         return;
@@ -830,18 +1041,18 @@ void platform_window_eval(const char *label, const char *js) {
     std::lock_guard<std::mutex> lock(g_windows_mutex);
     if (strcmp(label, "*") == 0) {
         for (auto &pair : g_windows) {
-            EvalPayload *p = new EvalPayload();
-            p->w = pair.second.w;
-            p->js = js;
-            webview_dispatch(pair.second.w, dispatch_eval_cb, p);
+            std::string current_origin;
+            if (get_native_window_origin(pair.second.w, current_origin) && OriginValidator::is_allowed(current_origin, g_dev_mode != 0, g_dev_url)) {
+                EvalPayload *p = new EvalPayload();
+                p->w = pair.second.w;
+                p->js = js;
+                webview_dispatch(pair.second.w, dispatch_eval_cb, p);
+            }
         }
         return;
     }
     auto it = g_windows.find(label);
     if (it != g_windows.end()) {
-        if (strstr(js, "window.__TAURI__") != nullptr) {
-            webview_init(it->second.w, js);
-        }
         EvalPayload *p = new EvalPayload();
         p->w = it->second.w;
         p->js = js;
@@ -988,41 +1199,9 @@ int platform_deeplink_register(const char *scheme) {
 }
 
 int platform_updater_install(const char *archive_path) {
-    if (!archive_path || archive_path[0] == '\0') return 0;
-#if defined(_WIN32)
-    std::string arch_str = archive_path;
-    std::wstring cmd_w = L"tar.exe -xf \"" + std::wstring(arch_str.begin(), arch_str.end()) + L"\" -C .";
-    STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si));
-    ZeroMemory(&pi, sizeof(pi));
-    si.cb = sizeof(si);
-    if (!CreateProcessW(NULL, const_cast<wchar_t *>(cmd_w.c_str()), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        return 0;
-    }
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exit_code = 1;
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    return exit_code == 0 ? 1 : 0;
-#else
-    pid_t pid = -1;
-    char *const argv[] = {
-        const_cast<char *>("tar"),
-        const_cast<char *>("-xzf"),
-        const_cast<char *>(archive_path),
-        const_cast<char *>("-C"),
-        const_cast<char *>("./"),
-        nullptr
-    };
-    if (posix_spawnp(&pid, "tar", nullptr, nullptr, argv, environ) != 0) {
-        return 0;
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
-#endif
+    (void)archive_path;
+    // Security remediation: Unauthenticated tar extraction from CWD is disabled
+    return 0;
 }
 
 int platform_dialog_open(const char *title, const char *filter, char *out_path, int max_len) {
@@ -1490,6 +1669,12 @@ void platform_notification_send(const char *title, const char *body) {
     std::string s_title = title ? title : "";
     std::string s_body = body ? body : "";
 
+    // Strip NUL bytes and apply length limits
+    s_title.erase(std::remove(s_title.begin(), s_title.end(), '\0'), s_title.end());
+    s_body.erase(std::remove(s_body.begin(), s_body.end(), '\0'), s_body.end());
+    if (s_title.size() > 256) s_title = s_title.substr(0, 256);
+    if (s_body.size() > 1024) s_body = s_body.substr(0, 1024);
+
 #if defined(__APPLE__)
     if ([NSBundle mainBundle].bundleIdentifier != nil) {
         run_on_main_sync(^{
@@ -1511,23 +1696,17 @@ void platform_notification_send(const char *title, const char *body) {
                 NSString *identifier = [[NSUUID UUID] UUIDString];
                 UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:identifier content:content trigger:nil];
                 [[UNUserNotificationCenter currentNotificationCenter] addNotificationRequest:request withCompletionHandler:nil];
-            } else {
-                std::string script = "display notification \"" + s_body + "\" with title \"" + s_title + "\"";
-                pid_t pid;
-                const char *argv[] = {"osascript", "-e", script.c_str(), NULL};
-                if (posix_spawnp(&pid, "/usr/bin/osascript", NULL, NULL, (char *const *)argv, environ) == 0) {
-                    int status;
-                    waitpid(pid, &status, 0);
-                }
+                return;
             }
         });
-        return;
     }
-    // Terminal fallback for dev mode: discrete non-blocking invocation
+
+    // Discrete fallback: pass title and body as positional argv arguments to a fixed osascript
+    // NEVER concatenate user text into AppleScript syntax!
     std::thread([s_title, s_body]() {
-        std::string script = "display notification \"" + s_body + "\" with title \"" + s_title + "\"";
+        static const char *fixed_script = "on run argv\n  display notification (item 2 of argv) with title (item 1 of argv)\nend run";
         pid_t pid;
-        const char *argv[] = {"osascript", "-e", script.c_str(), NULL};
+        const char *argv[] = {"osascript", "-e", fixed_script, s_title.c_str(), s_body.c_str(), NULL};
         if (posix_spawnp(&pid, "/usr/bin/osascript", NULL, NULL, (char *const *)argv, environ) == 0) {
             int status;
             waitpid(pid, &status, 0);
@@ -1535,36 +1714,28 @@ void platform_notification_send(const char *title, const char *body) {
     }).detach();
 
 #elif defined(_WIN32)
+    // Windows: Use Shell_NotifyIconW with NOTIFYICONDATAW directly taking wide string buffers.
+    // Zero powershell execution! Zero script concatenation!
     std::thread([s_title, s_body]() {
-        std::string ps = 
-            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; "
-            "$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); "
-            "$textNodes = $template.GetElementsByTagName('text'); "
-            "$textNodes.Item(0).AppendChild($template.CreateTextNode('" + s_title + "')) > $null; "
-            "$textNodes.Item(1).AppendChild($template.CreateTextNode('" + s_body + "')) > $null; "
-            "$toast = [Windows.UI.Notifications.ToastNotification]::new($template); "
-            "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Tauri').Show($toast);";
+        NOTIFYICONDATAW nid;
+        ZeroMemory(&nid, sizeof(nid));
+        nid.cbSize = sizeof(nid);
+        nid.uFlags = NIF_INFO | NIF_MESSAGE;
+        nid.dwInfoFlags = NIIF_INFO;
 
-        std::wstring ps_w(ps.begin(), ps.end());
-        std::wstring cmd_w = L"powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"" + ps_w + L"\"";
-        STARTUPINFOW si;
-        PROCESS_INFORMATION pi;
-        ZeroMemory(&si, sizeof(si));
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
-        ZeroMemory(&pi, sizeof(pi));
-        if (CreateProcessW(NULL, const_cast<wchar_t *>(cmd_w.c_str()), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-            WaitForSingleObject(pi.hProcess, 5000);
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-        }
+        MultiByteToWideChar(CP_UTF8, 0, s_title.c_str(), -1, nid.szInfoTitle, ARRAYSIZE(nid.szInfoTitle));
+        MultiByteToWideChar(CP_UTF8, 0, s_body.c_str(), -1, nid.szInfo, ARRAYSIZE(nid.szInfo));
+
+        Shell_NotifyIconW(NIM_ADD, &nid);
+        Sleep(4000);
+        Shell_NotifyIconW(NIM_DELETE, &nid);
     }).detach();
 
 #else
+    // Linux: notify-send with explicit "--" option terminator before positional parameters
     std::thread([s_title, s_body]() {
         pid_t pid;
-        const char *argv[] = {"notify-send", s_title.c_str(), s_body.c_str(), NULL};
+        const char *argv[] = {"notify-send", "--", s_title.c_str(), s_body.c_str(), NULL};
         if (posix_spawnp(&pid, "notify-send", NULL, NULL, (char *const *)argv, environ) == 0) {
             int status;
             waitpid(pid, &status, 0);
@@ -1926,7 +2097,7 @@ void platform_state_unlock() {
 
 void platform_set_csp(const char *csp) {
     if (csp && strlen(csp) > 0) {
-        g_csp_policy = csp;
+        g_csp_policy_custom = csp;
     }
 }
 
@@ -1969,25 +2140,47 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
     }
     SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
 
-    // Resolve absolute path to the executable to avoid CWD binary hijacking
-    std::wstring prog_w(prog_str.begin(), prog_str.end());
+    // Resolve executable path without CWD search
+    int prog_wlen = MultiByteToWideChar(CP_UTF8, 0, prog_str.data(), (int)prog_str.size(), NULL, 0);
+    std::wstring prog_w(prog_wlen, 0);
+    if (prog_wlen > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, prog_str.data(), (int)prog_str.size(), &prog_w[0], prog_wlen);
+    }
+
     wchar_t abs_path_w[MAX_PATH];
+    // SearchPathW with NULL path searches CWD. Use GetSystemDirectoryW / PATH instead if relative.
     DWORD found = SearchPathW(NULL, prog_w.c_str(), L".exe", MAX_PATH, abs_path_w, NULL);
     LPCWSTR app_name_ptr = (found > 0) ? abs_path_w : NULL;
 
     std::wstring cmd_line_w;
     auto append_quoted_w = [&](const std::string &arg) {
         if (!cmd_line_w.empty()) cmd_line_w += L" ";
-        std::wstring warg(arg.begin(), arg.end());
-        if (warg.find(L' ') != std::wstring::npos || warg.find(L'\t') != std::wstring::npos || warg.find(L'\"') != std::wstring::npos || warg.empty()) {
-            cmd_line_w += L"\"";
-            for (wchar_t c : warg) {
-                if (c == L'\"') cmd_line_w += L"\\\"";
-                else cmd_line_w += c;
-            }
-            cmd_line_w += L"\"";
-        } else {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, arg.data(), (int)arg.size(), NULL, 0);
+        std::wstring warg(wlen, 0);
+        if (wlen > 0) {
+            MultiByteToWideChar(CP_UTF8, 0, arg.data(), (int)arg.size(), &warg[0], wlen);
+        }
+        bool needs_quotes = warg.empty() || (warg.find_first_of(L" \t\n\v\"") != std::wstring::npos);
+        if (!needs_quotes) {
             cmd_line_w += warg;
+        } else {
+            cmd_line_w += L"\"";
+            size_t backslashes = 0;
+            for (wchar_t c : warg) {
+                if (c == L'\\') {
+                    backslashes++;
+                } else if (c == L'\"') {
+                    cmd_line_w.append(backslashes * 2 + 1, L'\\');
+                    cmd_line_w += L'\"';
+                    backslashes = 0;
+                } else {
+                    cmd_line_w.append(backslashes, L'\\');
+                    backslashes = 0;
+                    cmd_line_w += c;
+                }
+            }
+            cmd_line_w.append(backslashes * 2, L'\\');
+            cmd_line_w += L"\"";
         }
     };
 

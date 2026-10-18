@@ -43,21 +43,9 @@ print("=======================================================\n")
 print("1. Module Auto-Discovery & CWD Stripping (P0-1):")
 
 test("Release mode filters relative and CWD paths from package.path", function()
-    local function filter_absolute_only(path_str, sep)
-        local kept = {}
-        for entry in path_str:gmatch("[^" .. sep .. "]+") do
-            local clean = entry:gsub("^%s+", ""):gsub("%s+$", "")
-            if clean:sub(1, 1) == "/" or clean:match("^%a:[/\\]") then
-                if not clean:match("^[/\\]%?%.lua") and not clean:match("^[/\\]%?%.so") and not clean:match("^[/\\]%?%.dll") then
-                    table.insert(kept, clean)
-                end
-            end
-        end
-        return table.concat(kept, sep)
-    end
-
+    local tauri = dofile("src/tauri/init.lua")
     local test_path = "./?.lua;../plugins/?.lua;/opt/app/bundle/?.lua;./node_modules/?.lua;/usr/share/lua/5.1/?.lua"
-    local filtered = filter_absolute_only(test_path, ";")
+    local filtered = tauri._filter_absolute_only(test_path)
     assert(not filtered:find("%./%?%.lua"), "CWD ./?.lua must be removed in release")
     assert(not filtered:find("%.%./plugins"), "Relative ../plugins must be removed in release")
     assert(not filtered:find("node_modules"), "Relative node_modules must be removed in release")

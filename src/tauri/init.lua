@@ -1,6 +1,25 @@
 local ffi = require("ffi")
 local bit = bit or require("bit")
 
+local function filter_absolute_only(path_str)
+    local parts = {}
+    for part in (path_str .. ";"):gmatch("([^;]*);") do
+        local clean = part:match("^%s*(.-)%s*$")
+        if clean and clean ~= "" then
+            local is_absolute = false
+            if ffi.os == "Windows" then
+                is_absolute = clean:match("^[a-zA-Z]:[/\\]") ~= nil or clean:match("^\\\\") ~= nil
+            else
+                is_absolute = clean:match("^/") ~= nil
+            end
+            if is_absolute then
+                table.insert(parts, clean)
+            end
+        end
+    end
+    return table.concat(parts, ";")
+end
+
 -- ============================================================================
 -- Module & Plugin Search Paths (Auto-Discovery)
 -- In RELEASE builds only absolute exec-relative paths are added.
@@ -162,25 +181,6 @@ local function setup_module_search_paths()
             table.insert(extra_c_paths,   exec_dir .. "/../Resources/rocks/lib/lua/5.1/?.dylib")
             table.insert(extra_c_paths,   exec_dir .. "/../share/rocks/lib/lua/5.1/?.so")
         end
-    end
-
-    local function filter_absolute_only(path_str)
-        local parts = {}
-        for part in (path_str .. ";"):gmatch("([^;]*);") do
-            local clean = part:match("^%s*(.-)%s*$")
-            if clean and clean ~= "" then
-                local is_absolute = false
-                if ffi.os == "Windows" then
-                    is_absolute = clean:match("^[a-zA-Z]:[/\\]") ~= nil or clean:match("^\\\\") ~= nil
-                else
-                    is_absolute = clean:match("^/") ~= nil
-                end
-                if is_absolute then
-                    table.insert(parts, clean)
-                end
-            end
-        end
-        return table.concat(parts, ";")
     end
 
     local current_path = package.path or ""
@@ -347,124 +347,369 @@ end
 
 local json = {}
 
-local function escape_str(s)
-    local map = {
-        ['\\'] = '\\\\',
-        ['"'] = '\\"',
-        ['\b'] = '\\b',
-        ['\f'] = '\\f',
-        ['\n'] = '\\n',
-        ['\r'] = '\\r',
-        ['\t'] = '\\t'
-    }
-    return s:gsub('[\\"\b\f\n\r\t]', map)
+local function utf8_encode(cp)
+    if cp < 0x80 then
+        return string.char(cp)
+    elseif cp < 0x800 then
+        return string.char(0xC0 + math.floor(cp / 0x40), 0x80 + (cp % 0x40))
+    elseif cp < 0x10000 then
+        return string.char(0xE0 + math.floor(cp / 0x1000), 0x80 + (math.floor(cp / 0x40) % 0x40), 0x80 + (cp % 0x40))
+    else
+        return string.char(
+            0xF0 + math.floor(cp / 0x40000),
+            0x80 + (math.floor(cp / 0x1000) % 0x40),
+            0x80 + (math.floor(cp / 0x40) % 0x40),
+            0x80 + (cp % 0x40)
+        )
+    end
 end
 
-function json.encode(val)
+local escape_map = {
+    ['"'] = '\\"',
+    ['\\'] = '\\\\',
+    ['\b'] = '\\b',
+    ['\f'] = '\\f',
+    ['\n'] = '\\n',
+    ['\r'] = '\\r',
+    ['\t'] = '\\t'
+}
+
+local function encode_string(s)
+    return '"' .. s:gsub('[%z\1-\31\\"]', function(c)
+        return escape_map[c] or string.format('\\u%04x', string.byte(c))
+    end) .. '"'
+end
+
+function json.encode(val, visited)
+    visited = visited or {}
     local t = type(val)
     if t == "nil" then
         return "null"
     elseif t == "boolean" then
         return val and "true" or "false"
     elseif t == "number" then
+        if val ~= val then
+            error("JSON encode error: NaN is not allowed in RFC 8259")
+        elseif val == math.huge or val == -math.huge then
+            error("JSON encode error: Infinity is not allowed in RFC 8259")
+        end
         return tostring(val)
     elseif t == "string" then
-        return '"' .. escape_str(val) .. '"'
+        return encode_string(val)
     elseif t == "table" then
+        if visited[val] then
+            error("JSON encode error: circular reference detected")
+        end
+        visited[val] = true
+
         local is_array = true
         local max_idx = 0
-        for k, v in pairs(val) do
+        local count = 0
+        for k, _ in pairs(val) do
+            count = count + 1
             if type(k) == "number" and k > 0 and math.floor(k) == k then
                 if k > max_idx then max_idx = k end
             else
                 is_array = false
-                break
             end
         end
-        if is_array then
-            local items = {}
+
+        if count == 0 then
+            visited[val] = nil
+            return "{}"
+        end
+
+        if is_array and max_idx == count then
+            local parts = {}
             for i = 1, max_idx do
-                items[i] = json.encode(val[i])
+                parts[i] = json.encode(val[i], visited)
             end
-            return "[" .. table.concat(items, ",") .. "]"
+            visited[val] = nil
+            return "[" .. table.concat(parts, ",") .. "]"
         else
-            local fields = {}
+            local parts = {}
             for k, v in pairs(val) do
-                table.insert(fields, string.format("%q:%s", tostring(k), json.encode(v)))
+                table.insert(parts, encode_string(tostring(k)) .. ":" .. json.encode(v, visited))
             end
-            return "{" .. table.concat(fields, ",") .. "}"
+            visited[val] = nil
+            return "{" .. table.concat(parts, ",") .. "}"
         end
-    end
-    return "null"
-end
-
-local function parse_value(str, idx)
-    idx = str:find("%S", idx) or idx
-    local char = str:sub(idx, idx)
-
-    if char == "{" then
-        local obj = {}
-        idx = idx + 1
-        while true do
-            idx = str:find("%S", idx) or idx
-            if str:sub(idx, idx) == "}" then return obj, idx + 1 end
-            if str:sub(idx, idx) == "," then idx = idx + 1 end
-            idx = str:find("%S", idx) or idx
-            if str:sub(idx, idx) == "}" then return obj, idx + 1 end
-            
-            local key, next_idx = parse_value(str, idx)
-            idx = str:find("%S", next_idx) or next_idx
-            if str:sub(idx, idx) == ":" then idx = idx + 1 end
-            local val
-            val, idx = parse_value(str, idx)
-            obj[key] = val
-        end
-    elseif char == "[" then
-        local arr = {}
-        idx = idx + 1
-        while true do
-            idx = str:find("%S", idx) or idx
-            if str:sub(idx, idx) == "]" then return arr, idx + 1 end
-            if str:sub(idx, idx) == "," then idx = idx + 1 end
-            idx = str:find("%S", idx) or idx
-            if str:sub(idx, idx) == "]" then return arr, idx + 1 end
-            local val
-            val, idx = parse_value(str, idx)
-            table.insert(arr, val)
-        end
-    elseif char == '"' then
-        local end_idx = idx + 1
-        while true do
-            end_idx = str:find('"', end_idx)
-            if not end_idx then return "", #str + 1 end
-            local backslashes = 0
-            local b_idx = end_idx - 1
-            while b_idx >= idx and str:sub(b_idx, b_idx) == "\\" do
-                backslashes = backslashes + 1
-                b_idx = b_idx - 1
-            end
-            if backslashes % 2 == 0 then break end
-            end_idx = end_idx + 1
-        end
-        local val = str:sub(idx + 1, end_idx - 1)
-        val = val:gsub('\\"', '"'):gsub('\\\\', '\\'):gsub('\\n', '\n'):gsub('\\r', '\r'):gsub('\\t', '\t')
-        return val, end_idx + 1
-    elseif str:sub(idx, idx + 3) == "true" then
-        return true, idx + 4
-    elseif str:sub(idx, idx + 4) == "false" then
-        return false, idx + 5
-    elseif str:sub(idx, idx + 3) == "null" then
-        return nil, idx + 4
     else
-        local next_delim = str:find("[,%]}%s]", idx) or (#str + 1)
-        local raw = str:sub(idx, next_delim - 1)
-        return tonumber(raw) or raw, next_delim
+        error("JSON encode error: unsupported type " .. t)
     end
 end
 
 function json.decode(str)
-    if not str or str == "" then return nil end
-    return parse_value(str, 1)
+    if type(str) ~= "string" or str == "" then
+        return nil, "empty input"
+    end
+
+    local len = #str
+    local pos = 1
+    local depth = 0
+    local max_depth = 128
+
+    local function skip_ws()
+        while pos <= len do
+            local c = str:sub(pos, pos)
+            if c == " " or c == "\t" or c == "\r" or c == "\n" then
+                pos = pos + 1
+            else
+                break
+            end
+        end
+    end
+
+    local parse_value
+
+    local function parse_string()
+        pos = pos + 1
+        local chunks = {}
+        local start = pos
+        while pos <= len do
+            local c = str:sub(pos, pos)
+            if c == '"' then
+                if pos > start then
+                    table.insert(chunks, str:sub(start, pos - 1))
+                end
+                pos = pos + 1
+                return table.concat(chunks)
+            elseif c == '\\' then
+                if pos > start then
+                    table.insert(chunks, str:sub(start, pos - 1))
+                end
+                pos = pos + 1
+                if pos > len then return nil, "unterminated escape sequence" end
+                local esc = str:sub(pos, pos)
+                if esc == '"' or esc == '\\' or esc == '/' then
+                    table.insert(chunks, esc)
+                    pos = pos + 1
+                elseif esc == 'b' then
+                    table.insert(chunks, "\b")
+                    pos = pos + 1
+                elseif esc == 'f' then
+                    table.insert(chunks, "\f")
+                    pos = pos + 1
+                elseif esc == 'n' then
+                    table.insert(chunks, "\n")
+                    pos = pos + 1
+                elseif esc == 'r' then
+                    table.insert(chunks, "\r")
+                    pos = pos + 1
+                elseif esc == 't' then
+                    table.insert(chunks, "\t")
+                    pos = pos + 1
+                elseif esc == 'u' then
+                    pos = pos + 1
+                    if pos + 3 > len then return nil, "incomplete \\uXXXX escape" end
+                    local hex = str:sub(pos, pos + 3)
+                    if not hex:match("^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$") then
+                        return nil, "invalid \\uXXXX escape: " .. hex
+                    end
+                    pos = pos + 4
+                    local cp = tonumber(hex, 16)
+                    if cp >= 0xD800 and cp <= 0xDBFF then
+                        if str:sub(pos, pos + 1) == "\\u" then
+                            local low_hex = str:sub(pos + 2, pos + 5)
+                            if low_hex:match("^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$") then
+                                local low = tonumber(low_hex, 16)
+                                if low >= 0xDC00 and low <= 0xDFFF then
+                                    pos = pos + 6
+                                    cp = 0x10000 + ((cp - 0xD800) * 0x400) + (low - 0xDC00)
+                                end
+                            end
+                        end
+                    end
+                    table.insert(chunks, utf8_encode(cp))
+                else
+                    return nil, "invalid escape char \\" .. esc
+                end
+                start = pos
+            else
+                local b = string.byte(c)
+                if b < 32 then
+                    return nil, "unescaped control character in string"
+                end
+                pos = pos + 1
+            end
+        end
+        return nil, "unterminated string"
+    end
+
+    local function parse_object()
+        pos = pos + 1
+        depth = depth + 1
+        if depth > max_depth then return nil, "maximum depth exceeded" end
+        local obj = {}
+        skip_ws()
+        if pos <= len and str:sub(pos, pos) == '}' then
+            pos = pos + 1
+            depth = depth - 1
+            return obj
+        end
+
+        while pos <= len do
+            skip_ws()
+            if pos > len then return nil, "unterminated object" end
+            if str:sub(pos, pos) ~= '"' then
+                return nil, "expected string key in object at position " .. pos
+            end
+            local key, err = parse_string()
+            if not key then return nil, err end
+
+            skip_ws()
+            if pos > len or str:sub(pos, pos) ~= ':' then
+                return nil, "expected ':' after key in object at position " .. pos
+            end
+            pos = pos + 1
+
+            skip_ws()
+            local val, val_err = parse_value()
+            if val_err then return nil, val_err end
+            obj[key] = val
+
+            skip_ws()
+            if pos <= len and str:sub(pos, pos) == '}' then
+                pos = pos + 1
+                depth = depth - 1
+                return obj
+            elseif pos <= len and str:sub(pos, pos) == ',' then
+                pos = pos + 1
+                skip_ws()
+                if pos <= len and str:sub(pos, pos) == '}' then
+                    return nil, "trailing comma in object"
+                end
+            else
+                return nil, "expected ',' or '}' in object at position " .. pos
+            end
+        end
+        return nil, "unterminated object"
+    end
+
+    local function parse_array()
+        pos = pos + 1
+        depth = depth + 1
+        if depth > max_depth then return nil, "maximum depth exceeded" end
+        local arr = {}
+        skip_ws()
+        if pos <= len and str:sub(pos, pos) == ']' then
+            pos = pos + 1
+            depth = depth - 1
+            return arr
+        end
+
+        while pos <= len do
+            skip_ws()
+            local val, err = parse_value()
+            if err then return nil, err end
+            table.insert(arr, val)
+
+            skip_ws()
+            if pos <= len and str:sub(pos, pos) == ']' then
+                pos = pos + 1
+                depth = depth - 1
+                return arr
+            elseif pos <= len and str:sub(pos, pos) == ',' then
+                pos = pos + 1
+                skip_ws()
+                if pos <= len and str:sub(pos, pos) == ']' then
+                    return nil, "trailing comma in array"
+                end
+            else
+                return nil, "expected ',' or ']' in array at position " .. pos
+            end
+        end
+        return nil, "unterminated array"
+    end
+
+    local function parse_number()
+        local start = pos
+        if str:sub(pos, pos) == '-' then pos = pos + 1 end
+        if pos > len then return nil, "invalid number" end
+        if str:sub(pos, pos) == '0' then
+            pos = pos + 1
+        elseif str:sub(pos, pos):match("^[1-9]$") then
+            while pos <= len and str:sub(pos, pos):match("^[0-9]$") do
+                pos = pos + 1
+            end
+        else
+            return nil, "invalid number format at position " .. pos
+        end
+
+        if pos <= len and str:sub(pos, pos) == '.' then
+            pos = pos + 1
+            if pos > len or not str:sub(pos, pos):match("^[0-9]$") then
+                return nil, "invalid fractional number"
+            end
+            while pos <= len and str:sub(pos, pos):match("^[0-9]$") do
+                pos = pos + 1
+            end
+        end
+
+        if pos <= len and (str:sub(pos, pos) == 'e' or str:sub(pos, pos) == 'E') then
+            pos = pos + 1
+            if pos <= len and (str:sub(pos, pos) == '+' or str:sub(pos, pos) == '-') then
+                pos = pos + 1
+            end
+            if pos > len or not str:sub(pos, pos):match("^[0-9]$") then
+                return nil, "invalid exponent in number"
+            end
+            while pos <= len and str:sub(pos, pos):match("^[0-9]$") do
+                pos = pos + 1
+            end
+        end
+
+        local num_str = str:sub(start, pos - 1)
+        local num = tonumber(num_str)
+        if not num then return nil, "cannot convert number " .. num_str end
+        return num
+    end
+
+    function parse_value()
+        skip_ws()
+        if pos > len then return nil, "unexpected end of input" end
+        local c = str:sub(pos, pos)
+        if c == '{' then
+            return parse_object()
+        elseif c == '[' then
+            return parse_array()
+        elseif c == '"' then
+            return parse_string()
+        elseif c == 't' then
+            if str:sub(pos, pos + 3) == "true" then
+                pos = pos + 4
+                return true
+            else
+                return nil, "unexpected token at position " .. pos
+            end
+        elseif c == 'f' then
+            if str:sub(pos, pos + 4) == "false" then
+                pos = pos + 5
+                return false
+            else
+                return nil, "unexpected token at position " .. pos
+            end
+        elseif c == 'n' then
+            if str:sub(pos, pos + 3) == "null" then
+                pos = pos + 4
+                return nil
+            else
+                return nil, "unexpected token at position " .. pos
+            end
+        elseif c == '-' or c:match("^[0-9]$") then
+            return parse_number()
+        else
+            return nil, "unexpected character '" .. c .. "' at position " .. pos
+        end
+    end
+
+    local res, err = parse_value()
+    if err then return nil, err end
+    skip_ws()
+    if pos <= len then
+        return nil, "trailing characters after JSON at position " .. pos
+    end
+    return res
 end
 
 local Security = {}
@@ -480,33 +725,63 @@ function Security.new(config)
         end
     end
 
-    -- Support Tauri v2 style capability files: src-tauri/capabilities/*.json
-    local cap_dirs = { "src-tauri/capabilities", "capabilities" }
+    -- Support capability files:
+    -- In release mode, NEVER scan CWD! Only scan bundle directory if provided.
+    -- In dev mode, scan explicit dev capability dirs: src-tauri/capabilities and capabilities.
+    local is_dev = rawget(_G, "__TAURI_DEV__")
+    if is_dev == nil then
+        local env_dev = os.getenv("TAURILUA_DEV")
+        is_dev = (env_dev and env_dev ~= "" and env_dev ~= "0")
+    end
+
+    local cap_dirs = {}
+    if is_dev then
+        table.insert(cap_dirs, "src-tauri/capabilities")
+        table.insert(cap_dirs, "capabilities")
+    end
+    local bundle_cap = rawget(_G, "__TAURI_BUNDLE_CAPABILITIES_DIR__")
+    if bundle_cap and bundle_cap ~= "" then
+        table.insert(cap_dirs, bundle_cap)
+    end
+
+    local seen_files = {}
     for _, cap_dir in ipairs(cap_dirs) do
-        local probe = (ffi.os == "Windows")
-            and ('dir /b "' .. cap_dir:gsub("/", "\\") .. '\\*.json" 2>NUL')
-            or ("ls -1 " .. cap_dir .. "/*.json 2>/dev/null")
-        local p = io.popen(probe)
-        if p then
-            for line in p:lines() do
-                local fname = line:match("^%s*(.-)%s*$")
-                if fname ~= "" then
-                    local full_path = (fname:find("/") or fname:find("\\")) and fname or (cap_dir .. "/" .. fname)
+        local buf_size = 65536
+        local buf = ffi.new("char[?]", buf_size)
+        local n = 0
+        if clib and clib.platform_list_dir then
+            pcall(function() n = clib.platform_list_dir(cap_dir, buf, buf_size) end)
+        end
+        if n > 0 then
+            local file_list_str = ffi.string(buf, n)
+            for fname in file_list_str:gmatch("[^\r\n]+") do
+                fname = fname:match("^%s*(.-)%s*$")
+                if fname:match("%.json$") and not seen_files[fname] then
+                    seen_files[fname] = true
+                    local full_path = cap_dir .. "/" .. fname
                     local f = io.open(full_path, "r")
-                    if f then
-                        local content = f:read("*a")
-                        f:close()
-                        local parsed = json.decode(content)
-                        if parsed and (parsed.permissions or parsed.capabilities) then
-                            local list = parsed.permissions or parsed.capabilities
-                            for _, perm in ipairs(list) do
-                                self.capabilities[perm] = true
-                            end
+                    if not f then
+                        error(string.format("Capability discovery error: cannot open capability file '%s'", full_path))
+                    end
+                    local content = f:read("*a")
+                    f:close()
+                    local parsed, parse_err = json.decode(content)
+                    if not parsed or type(parsed) ~= "table" then
+                        error(string.format("Capability discovery error: malformed JSON in capability file '%s': %s", full_path, tostring(parse_err)))
+                    end
+                    local list = parsed.permissions or parsed.capabilities
+                    if not list or type(list) ~= "table" then
+                        error(string.format("Capability discovery error: missing permissions/capabilities array in '%s'", full_path))
+                    end
+                    for _, perm in ipairs(list) do
+                        if type(perm) == "string" and perm ~= "" then
+                            self.capabilities[perm] = true
+                        else
+                            error(string.format("Capability discovery error: invalid permission in '%s'", full_path))
                         end
                     end
                 end
             end
-            p:close()
         end
     end
 
@@ -536,14 +811,37 @@ function Security.new(config)
 end
 
 function Security:assert_capability(name)
-    if self.capabilities[name] then
+    if self.capabilities[name] or self.capabilities["tauri:" .. name] then
         return true
     end
-    local prefix = name:match("^([^:]+):")
+    local stripped = name:gsub("^tauri:", "")
+    if self.capabilities[stripped] then
+        return true
+    end
+    local prefix = stripped:match("^([^:]+):")
     if prefix and (self.capabilities[prefix .. ":*"] or self.capabilities[prefix .. ":all"] or self.capabilities[prefix .. ":default"]) then
+        if prefix ~= "fs" then
+            if stripped == "window:create:external" and (self.capabilities["window:default"] or self.capabilities["core:default"]) then
+                -- do not grant external window creation under default presets
+            else
+                return true
+            end
+        end
+    end
+    if self.capabilities["fs:default"] and (stripped == "fs:read-text-file" or stripped == "fs:read-file" or stripped == "fs:read-dir" or stripped == "fs:exists" or stripped == "fs:stat") then
         return true
     end
-    if self.capabilities["core:default"] and (prefix == "core" or name:match("^tauri:window:") or name:match("^tauri:shortcut:") or name:match("^tauri:tray:") or name:match("^tauri:updater:") or name == "tauri:menu:set") then
+    if self.capabilities["core:default"] and stripped ~= "window:create:external" and (prefix == "core" or
+       stripped:match("^window:") or
+       stripped:match("^shortcut:") or
+       stripped:match("^tray:") or
+       stripped == "menu:set" or
+       stripped:match("^state:") or
+       stripped:match("^store:") or
+       stripped:match("^path:") or
+       stripped == "theme:get" or
+       stripped == "event:emit" or
+       stripped:match("^dialog:")) then
         return true
     end
     error(string.format("Capability non autorizzata: %s", name))
@@ -588,31 +886,65 @@ function Security:assert_args(program, args)
     end
 
     -- 2. Whitelist check
-    if self._program_map["*"] ~= nil and self._program_map["*"] == false then
+    if self._program_map["*"] == false then
         return -- wildcard any program and any args
     end
 
-    local arg_whitelist = self._program_map[program]
-    if arg_whitelist == false or arg_whitelist == nil then
-        -- Allowed with general args (safe from known dangerous flags above)
+    local arg_policy = self._program_map[program]
+    if arg_policy == false then
+        -- Explicit opt-in for any arguments on this program
         return
     end
 
-    if type(arg_whitelist) == "table" then
+    if type(arg_policy) == "table" then
         local whiteset = {}
-        for _, a in ipairs(arg_whitelist) do whiteset[tostring(a)] = true end
+        for _, a in ipairs(arg_policy) do whiteset[tostring(a)] = true end
         for _, arg in ipairs(args) do
             if not whiteset[tostring(arg)] then
                 error(string.format("Shell: argument not in allowlist for '%s': %s", program, tostring(arg)))
             end
         end
+        return
+    end
+
+    -- If no arguments allowlist was configured, default deny non-empty arguments
+    if #args > 0 then
+        error(string.format("Shell: arguments not permitted for program '%s' (no arg allowlist defined)", program))
     end
 end
 
+local function decode_uri_components(p)
+    return p:gsub("%%([0-9a-fA-F][0-9a-fA-F])", function(hex)
+        local b = tonumber(hex, 16)
+        if b and b ~= 0 then return string.char(b) end
+        return ""
+    end)
+end
+
 local function canonicalize_path(path)
-    local parts = {}
+    if type(path) ~= "string" or path == "" then
+        return ""
+    end
+    if path:find("\0", 1, true) then
+        error("Percorso non valido: contiene caratteri NUL")
+    end
+    path = decode_uri_components(path)
+    if path:find("\0", 1, true) then
+        error("Percorso non valido: contiene caratteri NUL")
+    end
+
     path = path:gsub("\\", "/")
-    local is_absolute = path:sub(1, 1) == "/"
+    local drive, rest = path:match("^([a-zA-Z]:)[/\\]?(.*)$")
+    local is_absolute = false
+    if drive then
+        is_absolute = true
+        path = rest or ""
+    elseif path:sub(1, 1) == "/" then
+        is_absolute = true
+        path = path:sub(2)
+    end
+
+    local parts = {}
     for part in path:gmatch("[^/]+") do
         if part == "." then
             -- skip
@@ -628,26 +960,63 @@ local function canonicalize_path(path)
             table.insert(parts, part)
         end
     end
+
     local res = table.concat(parts, "/")
-    if is_absolute then
+    if drive then
+        res = drive .. "/" .. res
+    elseif is_absolute then
         res = "/" .. res
     end
     return res
 end
 
+local function glob_to_lua_pattern(glob_str)
+    local s = glob_str:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1")
+    s = s:gsub("%*%*", "\1")
+    s = s:gsub("%*", "[^/]*")
+    s = s:gsub("\1", ".*")
+    return "^" .. s .. "$"
+end
+
 function Security:assert_scope(target_path, base_paths)
-    if #self.scopes == 0 then return end
+    if not self.scopes or #self.scopes == 0 then
+        error(string.format("Accesso negato dallo Scope: nessuna regola di scope configurata (deny-by-default) per '%s'", tostring(target_path)))
+    end
+    if type(target_path) ~= "string" or target_path == "" then
+        error("Percorso file non specificato o non valido")
+    end
     local normalized = canonicalize_path(target_path)
+
+    local function substitute_base(str)
+        return str:gsub("%$([A-Z_]+)", function(var)
+            if var == "APPDATA" then return base_paths and base_paths.appData or ""
+            elseif var == "HOME" then return base_paths and base_paths.home or ""
+            elseif var == "DESKTOP" then return base_paths and base_paths.desktop or ""
+            end
+            return "$" .. var
+        end)
+    end
+
     for _, pattern in ipairs(self.scopes) do
-        local resolved = pattern:gsub("%$APPDATA", base_paths.appData)
-                               :gsub("%$HOME", base_paths.home)
-                               :gsub("%$DESKTOP", base_paths.desktop)
-                               :gsub("\\", "/")
-        local canonical_pattern = canonicalize_path(resolved)
-        local escaped = canonical_pattern:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1")
-        local lua_pattern = "^" .. escaped:gsub("%%%*", ".*") .. "$"
-        if normalized:match(lua_pattern) then
-            return true
+        if type(pattern) == "string" and pattern ~= "" then
+            local resolved = substitute_base(pattern):gsub("\\", "/")
+            local is_recursive = resolved:match("%*%*$") ~= nil
+            local is_direct = resolved:match("%*%$") ~= nil and not is_recursive
+            local canonical_base = canonicalize_path(resolved:gsub("/%*%*?$", ""))
+
+            if is_recursive then
+                local pat = "^" .. canonical_base:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1") .. "/?.*$"
+                if normalized:match(pat) then return true end
+            elseif is_direct then
+                local pat = "^" .. canonical_base:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1") .. "/[^/]*$"
+                if normalized:match(pat) then return true end
+            else
+                local canonical_pat = canonicalize_path(resolved)
+                local pat = glob_to_lua_pattern(canonical_pat)
+                if normalized:match(pat) or normalized == canonical_pat then
+                    return true
+                end
+            end
         end
     end
     error(string.format("Accesso negato dallo Scope: %s", target_path))
@@ -1384,6 +1753,7 @@ local TAURI_CLIENT_SCRIPT = [[
 
 local Tauri = {}
 Tauri.__index = Tauri
+Tauri._filter_absolute_only = filter_absolute_only
 
 local g_tauri_instance = nil
 
@@ -1595,7 +1965,10 @@ function Tauri.sleep(ms)
 end
 
 function Tauri:_resolve_paths()
-    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or "."
+    local home = os.getenv("HOME") or os.getenv("USERPROFILE")
+    if not home or home == "" then
+        error("Impossibile risolvere la directory utente: variabili HOME e USERPROFILE mancanti (fail-closed)")
+    end
     local app_data = os.getenv("APPDATA") or (home .. "/.config")
     local desktop = home .. "/Desktop"
     self.base_paths = {
@@ -1618,6 +1991,9 @@ function Tauri:_setup_asset_scheme()
     pcall(function() clib.platform_set_assets_path(dist_dir) end)
 
     local dev_url = build_conf.devUrl or build_conf.devPath
+    if dev_url and dev_url ~= "" then
+        pcall(function() clib.bridge_set_dev_url(dev_url) end)
+    end
     if __TAURI_DEV__ and dev_url and dev_url ~= "" then
         self.default_origin = dev_url
         if not self.default_origin:match("/$") and not self.default_origin:match("%.html$") then
@@ -1632,31 +2008,38 @@ end
 
 function Tauri:_register_builtins()
     self:register("tauri:state:get", function(payload)
-        return self.state:get(payload.key)
+        self.security:assert_capability("tauri:state:get")
+        return self.state:get(payload and payload.key)
     end)
 
     self:register("tauri:state:set", function(payload)
-        self.state:set(payload.key, payload.value)
+        self.security:assert_capability("tauri:state:set")
+        self.state:set(payload and payload.key, payload and payload.value)
         return true
     end)
 
     self:register("tauri:store:get", function(payload)
-        return self.store:get(payload.key)
+        self.security:assert_capability("store:get")
+        return self.store:get(payload and payload.key)
     end)
 
     self:register("tauri:store:set", function(payload)
-        return self.store:set(payload.key, payload.value)
+        self.security:assert_capability("store:set")
+        return self.store:set(payload and payload.key, payload and payload.value)
     end)
 
     self:register("tauri:store:has", function(payload)
-        return self.store:has(payload.key)
+        self.security:assert_capability("store:get")
+        return self.store:has(payload and payload.key)
     end)
 
     self:register("tauri:store:delete", function(payload)
-        return self.store:delete(payload.key)
+        self.security:assert_capability("store:set")
+        return self.store:delete(payload and payload.key)
     end)
 
     self:register("tauri:store:clear", function()
+        self.security:assert_capability("store:set")
         return self.store:clear()
     end)
 
@@ -1747,6 +2130,10 @@ function Tauri:_register_builtins()
         local buf_size = 65536
         local buf = ffi.new("char[?]", buf_size)
         local lines = {}
+        local total_bytes = 0
+        local max_bytes = 1048576 -- 1MB output cap
+        local max_lines = 10000   -- 10,000 lines cap
+        local capped = false
 
         while true do
             local n = clib.platform_process_read_line(handle, buf, buf_size)
@@ -1754,7 +2141,13 @@ function Tauri:_register_builtins()
                 break
             end
             local line = ffi.string(buf, n)
-            table.insert(lines, line)
+            total_bytes = total_bytes + n
+            if #lines < max_lines and total_bytes <= max_bytes then
+                table.insert(lines, line)
+            elseif not capped then
+                capped = true
+                table.insert(lines, "[output truncated: limit exceeded]")
+            end
             if ch then
                 ch:send({ line = line, type = "stdout" })
             end
@@ -1770,24 +2163,55 @@ function Tauri:_register_builtins()
     end)
 
     self:register("tauri:event:emit", function(payload)
-        self:emit(payload.event, payload.payload)
+        self.security:assert_capability("event:emit")
+        self:emit(payload and payload.event, payload and payload.payload)
         return true
     end)
 
     self:register("tauri:window:create", function(payload)
         self.security:assert_capability("core:default")
-        local label = payload.label or ("win_" .. tostring(os.time()))
-        local title = payload.title or "New Window"
-        local url = payload.url or self.default_origin
-        local width = payload.width or 800
-        local height = payload.height or 600
-        local resizable = payload.resizable ~= false and 1 or 0
-        local decorations = payload.decorations ~= false and 1 or 0
-        local transparent = payload.transparent and 1 or 0
+        local label = (payload and payload.label) or ("win_" .. tostring(os.time()))
+        local title = (payload and payload.title) or "New Window"
+        local raw_url = payload and payload.url
+        local url = self.default_origin
+        local is_trusted = false
+
+        if not raw_url or raw_url == "" then
+            url = self.default_origin
+            is_trusted = true
+        elseif raw_url:match("^tauri://") or raw_url:match("^https://tauri%.localhost") then
+            url = raw_url
+            is_trusted = true
+        elseif raw_url:match("^https?://") then
+            if self.default_origin and raw_url:sub(1, #self.default_origin) == self.default_origin then
+                url = raw_url
+                is_trusted = true
+            else
+                self.security:assert_capability("window:create:external")
+                url = raw_url
+                is_trusted = false
+            end
+        else
+            -- Relative path: join onto default_origin
+            if self.default_origin:match("/$") then
+                url = self.default_origin .. raw_url:gsub("^/", "")
+            else
+                url = self.default_origin .. "/" .. raw_url:gsub("^/", "")
+            end
+            is_trusted = true
+        end
+
+        local width = (payload and payload.width) or 800
+        local height = (payload and payload.height) or 600
+        local resizable = (payload and payload.resizable ~= false) and 1 or 0
+        local decorations = (payload and payload.decorations ~= false) and 1 or 0
+        local transparent = (payload and payload.transparent) and 1 or 0
 
         local ok = clib.platform_window_create(label, title, url, width, height, resizable, decorations, transparent)
         if ok == 1 then
-            clib.platform_window_eval(label, TAURI_CLIENT_SCRIPT)
+            if is_trusted then
+                clib.platform_window_eval(label, TAURI_CLIENT_SCRIPT)
+            end
             self.windows[label] = true
             return true
         end
@@ -1886,19 +2310,11 @@ function Tauri:_register_builtins()
     end)
 
     self:register("tauri:updater:check", function()
-        self.security:assert_capability("core:default")
-        return {
-            shouldUpdate = true,
-            version = "1.0.1",
-            date = "2026-10-13",
-            body = "Aggiornamento disponibile."
-        }
+        error("tauri:updater:check non è implementato: updater disabilitato per motivi di sicurezza")
     end)
 
     self:register("tauri:updater:install", function()
-        self.security:assert_capability("core:default")
-        local ok = clib.platform_updater_install("update.tar.gz")
-        return ok == 1
+        error("tauri:updater:install non è implementato: updater disabilitato per motivi di sicurezza")
     end)
 
     self:register("tauri:fs:read_text_file", function(payload)
@@ -1980,7 +2396,7 @@ function Tauri:_register_builtins()
     end)
 
     self:register("tauri:fs:remove", function(payload)
-        self.security:assert_capability("fs:write-text-file")
+        self.security:assert_capability("fs:remove")
         self.security:assert_scope(payload.path, self.base_paths)
         if clib.remove(payload.path) ~= 0 then
             error("Impossibile eliminare: " .. payload.path)
@@ -2050,18 +2466,28 @@ function Tauri:_register_builtins()
     end)
 
     self:register("tauri:theme:get", function()
+        self.security:assert_capability("theme:get")
         return self:get_theme()
     end)
 
     self:register("tauri:notification:send", function(payload)
         self.security:assert_capability("notification:send")
-        clib.platform_notification_send(payload.title or "App", payload.body or "")
+        clib.platform_notification_send(payload and payload.title or "App", payload and payload.body or "")
         return true
     end)
 
-    self:register("tauri:path:app_data_dir", function() return self.base_paths.appData end)
-    self:register("tauri:path:home_dir", function() return self.base_paths.home end)
-    self:register("tauri:path:desktop_dir", function() return self.base_paths.desktop end)
+    self:register("tauri:path:app_data_dir", function()
+        self.security:assert_capability("path:read")
+        return self.base_paths.appData
+    end)
+    self:register("tauri:path:home_dir", function()
+        self.security:assert_capability("path:read")
+        return self.base_paths.home
+    end)
+    self:register("tauri:path:desktop_dir", function()
+        self.security:assert_capability("path:read")
+        return self.base_paths.desktop
+    end)
 
     self:register("tauri:menu:set", function(payload)
         self.security:assert_capability("core:default")
@@ -2355,6 +2781,7 @@ return {
     new = Tauri.new,
     sleep = Tauri.sleep,
     json = json,
+    _filter_absolute_only = filter_absolute_only,
     notification = {
         send = function(title, body)
             if type(title) == "table" then
