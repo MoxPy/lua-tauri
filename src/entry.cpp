@@ -88,6 +88,7 @@ static std::string extract_app_identifier(const std::string &conf) {
 }
 
 #include "resource_resolver.hpp"
+#include "config_json.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -98,7 +99,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 int main(int argc, char **argv) {
 #endif
     bool dev_mode = ResourceResolver::is_dev_mode();
-    std::string config_content = ResourceResolver::resolve_config_json(dev_mode, nullptr, 0);
+    std::string config_content = ResourceResolver::resolve_config_json(dev_mode, tauri_conf_json, tauri_conf_json_len);
 
     std::string instance_payload = make_instance_payload(argc, argv);
 

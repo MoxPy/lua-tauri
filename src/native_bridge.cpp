@@ -2147,9 +2147,19 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
         MultiByteToWideChar(CP_UTF8, 0, prog_str.data(), (int)prog_str.size(), &prog_w[0], prog_wlen);
     }
 
+    // SearchPathW with explicit PATH avoids untrusted CWD resolution
+    typedef BOOL (WINAPI *SetNeedCurrentDirFn)(BOOL);
+    HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
+    if (hK32) {
+        SetNeedCurrentDirFn pfn = (SetNeedCurrentDirFn)GetProcAddress(hK32, "SetNeedCurrentDirectoryForExePathW");
+        if (pfn) pfn(FALSE);
+    }
+
     wchar_t abs_path_w[MAX_PATH];
-    // SearchPathW with NULL path searches CWD. Use GetSystemDirectoryW / PATH instead if relative.
-    DWORD found = SearchPathW(NULL, prog_w.c_str(), L".exe", MAX_PATH, abs_path_w, NULL);
+    wchar_t path_env[32768];
+    DWORD path_len = GetEnvironmentVariableW(L"PATH", path_env, 32768);
+    LPCWSTR search_path = (path_len > 0 && path_len < 32768) ? path_env : L"";
+    DWORD found = SearchPathW(search_path, prog_w.c_str(), L".exe", MAX_PATH, abs_path_w, NULL);
     LPCWSTR app_name_ptr = (found > 0) ? abs_path_w : NULL;
 
     std::wstring cmd_line_w;

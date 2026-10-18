@@ -95,19 +95,16 @@ inline std::string resolve_bundle_resource(const std::string &rel_path) {
 }
 
 inline std::string resolve_main_lua(bool dev_mode) {
-    if (dev_mode) {
-        if (file_exists("src-tauri/src/main.lua")) return "src-tauri/src/main.lua";
-        if (file_exists("src/main.lua")) return "src/main.lua";
+    if (!dev_mode) {
+        return "";
     }
-    std::string bundle_main = resolve_bundle_resource("main.lua");
-    if (!bundle_main.empty()) return bundle_main;
+    if (file_exists("src-tauri/src/main.lua")) return "src-tauri/src/main.lua";
     return "";
 }
 
 inline std::string resolve_config_json(bool dev_mode, const unsigned char *embedded_json, size_t embedded_len) {
     if (dev_mode) {
         if (file_exists("src-tauri/tauri.conf.json")) return read_file_string("src-tauri/tauri.conf.json");
-        if (file_exists("tauri.conf.json")) return read_file_string("tauri.conf.json");
     }
     std::string bundle_conf = resolve_bundle_resource("tauri.conf.json");
     if (!bundle_conf.empty()) return read_file_string(bundle_conf);
@@ -124,11 +121,12 @@ inline std::string resolve_assets_root(bool dev_mode, const std::string &configu
             return configured_dist;
         }
         if (file_exists("dist/index.html")) return "dist";
+        return configured_dist.empty() ? "dist" : configured_dist;
     }
     std::string bundle_assets = resolve_bundle_resource(configured_dist.empty() ? "dist" : configured_dist);
     if (!bundle_assets.empty()) return bundle_assets;
 
-    return configured_dist.empty() ? "dist" : configured_dist;
+    return get_executable_dir() + "/dist";
 }
 
 inline std::string resolve_capabilities_dir(bool dev_mode) {

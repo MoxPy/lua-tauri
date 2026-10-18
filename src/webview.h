@@ -707,9 +707,10 @@ static inline void webview_bind(webview_t w, const char *name, webview_bind_fn f
 }
 
 static inline void webview_return(webview_t w, const char *seq, int status, const char *result) {
+    if (!w || !seq) return;
     std::string s_seq = webview_js_escape(seq);
     std::string s_res = webview_js_escape(result ? result : "");
-    std::string js = "window.__TAURI_BRIDGE_REPLY__(\"" + s_seq + "\", " + std::to_string(status) + ", JSON.parse(\"" + s_res + "\"));";
+    std::string js = "window.__TAURI_BRIDGE_REPLY__(\"" + s_seq + "\", " + std::to_string(status) + ", \"" + s_res + "\");";
     webview_eval(w, js.c_str());
 }
 
@@ -948,9 +949,10 @@ static inline void webview_bind(webview_t w, const char *name, webview_bind_fn f
 }
 
 static inline void webview_return(webview_t w, const char *seq, int status, const char *result) {
+    if (!w || !seq) return;
     std::string s_seq = webview_js_escape(seq);
     std::string s_res = webview_js_escape(result ? result : "");
-    std::string js = "window.__TAURI_BRIDGE_REPLY__(\"" + s_seq + "\", " + std::to_string(status) + ", JSON.parse(\"" + s_res + "\"));";
+    std::string js = "window.__TAURI_BRIDGE_REPLY__(\"" + s_seq + "\", " + std::to_string(status) + ", \"" + s_res + "\");";
     webview_eval(w, js.c_str());
 }
 
