@@ -534,7 +534,7 @@ await appWindow.onCloseRequested(async (event) => {
 
 ### 6. Hardened Process Execution (`shell`)
 Direct kernel-level process spawning with zero shell interpolation and real-time streaming:
-* `tauri:shell:execute` — Spawns processes directly via `posix_spawnp` (macOS/Linux) or `CreateProcessA` (Windows) using discrete `argv` arrays.
+* `tauri:shell:execute` — Spawns processes directly via `posix_spawnp` (macOS/Linux) or `CreateProcessW` (Windows) using discrete `argv` arrays.
 
 **Frontend Usage (`JavaScript`):**
 ```javascript
