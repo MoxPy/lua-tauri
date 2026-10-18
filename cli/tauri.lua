@@ -887,7 +887,13 @@ local function cmd_dev(args)
     local before_dev = build_conf.beforeDevCommand
     if before_dev and before_dev ~= "" then
         running(before_dev)
-        local p = io.popen(before_dev .. " & echo $!")
+        local log_redirect = " > .dev_server.log 2>&1"
+        local p
+        if ffi.os == "Windows" then
+            p = io.popen("start /B " .. before_dev .. log_redirect)
+        else
+            p = io.popen("(" .. before_dev .. ")" .. log_redirect .. " & echo $!")
+        end
         if p then
             dev_server_pid = tonumber(p:read("*l"))
             p:close()
@@ -927,7 +933,12 @@ local function cmd_dev(args)
         running(bin_path)
         -- TAURILUA_DEV=1 activates cwd-relative module discovery (./plugins, ../lua-tauri-plugins, etc.)
         -- which is deliberately excluded from release builds for security.
-        local p = io.popen("TAURILUA_DEV=1 " .. bin_path .. " & echo $!")
+        local p
+        if ffi.os == "Windows" then
+            p = io.popen("set TAURILUA_DEV=1 && start /B " .. bin_path)
+        else
+            p = io.popen("TAURILUA_DEV=1 " .. bin_path .. " > /dev/null 2>&1 & echo $!")
+        end
         local pid = p and tonumber(p:read("*l"))
         if p then p:close() end
         return pid
@@ -948,6 +959,7 @@ local function cmd_dev(args)
         if dev_port and ffi.os ~= "Windows" then
             exec("lsof -ti :" .. dev_port .. " 2>/dev/null | xargs kill -9 2>/dev/null || true")
         end
+        pcall(function() os.remove(".dev_server.log") end)
         os.exit(0)
     end
 
