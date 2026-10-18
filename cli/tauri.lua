@@ -2079,10 +2079,14 @@ const handleStream = async () => {
         write_file(app_name .. "/package.json", json.encode(svelte_pkg))
 
         local vite_conf = [=[import { defineConfig } from 'vite';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [
+    svelte({
+      preprocess: vitePreprocess(),
+    }),
+  ],
   clearScreen: false,
   server: {
     port: 5173,
