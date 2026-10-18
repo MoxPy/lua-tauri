@@ -1297,7 +1297,7 @@ app:create_main_window()
 
     -- 2. Backend: tauri.conf.json
     local tauri_conf = {
-        ["$schema"] = "https://schema.tauri.app/v2",
+        ["$schema"] = "../schemas/tauri-lua.schema.json",
         productName = app_name,
         version = "0.1.0",
         identifier = "com." .. app_name .. ".app",
@@ -2280,7 +2280,7 @@ local function cmd_init(args)
     exec("mkdir -p src")
 
     local default_conf = {
-        ["$schema"] = "https://schema.tauri.app/v2",
+        ["$schema"] = "../schemas/tauri-lua.schema.json",
         productName = "my-tauri-app",
         version = "0.1.0",
         identifier = "com.mytauriapp.dev",

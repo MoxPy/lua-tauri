@@ -287,11 +287,11 @@ Generates all multi-resolution platform icon sets (`.icns`, `.ico`, 32x32, 128x1
 
 ## Declarative Configuration: `tauri.conf.json`
 
-The runtime configuration adheres to the modern **Tauri v2 schema**:
+The runtime configuration uses a Tauri-inspired declarative schema ([schemas/tauri-lua.schema.json](schemas/tauri-lua.schema.json)):
 
 ```json
 {
-  "$schema": "https://schema.tauri.app/v2",
+  "$schema": "./schemas/tauri-lua.schema.json",
   "productName": "tauri-lua-app",
   "version": "1.0.0",
   "identifier": "com.tauri.lua",
@@ -759,9 +759,9 @@ window.__TAURI__.event.listen("tauri://single-instance", (event) => {
 
 ### 9. Native Desktop Notifications
 
-Tauri-Lua delivers non-blocking, operating-system-native desktop notifications with zero external subshell injection:
+Tauri-Lua delivers non-blocking, operating-system-native desktop notifications with direct process spawning:
 
-* **macOS:** Modern Apple **`UserNotifications`** framework (`UNUserNotificationCenter`, `UNNotificationRequest`, and `ModernNotificationCenterDelegate` displaying banners even when foregrounded), with automatic authorization requests and a non-blocking `osascript` fallback for unpackaged terminal development.
+* **macOS:** Modern Apple **`UserNotifications`** framework (`UNUserNotificationCenter`, `UNNotificationRequest`, and `ModernNotificationCenterDelegate` displaying banners even when foregrounded) with automatic authorization requests in packaged mode, and a parameterized `osascript` argv fallback (`on run argv`, avoiding shell/script string interpolation) for unpackaged terminal development.
 * **Windows:** Native notifications dispatched using `Shell_NotifyIconW` buffer structures.
 * **Linux:** Non-blocking `posix_spawnp` of `notify-send` with discrete `argv` arrays (zero shell interpolation).
 
@@ -1194,7 +1194,7 @@ Declare your required rocks directly in `tauri.conf.json` using the `dependencie
 
 ```json
 {
-  "$schema": "https://schema.tauri.app/v2",
+  "$schema": "./schemas/tauri-lua.schema.json",
   "productName": "my-tauri-app",
   "dependencies": {
     "luarocks": [
@@ -1654,6 +1654,13 @@ jobs:
           echo %RUNNER_TEMP%\luajit\src>> %GITHUB_PATH%
           echo LUAJIT_ROOT=%RUNNER_TEMP%\luajit>> %GITHUB_ENV%
 
+      # Run regression tests before packaging
+      - name: Run Regression Tests
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+
       # Run frontend & backend build
       - name: Build Application Bundle
         run: |
@@ -1681,7 +1688,7 @@ Like any native framework balancing performance, security, and portability, Taur
 2. **Mobile Platforms (iOS & Android):**
    - Tauri-Lua is purpose-built for desktop operating systems (macOS, Linux, Windows). Mobile platform compilation (iOS/Android) is not supported.
 3. **macOS System Notifications in Unpackaged Mode:**
-   - Apple's modern `UserNotifications` framework requires an active application bundle identifier and signed `.app` structure. In unpackaged development mode (`./lua-tauri dev`), notifications fall back to local delivery without registering with macOS Notification Center. Full interactive banner delivery activates once packaged into a `.app` bundle.
+   - Apple's modern `UserNotifications` framework requires an active application bundle identifier and signed `.app` structure. In unpackaged development mode (`./lua-tauri dev`), notifications fall back to a parameterized `osascript` argv delivery (`on run argv`, avoiding shell/script string interpolation) without registering with macOS Notification Center. Full interactive banner delivery activates once packaged into a `.app` bundle.
 4. **MySQL / MariaDB DDL Non-Transactionality:**
    - On MySQL and MariaDB, DDL statements (`CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`) trigger an immediate, implicit engine commit and cannot be rolled back within a transaction. If a migration fails mid-script, the migration table marks the version as failed/dirty, requiring manual resolution before running subsequent migrations.
 
