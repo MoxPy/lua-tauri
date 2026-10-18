@@ -1222,17 +1222,52 @@ int platform_dialog_open(const char *title, const char *filter, char *out_path, 
     }
     return 0;
 #elif defined(__APPLE__)
+    if (!out_path || max_len <= 0) return 0;
+    out_path[0] = '\0';
     __block int res = 0;
     std::string s_title = title ? title : "";
     run_on_main_sync(^{
-        NSOpenPanel *panel = [NSOpenPanel openPanel];
-        [panel setCanChooseFiles:YES];
-        [panel setCanChooseDirectories:NO];
-        if (!s_title.empty()) [panel setTitle:[NSString stringWithUTF8String:s_title.c_str()]];
-        if ([panel runModal] == NSModalResponseOK) {
-            NSURL *url = [[panel URLs] objectAtIndex:0];
-            strncpy(out_path, [[url path] UTF8String], max_len);
-            res = 1;
+        @try {
+            NSOpenPanel *panel = [NSOpenPanel openPanel];
+            [panel setCanChooseFiles:YES];
+            [panel setCanChooseDirectories:NO];
+            [panel setAllowsMultipleSelection:NO];
+            if (!s_title.empty()) {
+                NSString *nsTitle = [NSString stringWithUTF8String:s_title.c_str()];
+                if (nsTitle) {
+                    [panel setMessage:nsTitle];
+                }
+            }
+            if ([panel runModal] == NSModalResponseOK) {
+                NSURL *url = [panel URL];
+                if (!url) {
+                    NSArray<NSURL *> *urls = [panel URLs];
+                    if (urls && [urls count] > 0) {
+                        url = [urls objectAtIndex:0];
+                    }
+                }
+                if (url) {
+                    const char *fs_rep = [url fileSystemRepresentation];
+                    if (fs_rep) {
+                        strncpy(out_path, fs_rep, max_len - 1);
+                        out_path[max_len - 1] = '\0';
+                        res = 1;
+                    } else {
+                        NSString *path = [url path];
+                        if (path) {
+                            const char *utf8 = [path UTF8String];
+                            if (utf8) {
+                                strncpy(out_path, utf8, max_len - 1);
+                                out_path[max_len - 1] = '\0';
+                                res = 1;
+                            }
+                        }
+                    }
+                }
+            }
+        } @catch (NSException *ex) {
+            NSLog(@"[platform_dialog_open] Handled Exception: %@", ex);
+            res = 0;
         }
     });
     return res;
@@ -1268,14 +1303,43 @@ int platform_dialog_save(const char *title, const char *filter, char *out_path, 
     }
     return 0;
 #elif defined(__APPLE__)
+    if (!out_path || max_len <= 0) return 0;
+    out_path[0] = '\0';
     __block int res = 0;
     std::string s_title = title ? title : "";
     run_on_main_sync(^{
-        NSSavePanel *panel = [NSSavePanel savePanel];
-        if (!s_title.empty()) [panel setTitle:[NSString stringWithUTF8String:s_title.c_str()]];
-        if ([panel runModal] == NSModalResponseOK) {
-            strncpy(out_path, [[[panel URL] path] UTF8String], max_len);
-            res = 1;
+        @try {
+            NSSavePanel *panel = [NSSavePanel savePanel];
+            if (!s_title.empty()) {
+                NSString *nsTitle = [NSString stringWithUTF8String:s_title.c_str()];
+                if (nsTitle) {
+                    [panel setMessage:nsTitle];
+                }
+            }
+            if ([panel runModal] == NSModalResponseOK) {
+                NSURL *url = [panel URL];
+                if (url) {
+                    const char *fs_rep = [url fileSystemRepresentation];
+                    if (fs_rep) {
+                        strncpy(out_path, fs_rep, max_len - 1);
+                        out_path[max_len - 1] = '\0';
+                        res = 1;
+                    } else {
+                        NSString *path = [url path];
+                        if (path) {
+                            const char *utf8 = [path UTF8String];
+                            if (utf8) {
+                                strncpy(out_path, utf8, max_len - 1);
+                                out_path[max_len - 1] = '\0';
+                                res = 1;
+                            }
+                        }
+                    }
+                }
+            }
+        } @catch (NSException *ex) {
+            NSLog(@"[platform_dialog_save] Handled Exception: %@", ex);
+            res = 0;
         }
     });
     return res;

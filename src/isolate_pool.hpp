@@ -86,6 +86,17 @@ private:
     static int preload_tauri(lua_State *L) {
         bool dev_mode = ResourceResolver::is_dev_mode();
         if (dev_mode) {
+            const char *engine_root = getenv("TAURI_LUA_ROOT");
+            if (engine_root && engine_root[0] != 0) {
+                std::string p = std::string(engine_root) + "/src/tauri/init.lua";
+                if (ResourceResolver::file_exists(p)) {
+                    if (luaL_loadfile(L, p.c_str()) != 0) {
+                        return lua_error(L);
+                    }
+                    lua_call(L, 0, 1);
+                    return 1;
+                }
+            }
             if (ResourceResolver::file_exists("src/tauri/init.lua")) {
                 if (luaL_loadfile(L, "src/tauri/init.lua") != 0) {
                     return lua_error(L);

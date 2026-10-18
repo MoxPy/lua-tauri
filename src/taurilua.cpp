@@ -177,6 +177,17 @@ static void on_bridge_file_drop(const char *label, const char *event_type, const
 static int preload_tauri(lua_State *L) {
     bool dev_mode = g_active_app ? g_active_app->dev_mode : ResourceResolver::is_dev_mode();
     if (dev_mode) {
+        const char *engine_root = getenv("TAURI_LUA_ROOT");
+        if (engine_root && engine_root[0] != 0) {
+            std::string p = std::string(engine_root) + "/src/tauri/init.lua";
+            if (ResourceResolver::file_exists(p)) {
+                if (luaL_loadfile(L, p.c_str()) != 0) {
+                    return lua_error(L);
+                }
+                lua_call(L, 0, 1);
+                return 1;
+            }
+        }
         if (ResourceResolver::file_exists("src/tauri/init.lua")) {
             if (luaL_loadfile(L, "src/tauri/init.lua") != 0) {
                 return lua_error(L);
@@ -237,6 +248,22 @@ taurilua_app_t *taurilua_create(const taurilua_config_t *config) {
     platform_file_drop_set_callback(on_bridge_file_drop);
     platform_single_instance_set_callback(on_bridge_single_instance);
     bridge_set_dev_mode(app->dev_mode ? 1 : 0);
+    if (app->dev_mode && !app->config_json.empty()) {
+        size_t p = app->config_json.find("devUrl");
+        if (p != std::string::npos) {
+            size_t colon = app->config_json.find(':', p);
+            if (colon != std::string::npos) {
+                size_t q1 = app->config_json.find('"', colon);
+                if (q1 != std::string::npos) {
+                    size_t q2 = app->config_json.find('"', q1 + 1);
+                    if (q2 != std::string::npos) {
+                        std::string dev_url = app->config_json.substr(q1 + 1, q2 - q1 - 1);
+                        bridge_set_dev_url(dev_url.c_str());
+                    }
+                }
+            }
+        }
+    }
 
     // Initialize isolate thread pool
     app->isolate_pool = new IsolatePool();

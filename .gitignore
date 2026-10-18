@@ -37,3 +37,6 @@ Thumbs.db
 *.sock
 *.log
 *.tmp
+
+# Internal agent notes
+FRAMEWORK_AGENT_FEEDBACK.md

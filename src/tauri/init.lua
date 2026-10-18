@@ -217,7 +217,10 @@ typedef void (*deeplink_callback_fn)(const char *url);
 void bridge_init(ipc_callback_fn on_ipc, tray_callback_fn on_tray, shortcut_callback_fn on_shortcut, deeplink_callback_fn on_deeplink);
 void bridge_run_loop();
 void bridge_terminate();
+void bridge_set_dev_mode(int dev);
+void bridge_set_dev_url(const char *url);
 
+int platform_list_dir(const char *dir_path, char *out_buf, int max_len);
 void platform_set_assets_path(const char *path);
 
 int platform_window_create(const char *label, const char *title, const char *url, int width, int height, int resizable, int decorations, int transparent);
@@ -749,8 +752,9 @@ function Security.new(config)
         local buf_size = 65536
         local buf = ffi.new("char[?]", buf_size)
         local n = 0
-        if clib and clib.platform_list_dir then
-            pcall(function() n = clib.platform_list_dir(cap_dir, buf, buf_size) end)
+        local has_list_dir, fn_list_dir = pcall(function() return clib and clib.platform_list_dir end)
+        if has_list_dir and fn_list_dir then
+            pcall(function() n = fn_list_dir(cap_dir, buf, buf_size) end)
         end
         if n > 0 then
             local file_list_str = ffi.string(buf, n)
@@ -2406,15 +2410,17 @@ function Tauri:_register_builtins()
 
     self:register("tauri:dialog:open", function(payload)
         self.security:assert_capability("dialog:open")
+        local title = payload and payload.title or nil
         local buf = ffi.new("char[1024]")
-        local ok = clib.platform_dialog_open(payload.title, nil, buf, 1024)
+        local ok = clib.platform_dialog_open(title, nil, buf, 1024)
         return ok == 1 and ffi.string(buf) or nil
     end)
 
     self:register("tauri:dialog:save", function(payload)
         self.security:assert_capability("dialog:save")
+        local title = payload and payload.title or nil
         local buf = ffi.new("char[1024]")
-        local ok = clib.platform_dialog_save(payload.title, nil, buf, 1024)
+        local ok = clib.platform_dialog_save(title, nil, buf, 1024)
         return ok == 1 and ffi.string(buf) or nil
     end)
 
@@ -2648,7 +2654,13 @@ function __TAURI_DISPATCH_IPC__(label, seq, req)
 
     local ok, res = pcall(handler, args, label, primary_channel)
     if ok then
-        clib.platform_window_return_async(label, seq, 0, json.encode({ data = res }))
+        local return_payload
+        if res == nil then
+            return_payload = '{"data":null}'
+        else
+            return_payload = json.encode({ data = res })
+        end
+        clib.platform_window_return_async(label, seq, 0, return_payload)
     else
         clib.platform_window_return_async(label, seq, 1, json.encode({ error = tostring(res) }))
     end

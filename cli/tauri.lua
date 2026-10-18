@@ -877,6 +877,12 @@ local function cmd_dev(args)
     -- Ensure hermetic LuaRocks dependencies are synchronized
     ensure_rocks_installed(conf, false, false, has_flag(args, "--allow-custom-server"))
 
+    local dev_url = build_conf.devUrl or build_conf.devPath
+    local dev_port = dev_url and dev_url:match(":(%d+)")
+    if dev_port and ffi.os ~= "Windows" then
+        exec("lsof -ti :" .. dev_port .. " 2>/dev/null | xargs kill -9 2>/dev/null || true")
+    end
+
     local dev_server_pid = nil
     local before_dev = build_conf.beforeDevCommand
     if before_dev and before_dev ~= "" then
@@ -938,6 +944,9 @@ local function cmd_dev(args)
         end
         if dev_server_pid and ffi.C.kill(dev_server_pid, 0) == 0 then
             ffi.C.kill(dev_server_pid, 9)
+        end
+        if dev_port and ffi.os ~= "Windows" then
+            exec("lsof -ti :" .. dev_port .. " 2>/dev/null | xargs kill -9 2>/dev/null || true")
         end
         os.exit(0)
     end
@@ -2256,7 +2265,9 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE_PATH="${TAURI_LUA_ROOT}"
 
 if [ -z "$ENGINE_PATH" ] || [ ! -d "$ENGINE_PATH" ]; then
-    if [ -f "$PROJECT_DIR/../lua-tauri" ]; then
+    if [ -d "$PROJECT_DIR/../lua-tauri" ] && [ -f "$PROJECT_DIR/../lua-tauri/lua-tauri" ]; then
+        ENGINE_PATH="$(cd "$PROJECT_DIR/../lua-tauri" && pwd)"
+    elif [ -f "$PROJECT_DIR/../lua-tauri" ]; then
         ENGINE_PATH="$(cd "$PROJECT_DIR/.." && pwd)"
     fi
 fi
