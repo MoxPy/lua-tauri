@@ -37,13 +37,14 @@ print("\n=======================================================")
 print("RUNNING TAURI-LUA AUTOMATED COMPLIANCE TEST SUITE")
 print("=======================================================\n")
 
+local tauri = dofile("src/tauri/init.lua")
+
 -- ----------------------------------------------------------------------------
 -- Point 1: Auto-discovery moduli (Release vs Dev path isolation)
 -- ----------------------------------------------------------------------------
 print("1. Module Auto-Discovery & CWD Stripping (P0-1):")
 
 test("Release mode filters relative and CWD paths from package.path", function()
-    local tauri = dofile("src/tauri/init.lua")
     local test_path = "./?.lua;../plugins/?.lua;/opt/app/bundle/?.lua;./node_modules/?.lua;/usr/share/lua/5.1/?.lua"
     local filtered = tauri._filter_absolute_only(test_path)
     assert(not filtered:find("%./%?%.lua"), "CWD ./?.lua must be removed in release")
@@ -67,31 +68,13 @@ print("\n2. Single-Instance IPC Hardening (P0-2):")
 test("Rejects payloads exceeding maximum size limit (64 KB cap)", function()
     local MAX_PAYLOAD = 65536
     local oversized = string.rep("A", MAX_PAYLOAD + 10)
-    local function validate_payload_size(sz)
-        if sz > MAX_PAYLOAD then
-            error("Payload exceeds maximum single-instance size limit")
-        end
-        return true
-    end
-    local ok = pcall(validate_payload_size, #oversized)
+    local ok = pcall(tauri.validate_single_instance_payload, #oversized)
     assert(not ok, "Oversized argv/cwd payloads must be rejected")
-    assert(validate_payload_size(1024) == true, "Normal sized payload must be accepted")
+    assert(tauri.validate_single_instance_payload(1024) == true, "Normal sized payload must be accepted")
 end)
 
 test("Socket directory enforces XDG_RUNTIME_DIR or User-Isolated path", function()
-    local function resolve_safe_socket_path(app_name)
-        local xdg = os.getenv("XDG_RUNTIME_DIR")
-        if xdg and xdg ~= "" then
-            return xdg .. "/" .. app_name .. ".sock"
-        end
-        local home = os.getenv("HOME")
-        if home and home ~= "" then
-            return home .. "/.local/state/" .. app_name .. ".sock"
-        end
-        error("No secure user runtime directory found (refusing insecure /tmp fallback)")
-    end
-
-    local path = resolve_safe_socket_path("test-app")
+    local path = tauri.resolve_safe_socket_path("test-app")
     assert(not path:match("^/tmp/"), "Must not use insecure global /tmp fallback")
 end)
 
@@ -101,49 +84,23 @@ end)
 print("\n3. HTTP URL Parser & SSRF Mitigation (P0-3):")
 
 test("Parses URL components strictly and normalizes traversal attempts", function()
-    local function parse_and_normalize(url_str)
-        local scheme, host, path = url_str:match("^([a-zA-Z][a-zA-Z0-9%+%-%.]*)://([^/]+)(/?.*)$")
-        if not scheme or not host then error("Invalid URL") end
-        path = path ~= "" and path or "/"
-        -- Normalize %2e and traversal
-        local decoded_path = path:gsub("%%2[eE]", "."):gsub("/%./", "/"):gsub("//+", "/")
-        while decoded_path:find("/[^/]+/%.%./") do
-            decoded_path = decoded_path:gsub("/[^/]+/%.%./", "/")
-        end
-        return { scheme = scheme:lower(), host = host:lower(), path = decoded_path }
-    end
-
-    local res = parse_and_normalize("https://api.myapp.com/v1/%2e%2e/admin/data")
+    local res = tauri.parse_and_normalize_url("https://api.myapp.com/v1/%2e%2e/admin/data")
     assert(res.scheme == "https")
     assert(res.host == "api.myapp.com")
     assert(res.path == "/admin/data", "Traversal %2e%2e must be resolved")
 
     -- Host confusion defense
-    local conf = parse_and_normalize("https://evil.com/fake/.myapp.com")
+    local conf = tauri.parse_and_normalize_url("https://evil.com/fake/.myapp.com")
     assert(conf.host == "evil.com", "Host must be strictly isolated from path spoofing")
 end)
 
 test("Default-deny blocks loopback, private networks, and cloud metadata", function()
-    local function is_ssrf_forbidden(host)
-        local h = host:lower()
-        if h == "localhost" or h == "127.0.0.1" or h == "::1" then return true end
-        if h == "169.254.169.254" or h == "metadata.google.internal" then return true end
-        local o1, o2 = h:match("^(%d+)%.(%d+)%.")
-        if o1 and o2 then
-            o1, o2 = tonumber(o1), tonumber(o2)
-            if o1 == 10 then return true end
-            if o1 == 172 and (o2 >= 16 and o2 <= 31) then return true end
-            if o1 == 192 and o2 == 168 then return true end
-        end
-        return false
-    end
-
-    assert(is_ssrf_forbidden("127.0.0.1"), "Blocks 127.0.0.1")
-    assert(is_ssrf_forbidden("localhost"), "Blocks localhost")
-    assert(is_ssrf_forbidden("169.254.169.254"), "Blocks AWS metadata")
-    assert(is_ssrf_forbidden("10.0.1.50"), "Blocks private 10.x.x.x")
-    assert(is_ssrf_forbidden("192.168.1.1"), "Blocks private 192.168.x.x")
-    assert(not is_ssrf_forbidden("api.github.com"), "Allows public internet domain")
+    assert(tauri.is_ssrf_forbidden("127.0.0.1"), "Blocks 127.0.0.1")
+    assert(tauri.is_ssrf_forbidden("localhost"), "Blocks localhost")
+    assert(tauri.is_ssrf_forbidden("169.254.169.254"), "Blocks AWS metadata")
+    assert(tauri.is_ssrf_forbidden("10.0.1.50"), "Blocks private 10.x.x.x")
+    assert(tauri.is_ssrf_forbidden("192.168.1.1"), "Blocks private 192.168.x.x")
+    assert(not tauri.is_ssrf_forbidden("api.github.com"), "Allows public internet domain")
 end)
 
 -- ----------------------------------------------------------------------------
@@ -209,13 +166,8 @@ end)
 print("\n5. SQL Scope & Credential Masking (P0-5):")
 
 test("Masks database URI credentials in logging and errors", function()
-    local function mask_db_uri(uri)
-        if type(uri) ~= "string" then return uri end
-        return uri:gsub("(%w+://)([^:]+):([^@]+)@", "%1%2:***@")
-    end
-
     local raw = "postgres://admin_user:superSecretPassword123@db.internal.net:5432/production"
-    local masked = mask_db_uri(raw)
+    local masked = tauri.mask_db_uri(raw)
     assert(not masked:find("superSecretPassword123"), "Password must not appear in masked URI")
     assert(masked:find("admin_user:%*%*%*@"), "Password must be masked with ***")
 end)
@@ -226,19 +178,9 @@ test("Enforces connection scope allowlist on remote database endpoints", functio
         "postgres://readonly@analytics.company.com/*"
     }
 
-    local function is_db_allowed(uri, scopes)
-        for _, s in ipairs(scopes) do
-            if s:sub(-1) == "*" and uri:sub(1, #s - 1) == s:sub(1, -2) then
-                return true
-            end
-            if uri == s then return true end
-        end
-        return false
-    end
-
-    assert(is_db_allowed("sqlite:app.db", allowed_scopes))
-    assert(is_db_allowed("postgres://readonly@analytics.company.com/metrics", allowed_scopes))
-    assert(not is_db_allowed("postgres://attacker.com/leak", allowed_scopes), "Blocks unlisted host")
+    assert(tauri.is_db_allowed("sqlite:app.db", allowed_scopes))
+    assert(tauri.is_db_allowed("postgres://readonly@analytics.company.com/metrics", allowed_scopes))
+    assert(not tauri.is_db_allowed("postgres://attacker.com/leak", allowed_scopes), "Blocks unlisted host")
 end)
 
 -- ----------------------------------------------------------------------------

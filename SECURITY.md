@@ -55,6 +55,13 @@ Tauri-Lua adheres to a strict **Deny-by-Default** capability model:
 #### 5. Application Updater
 * The application updater is **disabled for security reasons**. Unauthenticated archive download and extraction has been removed from the runtime; updater API calls fail closed with an explicit error.
 
+#### 6. macOS Hardened Runtime & Code Signing Entitlements
+Tauri-Lua macOS application bundles (`src-tauri/entitlements.plist`) configure Apple Hardened Runtime entitlements required for LuaJIT and native C rock execution:
+* `com.apple.security.cs.allow-jit`: Required for the LuaJIT Just-In-Time compiler page execution on macOS.
+* `com.apple.security.cs.allow-unsigned-executable-memory`: Required by LuaJIT's memory allocator for allocating executable memory pages on ARM64 / x86_64.
+* `com.apple.security.cs.disable-library-validation`: Explicitly documented as required when loading hermetic LuaRocks C extension modules (`.so` / `.dylib`) compiled locally on the developer machine or retrieved from package repositories without an Apple Developer Team ID matching the host executable. In enterprise production environments where all bundled native dynamic libraries can be pre-signed with the organization's official Apple Developer Team ID, `disable-library-validation` can and should be set to `false`.
+* `com.apple.security.network.client`: Allows outbound network connections initiated by the application runtime.
+
 ---
 
 ## 3. Reporting a Vulnerability

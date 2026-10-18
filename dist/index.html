@@ -92,147 +92,31 @@
   <div class="grid">
     <div class="panel">
       <h3>1. Concorrenza Isolates (4 Task)</h3>
-      <button id="btn-isolates" onclick="testIsolates()">Lancia Task Paralleli</button>
+      <button id="btn-isolates">Lancia Task Paralleli</button>
       <pre id="log-isolates">In attesa...</pre>
     </div>
 
     <div class="panel">
       <h3>2. Shared State Store</h3>
-      <button onclick="testStateRead()">Leggi Stato</button>
-      <button onclick="testStateBurst()">Burst 10 Scritture Atomiche</button>
+      <button id="btn-state-read">Leggi Stato</button>
+      <button id="btn-state-burst">Burst 10 Scritture Atomiche</button>
       <pre id="log-state">In attesa...</pre>
     </div>
 
     <div class="panel">
       <h3>3. Finestre & Sicurezza Origin</h3>
-      <button onclick="openSettings()">Apri Nuova Finestra</button>
-      <button onclick="testSecurityTamper()">Test Manomissione Token</button>
+      <button id="btn-open-settings">Apri Nuova Finestra</button>
+      <button id="btn-sec-tamper">Test Manomissione Token</button>
       <pre id="log-sec">In attesa...</pre>
     </div>
 
     <div class="panel">
-      <h3>4. Canali in Streaming (Tauri v2)</h3>
-      <button id="btn-stream" onclick="testStreamingChannel()">Avvia Stream Countdown</button>
+      <h3>4. Canali in Streaming</h3>
+      <button id="btn-stream">Avvia Stream Countdown</button>
       <pre id="log-stream">In attesa dello stream...</pre>
     </div>
   </div>
 
-  <script>
-    document.getElementById("origin-indicator").textContent = "Origin: " + window.location.origin;
-
-    let frames = 0;
-    let lastTime = performance.now();
-    function countFps() {
-      frames = frames + 1;
-      const now = performance.now();
-      const elapsed = now - lastTime;
-      if (elapsed >= 500) {
-        const currentFps = Math.round((frames / elapsed) * 1000);
-        document.getElementById("fps").textContent = currentFps + " FPS";
-        frames = 0;
-        lastTime = now;
-      }
-      requestAnimationFrame(countFps);
-    }
-    requestAnimationFrame(countFps);
-    async function testStreamingChannel() {
-      const btn = document.getElementById("btn-stream");
-      const out = document.getElementById("log-stream");
-      btn.disabled = true;
-      out.textContent = "Apertura canale stream...\n";
-
-      const channel = new window.__TAURI__.Channel((chunk) => {
-        out.textContent += `[TICK ${chunk.remaining}] ${chunk.message}\n`;
-        out.scrollTop = out.scrollHeight;
-      });
-
-      try {
-        const res = await window.__TAURI__.invoke("stream_countdown", { count: 5, onEvent: channel });
-        out.textContent += `\nRisultato finale: ${JSON.stringify(res)}`;
-      } catch (err) {
-        out.textContent += `\nErrore stream: ${JSON.stringify(err)}`;
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    async function testIsolates() {
-      const btn = document.getElementById("btn-isolates");
-      const out = document.getElementById("log-isolates");
-      btn.disabled = true;
-      out.textContent = "Elaborazione concorrente sui worker...";
-
-      try {
-        const promises = [1, 2, 3, 4].map(() => 
-          window.__TAURI__.core.invoke("parallel_workload", { limit: 1200000 })
-        );
-        const results = await Promise.all(promises);
-        out.textContent = JSON.stringify(results, null, 2);
-      } catch (err) {
-        out.textContent = "Errore: " + JSON.stringify(err);
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    async function testStateRead() {
-      const out = document.getElementById("log-state");
-      try {
-        const res = await window.__TAURI__.core.invoke("get_shared_data");
-        out.textContent = JSON.stringify(res, null, 2);
-      } catch (err) {
-        out.textContent = "Errore: " + JSON.stringify(err);
-      }
-    }
-
-    async function testStateBurst() {
-      const out = document.getElementById("log-state");
-      out.textContent = "Invio 10 richieste parallele allo Shared State Store...";
-      try {
-        const promises = [];
-        for (let i = 0; i < 10; i++) {
-          promises.push(window.__TAURI__.core.invoke("increment_counter"));
-        }
-        const res = await Promise.all(promises);
-        out.textContent = "Completate 10 scritture atomiche:\n" + JSON.stringify(res, null, 2);
-      } catch (err) {
-        out.textContent = "Errore: " + JSON.stringify(err);
-      }
-    }
-
-    async function openSettings() {
-      const out = document.getElementById("log-sec");
-      out.textContent = "Apertura finestra in corso...";
-      try {
-        const base = window.location.origin !== "null" ? window.location.origin : "tauri://localhost";
-        const targetUrl = base.replace(/\/$/, "") + "/settings.html";
-        const winLabel = "settings_" + Date.now();
-
-        await window.__TAURI__.core.invoke("tauri:window:create", {
-          label: winLabel,
-          title: "Impostazioni",
-          url: targetUrl,
-          width: 500,
-          height: 440,
-          resizable: true
-        });
-
-        out.textContent = "Finestra aperta (" + winLabel + ") su:\n" + targetUrl;
-      } catch (err) {
-        out.textContent = "Errore apertura finestra:\n" + JSON.stringify(err);
-      }
-    }
-
-    async function testSecurityTamper() {
-      const out = document.getElementById("log-sec");
-      try {
-        const payload = JSON.stringify(["instant_ping", "{}", "TOKEN_FALSO_MANOMESSO"]);
-        await window.__TAURI_RAW_INVOKE__(payload);
-        out.textContent = "ATTENZIONE: La chiamata manomessa non è stata bloccata.";
-      } catch (err) {
-        out.textContent = "Bloccato con successo da C++:\n" + JSON.stringify(err);
-      }
-    }
-  </script>
+  <script src="index.js"></script>
 </body>
 </html>

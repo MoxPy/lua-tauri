@@ -1839,7 +1839,7 @@ function Tauri.new(config)
         end
     }
 
-    local sec_conf = (config.tauri and config.tauri.security) or config.security or {}
+    local sec_conf = (config.app and config.app.security) or (config.tauri and config.tauri.security) or config.security or {}
     if sec_conf.csp and sec_conf.csp ~= "" then
         clib.platform_set_csp(sec_conf.csp)
     end
@@ -2711,8 +2711,74 @@ function __TAURI_DISPATCH_WINDOW_CLOSE__(label)
     return event._prevented and 1 or 0
 end
 
+local MAX_SINGLE_INSTANCE_PAYLOAD = 65536
+
+local function validate_single_instance_payload(payload_or_size)
+    local sz = type(payload_or_size) == "number" and payload_or_size or #(tostring(payload_or_size or ""))
+    if sz > MAX_SINGLE_INSTANCE_PAYLOAD then
+        error("Payload exceeds maximum single-instance size limit")
+    end
+    return true
+end
+
+local function resolve_single_instance_socket_path(app_name)
+    local xdg = os.getenv("XDG_RUNTIME_DIR")
+    if xdg and xdg ~= "" then
+        return xdg .. "/" .. tostring(app_name or "app") .. ".sock"
+    end
+    local home = os.getenv("HOME")
+    if home and home ~= "" then
+        return home .. "/.local/state/" .. tostring(app_name or "app") .. ".sock"
+    end
+    error("No secure user runtime directory found (refusing insecure /tmp fallback)")
+end
+
+local function parse_and_normalize_url(url_str)
+    local scheme, host, path = url_str:match("^([a-zA-Z][a-zA-Z0-9%+%-%.]*)://([^/]+)(/?.*)$")
+    if not scheme or not host then error("Invalid URL") end
+    path = path ~= "" and path or "/"
+    -- Normalize %2e and traversal
+    local decoded_path = path:gsub("%%2[eE]", "."):gsub("/%./", "/"):gsub("//+", "/")
+    while decoded_path:find("/[^/]+/%.%./") do
+        decoded_path = decoded_path:gsub("/[^/]+/%.%./", "/")
+    end
+    return { scheme = scheme:lower(), host = host:lower(), path = decoded_path }
+end
+
+local function is_ssrf_forbidden(host)
+    local h = host:lower()
+    if h == "localhost" or h == "127.0.0.1" or h == "::1" then return true end
+    if h == "169.254.169.254" or h == "metadata.google.internal" then return true end
+    local o1, o2 = h:match("^(%d+)%.(%d+)%.")
+    if o1 and o2 then
+        o1, o2 = tonumber(o1), tonumber(o2)
+        if o1 == 10 then return true end
+        if o1 == 172 and (o2 >= 16 and o2 <= 31) then return true end
+        if o1 == 192 and o2 == 168 then return true end
+    end
+    return false
+end
+
+local function mask_db_uri(uri)
+    if type(uri) ~= "string" then return uri end
+    return uri:gsub("(%w+://)([^:]+):([^@]+)@", "%1%2:***@")
+end
+
+local function is_db_allowed(uri, scopes)
+    for _, s in ipairs(scopes or {}) do
+        if s:sub(-1) == "*" and uri:sub(1, #s - 1) == s:sub(1, -2) then
+            return true
+        end
+        if uri == s then return true end
+    end
+    return false
+end
+
 function __TAURI_DISPATCH_SINGLE_INSTANCE__(payload_json)
     if not g_tauri_instance then return end
+    if type(payload_json) == "string" then
+        validate_single_instance_payload(#payload_json)
+    end
     local data = json.decode(payload_json) or {}
     for _, p in ipairs(g_tauri_instance.plugin_list or {}) do
         if type(p.on_single_instance) == "function" then
@@ -2775,13 +2841,28 @@ Tauri.Submenu = Submenu
 Tauri.MenuItem = MenuItem
 Tauri.CheckMenuItem = CheckMenuItem
 Tauri.PredefinedMenuItem = PredefinedMenuItem
+Tauri.validate_single_instance_payload = validate_single_instance_payload
+Tauri.resolve_single_instance_socket_path = resolve_single_instance_socket_path
+Tauri.resolve_safe_socket_path = resolve_single_instance_socket_path
+Tauri.parse_and_normalize_url = parse_and_normalize_url
+Tauri.is_ssrf_forbidden = is_ssrf_forbidden
+Tauri.mask_db_uri = mask_db_uri
+Tauri.is_db_allowed = is_db_allowed
 
 return {
+    Tauri = Tauri,
     init = Tauri.new,
     new = Tauri.new,
     sleep = Tauri.sleep,
     json = json,
     _filter_absolute_only = filter_absolute_only,
+    validate_single_instance_payload = validate_single_instance_payload,
+    resolve_single_instance_socket_path = resolve_single_instance_socket_path,
+    resolve_safe_socket_path = resolve_single_instance_socket_path,
+    parse_and_normalize_url = parse_and_normalize_url,
+    is_ssrf_forbidden = is_ssrf_forbidden,
+    mask_db_uri = mask_db_uri,
+    is_db_allowed = is_db_allowed,
     notification = {
         send = function(title, body)
             if type(title) == "table" then

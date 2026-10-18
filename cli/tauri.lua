@@ -173,14 +173,25 @@ local function exec(cmd)
     end
 end
 
+local function shell_quote(str)
+    if ffi.os == "Windows" then
+        local s = tostring(str):gsub('"', '""')
+        return '"' .. s .. '"'
+    else
+        return "'" .. tostring(str):gsub("'", "'\\''") .. "'"
+    end
+end
+
 local function get_file_mtime(path)
     local p
+    local str_path = tostring(path)
     if ffi.os == "OSX" then
-        p = io.popen("stat -f '%m' " .. tostring(path) .. " 2>/dev/null")
+        p = io.popen("stat -f '%m' " .. shell_quote(str_path) .. " 2>/dev/null")
     elseif ffi.os == "Linux" then
-        p = io.popen("stat -c '%Y' " .. tostring(path) .. " 2>/dev/null")
+        p = io.popen("stat -c '%Y' " .. shell_quote(str_path) .. " 2>/dev/null")
     else
-        p = io.popen('powershell -NoProfile -Command "(Get-Item \'' .. tostring(path):gsub("/", "\\") .. '\').LastWriteTimeUtc.Ticks" 2>NUL')
+        local win_path = str_path:gsub("/", "\\"):gsub("'", "''")
+        p = io.popen('powershell -NoProfile -Command "(Get-Item -LiteralPath \'' .. win_path .. '\').LastWriteTimeUtc.Ticks" 2>NUL')
     end
     if not p then return 0 end
     local res = p:read("*a")
@@ -265,8 +276,8 @@ local function ensure_runtime_built(release_mode)
         local p = io.popen("pwd 2>/dev/null")
         local cwd = p and p:read("*l") or "."
         if p then p:close() end
-        exec("cmake -B build -S " .. ENGINE_ROOT .. " -DAPP_DIR=" .. cwd .. " -DCMAKE_BUILD_TYPE=" .. build_type .. " > /dev/null")
-        exec("cmake --build build --config " .. build_type .. " > /dev/null")
+        exec("cmake -B build -S " .. shell_quote(ENGINE_ROOT) .. " -DAPP_DIR=" .. shell_quote(cwd) .. " -DCMAKE_BUILD_TYPE=" .. shell_quote(build_type) .. " > /dev/null")
+        exec("cmake --build build --config " .. shell_quote(build_type) .. " > /dev/null")
         success("Runtime built successfully.")
         bin = "build/tauri_app"
     end
@@ -425,7 +436,8 @@ local function compute_file_checksum(filepath)
     elseif ffi.os == "Linux" then
         cmd = "sha256sum " .. shell_quote(filepath) .. " 2>/dev/null"
     else
-        cmd = 'powershell -NoProfile -Command "(Get-FileHash -Path \'' .. filepath:gsub("/", "\\") .. '\' -Algorithm SHA256).Hash.ToLower()" 2>NUL'
+        local ps_path = filepath:gsub("/", "\\"):gsub("'", "''")
+        cmd = 'powershell -NoProfile -Command "(Get-FileHash -LiteralPath \'' .. ps_path .. '\' -Algorithm SHA256).Hash.ToLower()" 2>NUL'
     end
     local p = io.popen(cmd)
     if p then
@@ -1008,15 +1020,15 @@ local function cmd_build(args)
         local res_dir = macos_bundle_dir .. "/Contents/Resources"
 
         info("Bundling macOS App...")
-        exec("mkdir -p " .. macos_dir)
-        exec("mkdir -p " .. res_dir)
-        exec("mkdir -p " .. dmg_dir)
+        exec("mkdir -p " .. shell_quote(macos_dir))
+        exec("mkdir -p " .. shell_quote(res_dir))
+        exec("mkdir -p " .. shell_quote(dmg_dir))
 
-        exec("cp " .. bin_path .. " " .. macos_dir .. "/" .. app_name)
+        exec("cp " .. shell_quote(bin_path) .. " " .. shell_quote(macos_dir .. "/" .. app_name))
         if file_exists("build/libtaurilua.dylib") then
-            exec("cp build/libtaurilua.dylib " .. macos_dir .. "/")
+            exec("cp build/libtaurilua.dylib " .. shell_quote(macos_dir .. "/"))
         end
-        exec("cp -r " .. frontend_dist .. " " .. res_dir .. "/")
+        exec("cp -r " .. shell_quote(frontend_dist) .. " " .. shell_quote(res_dir .. "/"))
 
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
@@ -1050,7 +1062,7 @@ local function cmd_build(args)
 
         local dmg_file = dmg_dir .. "/" .. app_name .. "_" .. version .. "_x64.dmg"
         info("Creating DMG disk image: " .. dmg_file)
-        exec("hdiutil create -volname \"" .. app_name .. "\" -srcfolder \"" .. macos_bundle_dir .. "\" -ov -format UDZO \"" .. dmg_file .. "\" > /dev/null")
+        exec("hdiutil create -volname " .. shell_quote(app_name) .. " -srcfolder " .. shell_quote(macos_bundle_dir) .. " -ov -format UDZO " .. shell_quote(dmg_file) .. " > /dev/null")
 
         success("Finished 2 bundles at:")
         io.stdout:write("        " .. colors.green .. macos_bundle_dir .. colors.reset .. "\n")
@@ -1059,15 +1071,15 @@ local function cmd_build(args)
     elseif os_name == "Linux" then
         local deb_dir = target_dir .. "/deb/" .. app_name .. "_" .. version .. "_amd64"
         info("Bundling Debian (.deb)...")
-        exec("mkdir -p " .. deb_dir .. "/DEBIAN")
-        exec("mkdir -p " .. deb_dir .. "/usr/bin")
-        exec("mkdir -p " .. deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist)
+        exec("mkdir -p " .. shell_quote(deb_dir .. "/DEBIAN"))
+        exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/bin"))
+        exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist))
 
-        exec("cp " .. bin_path .. " " .. deb_dir .. "/usr/bin/" .. app_name)
+        exec("cp " .. shell_quote(bin_path) .. " " .. shell_quote(deb_dir .. "/usr/bin/" .. app_name))
         if file_exists("build/libtaurilua.so") then
-            exec("cp build/libtaurilua.so " .. deb_dir .. "/usr/bin/ 2>/dev/null || true")
+            exec("cp build/libtaurilua.so " .. shell_quote(deb_dir .. "/usr/bin/") .. " 2>/dev/null || true")
         end
-        exec("cp -r " .. frontend_dist .. "/* " .. deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist .. "/")
+        exec("cp -r " .. shell_quote(frontend_dist) .. "/* " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist .. "/"))
 
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
@@ -1086,22 +1098,22 @@ Description: %s built with Tauri-Lua
 ]], app_name, version, app_name)
 
         write_file(deb_dir .. "/DEBIAN/control", control)
-        exec("dpkg-deb --build " .. deb_dir .. " " .. target_dir .. "/deb > /dev/null")
+        exec("dpkg-deb --build " .. shell_quote(deb_dir) .. " " .. shell_quote(target_dir .. "/deb") .. " > /dev/null")
         success("Finished bundle at " .. target_dir .. "/deb")
 
     elseif os_name == "Windows" then
         local win_dir = target_dir .. "\\windows\\" .. app_name .. "-standalone"
         info("Bundling Windows Standalone...")
-        exec("mkdir " .. win_dir)
-        exec("copy build\\Release\\tauri_app.exe " .. win_dir .. "\\ 2>NUL || copy build\\tauri_app.exe " .. win_dir .. "\\")
-        exec("copy build\\Release\\taurilua.dll " .. win_dir .. "\\ 2>NUL || copy build\\taurilua.dll " .. win_dir .. "\\ 2>NUL || rem")
+        exec('mkdir "' .. win_dir .. '" 2>NUL || rem')
+        exec('copy build\\Release\\tauri_app.exe "' .. win_dir .. '\\" 2>NUL || copy build\\tauri_app.exe "' .. win_dir .. '\\"')
+        exec('copy build\\Release\\taurilua.dll "' .. win_dir .. '\\" 2>NUL || copy build\\taurilua.dll "' .. win_dir .. '\\" 2>NUL || rem')
         -- Bundle LuaJIT DLL (lua51.dll / luajit.dll) so the standalone runs on machines without a developer toolchain
-        exec("copy build\\Release\\lua51.dll " .. win_dir .. "\\ 2>NUL || copy build\\lua51.dll " .. win_dir .. "\\ 2>NUL || copy build\\Release\\luajit.dll " .. win_dir .. "\\ 2>NUL || copy build\\luajit.dll " .. win_dir .. "\\ 2>NUL || rem")
+        exec('copy build\\Release\\lua51.dll "' .. win_dir .. '\\" 2>NUL || copy build\\lua51.dll "' .. win_dir .. '\\" 2>NUL || copy build\\Release\\luajit.dll "' .. win_dir .. '\\" 2>NUL || copy build\\luajit.dll "' .. win_dir .. '\\" 2>NUL || rem')
         local luajit_env = os.getenv("LUAJIT_ROOT")
         if luajit_env then
-            exec('copy "' .. luajit_env .. '\\bin\\lua51.dll" ' .. win_dir .. '\\ 2>NUL || copy "' .. luajit_env .. '\\lua51.dll" ' .. win_dir .. '\\ 2>NUL || rem')
+            exec('copy "' .. luajit_env .. '\\bin\\lua51.dll" "' .. win_dir .. '\\" 2>NUL || copy "' .. luajit_env .. '\\lua51.dll" "' .. win_dir .. '\\" 2>NUL || rem')
         end
-        exec("xcopy /E /I " .. frontend_dist .. " " .. win_dir .. "\\" .. frontend_dist)
+        exec('xcopy /E /I "' .. frontend_dist .. '" "' .. win_dir .. '\\' .. frontend_dist .. '"')
 
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "\\share") or file_exists(rocks_tree .. "\\lib") or file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
@@ -1232,13 +1244,13 @@ local function cmd_create(args)
 
     info("Scaffolding project `" .. app_name .. "` (" .. template .. ", " .. (use_tailwind and "Tailwind CSS" or "Standard CSS") .. ")...")
 
-    exec("mkdir -p " .. app_name .. "/src-tauri/src")
-    exec("mkdir -p " .. app_name .. "/src-tauri/icons")
-    exec("mkdir -p " .. app_name .. "/src")
+    exec("mkdir -p " .. shell_quote(app_name .. "/src-tauri/src"))
+    exec("mkdir -p " .. shell_quote(app_name .. "/src-tauri/icons"))
+    exec("mkdir -p " .. shell_quote(app_name .. "/src"))
 
     -- Copy icons
     if file_exists(ENGINE_ROOT .. "/src-tauri/icons") then
-        exec("cp -r " .. ENGINE_ROOT .. "/src-tauri/icons/* " .. app_name .. "/src-tauri/icons/ 2>/dev/null || true")
+        exec("cp -r " .. shell_quote(ENGINE_ROOT .. "/src-tauri/icons") .. "/* " .. shell_quote(app_name .. "/src-tauri/icons/") .. " 2>/dev/null || true")
     end
 
     -- 1. Backend: main.lua
@@ -1270,7 +1282,7 @@ app:register("greet", function(payload)
     }
 end)
 
--- 4. Register real-time streaming channel (Tauri v2 Parity)
+-- 4. Register real-time streaming channel
 app:register("stream_countdown", function(payload, caller, channel)
     local ch = channel or (payload and payload.onProgress)
     local steps = tonumber(payload and payload.steps) or 5
@@ -1546,7 +1558,7 @@ input[type="text"]:focus { border-color: var(--accent-cyan); }
           <div class="card-icon">🌊</div>
           <div>
             <h3>Channel Streaming</h3>
-            <p>Tauri v2 real-time bidirectional streams</p>
+            <p>Real-time bidirectional streams</p>
           </div>
         </div>
         <div class="form-group">
@@ -1567,7 +1579,7 @@ input[type="text"]:focus { border-color: var(--accent-cyan); }
     <footer class="footer">
       <span>Zero Node.js runtime required</span>
       <span>•</span>
-      <span>Hot-Reload Active (~50ms)</span>
+      <span>Hot-Reload Active</span>
     </footer>
   </div>
 
@@ -1830,7 +1842,7 @@ export function App() {
             <div className="card-icon">🌊</div>
             <div>
               <h3>Channel Streaming</h3>
-              <p>Real-time Tauri v2 bidirectional stream</p>
+              <p>Real-time bidirectional stream</p>
             </div>
           </div>
           <div className="form-group">
@@ -2005,7 +2017,7 @@ const handleStream = async () => {
           <div class="card-icon">🌊</div>
           <div>
             <h3>Channel Streaming</h3>
-            <p>Real-time Tauri v2 bidirectional stream</p>
+            <p>Real-time bidirectional stream</p>
           </div>
         </div>
         <div class="form-group">
@@ -2175,7 +2187,7 @@ export default app;
         <div class="card-icon">🌊</div>
         <div>
           <h3>Channel Streaming</h3>
-          <p>Real-time Tauri v2 bidirectional stream</p>
+          <p>Real-time bidirectional stream</p>
         </div>
       </div>
       <div class="form-group">
@@ -2258,7 +2270,7 @@ export TAURI_LUA_ROOT="$ENGINE_PATH"
 exec "$ENGINE_PATH/lua-tauri" "$@"
 ]=]
     write_file(app_name .. "/lua-tauri", launcher_script)
-    exec("chmod +x " .. app_name .. "/lua-tauri")
+    exec("chmod +x " .. shell_quote(app_name .. "/lua-tauri"))
 
     success("Created project `" .. app_name .. "` successfully!")
     io.stdout:write("\n" .. colors.bold .. "  Next steps:\n" .. colors.reset)
@@ -2383,7 +2395,7 @@ app:create_main_window()
 <body>
     <div class="card">
         <h1>Tauri-Lua</h1>
-        <p>Ultra-fast native desktop app powered by LuaJIT.</p>
+        <p>Native desktop app powered by LuaJIT.</p>
         <button id="btn">Call Backend Command</button>
         <div id="output"></div>
     </div>
@@ -2417,17 +2429,19 @@ local function cmd_icon(args)
 
     if ffi.os == "OSX" then
         local iconset_dir = "src-tauri/icons/icon.iconset"
-        exec("mkdir -p " .. iconset_dir)
+        exec("mkdir -p " .. shell_quote(iconset_dir))
         local sizes = { 16, 32, 64, 128, 256, 512, 1024 }
         for _, s in ipairs(sizes) do
-            exec(string.format("sips -z %d %d %s --out %s/icon_%dx%d.png > /dev/null 2>&1", s, s, src_img, iconset_dir, s, s))
+            local out1 = string.format("%s/icon_%dx%d.png", iconset_dir, s, s)
+            exec(string.format("sips -z %d %d %s --out %s > /dev/null 2>&1", s, s, shell_quote(src_img), shell_quote(out1)))
             if s <= 512 then
                 local s2 = s * 2
-                exec(string.format("sips -z %d %d %s --out %s/icon_%dx%d@2x.png > /dev/null 2>&1", s2, s2, src_img, iconset_dir, s, s))
+                local out2 = string.format("%s/icon_%dx%d@2x.png", iconset_dir, s, s)
+                exec(string.format("sips -z %d %d %s --out %s > /dev/null 2>&1", s2, s2, shell_quote(src_img), shell_quote(out2)))
             end
         end
-        exec("iconutil -c icns " .. iconset_dir .. " -o src-tauri/icons/icon.icns 2>/dev/null || true")
-        exec("rm -rf " .. iconset_dir)
+        exec("iconutil -c icns " .. shell_quote(iconset_dir) .. " -o src-tauri/icons/icon.icns 2>/dev/null || true")
+        exec("rm -rf " .. shell_quote(iconset_dir))
         success("Generated src-tauri/icons/icon.icns")
     else
         warn("Automated icon generation is currently supported natively on macOS via sips/iconutil.")

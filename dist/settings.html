@@ -97,32 +97,12 @@
   </div>
 
   <div class="actions">
-    <button class="btn-close" onclick="closeWindow()">Chiudi</button>
-    <button class="btn-save" onclick="saveSettings()">Salva e Sincronizza</button>
+    <button id="btn-close" class="btn-close">Chiudi</button>
+    <button id="btn-save" class="btn-save">Salva e Sincronizza</button>
   </div>
 
   <pre id="status">Pronto.</pre>
 
-  <script>
-    async function saveSettings() {
-      const prefs = {
-        username: document.getElementById("username").value,
-        theme: document.getElementById("theme").value,
-        notifications: document.getElementById("notifications").checked
-      };
-
-      await window.__TAURI__.core.invoke("tauri:state:set", {
-        key: "app_preferences",
-        value: prefs
-      });
-
-      await window.__TAURI__.event.emit("settings-changed", prefs);
-      document.getElementById("status").textContent = "Salvato nello State Store:\n" + JSON.stringify(prefs, null, 2);
-    }
-
-    async function closeWindow() {
-      await window.__TAURI__.webviewWindow.getCurrentWebviewWindow().close();
-    }
-  </script>
+  <script src="settings.js"></script>
 </body>
 </html>

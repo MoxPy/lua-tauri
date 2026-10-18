@@ -112,7 +112,7 @@ Tauri-Lua implements a multi-VM isolate architecture designed for thread safety 
 ### Ideal Use Cases
 1. **Developer Tools & Utilities:** Diagnostics, system monitors, log viewers, device managers, and CLI companion GUIs.
 2. **Internal Enterprise Tools:** Operations dashboards, hardware interfaces, and rapid proof-of-concept enterprise applications.
-3. **High-Performance Micro-Apps:** Native desktop clients that need to start in under 200ms and run persistently in the system tray with negligible RAM usage.
+3. **High-Performance Micro-Apps:** Native desktop clients that need rapid startup and run persistently in the system tray with negligible RAM usage.
 4. **Embedded & Resource-Constrained Environments:** Embedded Linux devices (Raspberry Pi, industrial tablets) where LLVM/Rust toolchains are too resource-heavy to maintain on-device.
 5. **Game Engine & Host Software Embedding (`libtaurilua`):** Providing in-game configuration windows, web overlays, debug inspectors, or modding GUIs directly from C/C++, Godot, Unreal Engine, or SDL2/GLFW with a lightweight shared library.
 
