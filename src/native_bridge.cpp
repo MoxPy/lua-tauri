@@ -752,6 +752,15 @@ static int on_internal_webview_close(webview_t w, void *arg) {
     return 0; // Allow close
 }
 
+static std::string g_default_client_script = "";
+
+void platform_set_client_script(const char *js) {
+    std::lock_guard<std::mutex> lock(g_windows_mutex);
+    if (js) {
+        g_default_client_script = js;
+    }
+}
+
 int platform_window_create(const char *label, const char *title, const char *url, int width, int height, int resizable, int decorations, int transparent) {
     std::lock_guard<std::mutex> lock(g_windows_mutex);
     std::string s_label = label ? label : "main";
@@ -768,6 +777,9 @@ int platform_window_create(const char *label, const char *title, const char *url
     webview_set_size(w, width, height, resizable ? 0 : 3);
 
     webview_init(w, get_isolation_bootstrap_script().c_str());
+    if (!g_default_client_script.empty()) {
+        webview_init(w, g_default_client_script.c_str());
+    }
 
     char *label_ctx = strdup(s_label.c_str());
     webview_bind(w, "__TAURI_RAW_INVOKE__", common_bind_handler, label_ctx);
@@ -1034,6 +1046,22 @@ static void dispatch_eval_cb(webview_t w, void *arg) {
     EvalPayload *p = static_cast<EvalPayload *>(arg);
     webview_eval(p->w, p->js.c_str());
     delete p;
+}
+
+void platform_window_init_script(const char *label, const char *js) {
+    if (!js) return;
+    std::lock_guard<std::mutex> lock(g_windows_mutex);
+    if (label && strcmp(label, "*") == 0) {
+        for (auto &pair : g_windows) {
+            webview_init(pair.second.w, js);
+        }
+        return;
+    }
+    std::string s_label = label ? label : "main";
+    auto it = g_windows.find(s_label);
+    if (it != g_windows.end()) {
+        webview_init(it->second.w, js);
+    }
 }
 
 void platform_window_eval(const char *label, const char *js) {

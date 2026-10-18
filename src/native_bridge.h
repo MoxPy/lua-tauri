@@ -45,6 +45,8 @@ void platform_window_show(const char *label);
 void platform_window_hide(const char *label);
 void platform_window_set_focus(const char *label);
 void platform_window_start_dragging(const char *label);
+void platform_set_client_script(const char *js);
+void platform_window_init_script(const char *label, const char *js);
 void platform_window_eval(const char *label, const char *js);
 void platform_window_return_async(const char *label, const char *seq, int status, const char *result);
 

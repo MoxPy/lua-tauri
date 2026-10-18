@@ -237,6 +237,8 @@ void platform_window_set_focus(const char *label);
 int platform_single_instance_init(const char *app_id, const char *payload_json);
 void platform_single_instance_cleanup();
 void platform_window_start_dragging(const char *label);
+void platform_set_client_script(const char *js);
+void platform_window_init_script(const char *label, const char *js);
 void platform_window_eval(const char *label, const char *js);
 void platform_window_return_async(const char *label, const char *seq, int status, const char *result);
 
@@ -2211,9 +2213,11 @@ function Tauri:_register_builtins()
         local decorations = (payload and payload.decorations ~= false) and 1 or 0
         local transparent = (payload and payload.transparent) and 1 or 0
 
+        pcall(function() clib.platform_set_client_script(TAURI_CLIENT_SCRIPT) end)
         local ok = clib.platform_window_create(label, title, url, width, height, resizable, decorations, transparent)
         if ok == 1 then
             if is_trusted then
+                pcall(function() clib.platform_window_init_script(label, TAURI_CLIENT_SCRIPT) end)
                 clib.platform_window_eval(label, TAURI_CLIENT_SCRIPT)
             end
             self.windows[label] = true
@@ -2584,7 +2588,9 @@ function Tauri:create_main_window()
         end
     end
 
+    pcall(function() clib.platform_set_client_script(TAURI_CLIENT_SCRIPT) end)
     clib.platform_window_create("main", title, url, width, height, resizable, decorations, transparent)
+    pcall(function() clib.platform_window_init_script("main", TAURI_CLIENT_SCRIPT) end)
     clib.platform_window_eval("main", TAURI_CLIENT_SCRIPT)
     for _, p in ipairs(self.plugin_list or {}) do
         if type(p.js) == "string" and p.js ~= "" then
