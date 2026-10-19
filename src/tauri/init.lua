@@ -246,6 +246,8 @@ int platform_tray_create(const char *tooltip, const char *icon_path);
 void platform_tray_set_menu(const char *json_menu);
 void platform_tray_destroy();
 void platform_set_menu(const char *json_menu);
+void platform_set_app_name(const char *name);
+const char *platform_get_app_name();
 
 int platform_shortcut_register(const char *shortcut);
 void platform_shortcut_unregister(const char *shortcut);
@@ -1774,6 +1776,7 @@ function Tauri.new(config)
     config = config or {}
     self.config = config
     local app_name = (config.package and config.package.name) or config.productName or "tauri-lua-app"
+    pcall(function() clib.platform_set_app_name(app_name) end)
     if ffi.os == "Linux" then
         local linux_paths = {
             "/usr/share/" .. app_name .. "/rocks/share/lua/5.1/?.lua",
@@ -1936,6 +1939,13 @@ end
 function Tauri:on_file_drop(cb)
     if type(cb) == "function" then
         table.insert(self.file_drop_listeners, cb)
+    end
+    return self
+end
+
+function Tauri:set_app_name(name)
+    if type(name) == "string" and name ~= "" then
+        pcall(function() clib.platform_set_app_name(name) end)
     end
     return self
 end

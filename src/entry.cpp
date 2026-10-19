@@ -87,6 +87,40 @@ static std::string extract_app_identifier(const std::string &conf) {
     return "com.tauri.lua";
 }
 
+static std::string extract_product_name(const std::string &conf) {
+    size_t pos = conf.find("\"productName\"");
+    if (pos == std::string::npos) pos = conf.find("\"product_name\"");
+    if (pos != std::string::npos) {
+        size_t colon = conf.find(':', pos);
+        if (colon != std::string::npos) {
+            size_t q1 = conf.find('"', colon);
+            if (q1 != std::string::npos) {
+                size_t q2 = conf.find('"', q1 + 1);
+                if (q2 != std::string::npos) {
+                    return conf.substr(q1 + 1, q2 - q1 - 1);
+                }
+            }
+        }
+    }
+    pos = conf.find("\"package\"");
+    if (pos != std::string::npos) {
+        size_t name_pos = conf.find("\"name\"", pos);
+        if (name_pos != std::string::npos) {
+            size_t colon = conf.find(':', name_pos);
+            if (colon != std::string::npos) {
+                size_t q1 = conf.find('"', colon);
+                if (q1 != std::string::npos) {
+                    size_t q2 = conf.find('"', q1 + 1);
+                    if (q2 != std::string::npos) {
+                        return conf.substr(q1 + 1, q2 - q1 - 1);
+                    }
+                }
+            }
+        }
+    }
+    return "";
+}
+
 #include "resource_resolver.hpp"
 #include "config_json.h"
 
@@ -100,6 +134,11 @@ int main(int argc, char **argv) {
 #endif
     bool dev_mode = ResourceResolver::is_dev_mode();
     std::string config_content = ResourceResolver::resolve_config_json(dev_mode, tauri_conf_json, tauri_conf_json_len);
+
+    std::string product_name = extract_product_name(config_content);
+    if (!product_name.empty()) {
+        platform_set_app_name(product_name.c_str());
+    }
 
     std::string instance_payload = make_instance_payload(argc, argv);
 

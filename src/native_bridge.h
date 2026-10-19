@@ -25,6 +25,8 @@ void platform_theme_set_callback(theme_change_callback_fn cb);
 const char *platform_get_theme();
 void platform_file_drop_set_callback(file_drop_callback_fn cb);
 void platform_set_menu(const char *json_menu);
+void platform_set_app_name(const char *name);
+const char *platform_get_app_name();
 void bridge_set_dev_mode(int dev);
 void bridge_set_dev_url(const char *url);
 void bridge_run_loop();

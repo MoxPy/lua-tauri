@@ -3087,7 +3087,13 @@ void platform_set_menu(const char *json_menu) {
 
 #if defined(__APPLE__)
     run_on_main_sync(^{
-        NSString *appName = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleName"];
+        NSString *appName = nil;
+        if (!g_app_name.empty()) {
+            appName = [NSString stringWithUTF8String:g_app_name.c_str()];
+        }
+        if (!appName || [appName length] == 0) {
+            appName = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleName"];
+        }
         if (!appName || [appName length] == 0) {
             appName = [[NSProcessInfo processInfo] processName];
         }
@@ -3095,10 +3101,13 @@ void platform_set_menu(const char *json_menu) {
             appName = @"Tauri App";
         }
 
+        [[NSProcessInfo processInfo] setProcessName:appName];
+
         NSMenu *mainMenu = [[NSMenu alloc] init];
 
         // 1. Build default App Menu
         NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
+        [appMenuItem setTitle:appName];
         [mainMenu addItem:appMenuItem];
         NSMenu *appMenu = [[NSMenu alloc] initWithTitle:appName];
         [appMenuItem setSubmenu:appMenu];
@@ -3151,5 +3160,19 @@ void platform_set_menu(const char *json_menu) {
     }
 #endif
 }
+
+void platform_set_app_name(const char *name) {
+    if (!name || name[0] == '\0') return;
+#if defined(__APPLE__)
+    platform_apply_app_name_macos(name);
+#else
+    g_app_name = name;
+#endif
+}
+
+const char *platform_get_app_name() {
+    return g_app_name.c_str();
+}
+
 
 }

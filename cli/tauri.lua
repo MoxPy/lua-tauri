@@ -923,6 +923,45 @@ local function cmd_dev(args)
 
     local bin_path = ensure_runtime_built(false)
 
+    if ffi.os == "OSX" then
+        local app_bundle_dir = "build/" .. app_name .. ".app"
+        local macos_dir = app_bundle_dir .. "/Contents/MacOS"
+        local frameworks_dir = app_bundle_dir .. "/Contents/Frameworks"
+        exec("mkdir -p " .. shell_quote(macos_dir) .. " " .. shell_quote(frameworks_dir))
+        
+        local app_bin = macos_dir .. "/" .. app_name
+        exec("cp " .. shell_quote(bin_path) .. " " .. shell_quote(app_bin))
+        
+        local dylib_source = ENGINE_ROOT .. "/build/libtaurilua.dylib"
+        if not file_exists(dylib_source) then dylib_source = "build/libtaurilua.dylib" end
+        if file_exists(dylib_source) then
+            exec("ln -sf " .. shell_quote(dylib_source) .. " " .. shell_quote(frameworks_dir .. "/libtaurilua.dylib"))
+        end
+        
+        local plist = string.format([[<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>%s</string>
+    <key>CFBundleIdentifier</key>
+    <string>%s</string>
+    <key>CFBundleName</key>
+    <string>%s</string>
+    <key>CFBundleDisplayName</key>
+    <string>%s</string>
+    <key>CFBundleVersion</key>
+    <string>%s</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>]], app_name, identifier, app_name, app_name, version)
+        write_file(app_bundle_dir .. "/Contents/Info.plist", plist)
+        bin_path = app_bin
+    end
+
     -- Watch timestamps table
     local file_timestamps = {}
     for _, f in ipairs(find_watched_files()) do
@@ -935,9 +974,9 @@ local function cmd_dev(args)
         -- which is deliberately excluded from release builds for security.
         local p
         if ffi.os == "Windows" then
-            p = io.popen("set TAURILUA_DEV=1 && start /B " .. bin_path)
+            p = io.popen("set TAURILUA_DEV=1 && start /B " .. shell_quote(bin_path))
         else
-            p = io.popen("TAURILUA_DEV=1 " .. bin_path .. " > /dev/null 2>&1 & echo $!")
+            p = io.popen("TAURILUA_DEV=1 " .. shell_quote(bin_path) .. " > /dev/null 2>&1 & echo $!")
         end
         local pid = p and tonumber(p:read("*l"))
         if p then p:close() end
@@ -1068,6 +1107,8 @@ local function cmd_build(args)
     <string>%s</string>
     <key>CFBundleName</key>
     <string>%s</string>
+    <key>CFBundleDisplayName</key>
+    <string>%s</string>
     <key>CFBundleVersion</key>
     <string>%s</string>
     <key>CFBundleShortVersionString</key>
@@ -1077,7 +1118,7 @@ local function cmd_build(args)
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
-</plist>]], app_name, identifier, app_name, version, version)
+</plist>]], app_name, identifier, app_name, app_name, version, version)
 
         write_file(macos_bundle_dir .. "/Contents/Info.plist", plist)
 

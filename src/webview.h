@@ -113,10 +113,49 @@ static inline void run_on_main_async(void (^block)(void)) {
     dispatch_async(dispatch_get_main_queue(), block);
 }
 
+static std::string g_app_name = "";
+
+static inline void platform_apply_app_name_macos(const char *name) {
+    if (!name || name[0] == '\0') return;
+    g_app_name = name;
+    run_on_main_sync(^{
+        NSString *appName = [NSString stringWithUTF8String:g_app_name.c_str()];
+        [[NSProcessInfo processInfo] setProcessName:appName];
+
+        NSMenu *mainMenu = [NSApp mainMenu];
+        if (mainMenu && [mainMenu numberOfItems] > 0) {
+            NSMenuItem *appMenuItem = [mainMenu itemAtIndex:0];
+            if (appMenuItem) {
+                [appMenuItem setTitle:appName];
+                NSMenu *appMenu = [appMenuItem submenu];
+                if (appMenu) {
+                    [appMenu setTitle:appName];
+                    for (NSMenuItem *item in [appMenu itemArray]) {
+                        SEL act = [item action];
+                        if (act == @selector(orderFrontStandardAboutPanel:)) {
+                            [item setTitle:[NSString stringWithFormat:@"About %@", appName]];
+                        } else if (act == @selector(hide:)) {
+                            [item setTitle:[NSString stringWithFormat:@"Hide %@", appName]];
+                        } else if (act == @selector(terminate:)) {
+                            [item setTitle:[NSString stringWithFormat:@"Quit %@", appName]];
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 static inline void setup_macos_default_menu(bool debug) {
     if ([NSApp mainMenu] != nil) return;
 
-    NSString *appName = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleName"];
+    NSString *appName = nil;
+    if (!g_app_name.empty()) {
+        appName = [NSString stringWithUTF8String:g_app_name.c_str()];
+    }
+    if (!appName || [appName length] == 0) {
+        appName = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleName"];
+    }
     if (!appName || [appName length] == 0) {
         appName = [[NSProcessInfo processInfo] processName];
     }
@@ -124,10 +163,13 @@ static inline void setup_macos_default_menu(bool debug) {
         appName = @"Tauri App";
     }
 
+    [[NSProcessInfo processInfo] setProcessName:appName];
+
     NSMenu *mainMenu = [[NSMenu alloc] init];
 
     // 1. Application Menu
     NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
+    [appMenuItem setTitle:appName];
     [mainMenu addItem:appMenuItem];
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:appName];
     [appMenuItem setSubmenu:appMenu];

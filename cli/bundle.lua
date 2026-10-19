@@ -58,12 +58,14 @@ if os_name == "OSX" then
     <string>com.tauri.lua</string>
     <key>CFBundleName</key>
     <string>%s</string>
+    <key>CFBundleDisplayName</key>
+    <string>%s</string>
     <key>CFBundleVersion</key>
     <string>%s</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
 </dict>
-</plist>]], app_name, app_name, version)
+</plist>]], app_name, app_name, app_name, version)
     
     local f = io.open(bundle_dir .. "/Contents/Info.plist", "w")
     f:write(plist)
