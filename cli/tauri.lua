@@ -954,11 +954,18 @@ local function cmd_dev(args)
     <string>%s</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
 </plist>]], app_name, identifier, app_name, app_name, version)
+        if file_exists("src-tauri/icons/icon.icns") then
+            exec("mkdir -p " .. shell_quote(app_bundle_dir .. "/Contents/Resources"))
+            exec("cp src-tauri/icons/icon.icns " .. shell_quote(app_bundle_dir .. "/Contents/Resources/icon.icns"))
+        end
         write_file(app_bundle_dir .. "/Contents/Info.plist", plist)
+        exec("codesign --force --deep --sign - " .. shell_quote(app_bundle_dir) .. " 2>/dev/null || true")
         bin_path = app_bin
     end
 
@@ -1115,12 +1122,18 @@ local function cmd_build(args)
     <string>%s</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
 </plist>]], app_name, identifier, app_name, app_name, version, version)
 
+        if file_exists("src-tauri/icons/icon.icns") then
+            exec("cp src-tauri/icons/icon.icns " .. shell_quote(res_dir .. "/icon.icns"))
+        end
         write_file(macos_bundle_dir .. "/Contents/Info.plist", plist)
+        exec("codesign --force --deep --sign - " .. shell_quote(macos_bundle_dir) .. " 2>/dev/null || true")
 
         local dmg_file = dmg_dir .. "/" .. app_name .. "_" .. version .. "_x64.dmg"
         info("Creating DMG disk image: " .. dmg_file)
@@ -2497,20 +2510,33 @@ local function cmd_icon(args)
 
     if ffi.os == "OSX" then
         local iconset_dir = "src-tauri/icons/icon.iconset"
-        exec("mkdir -p " .. shell_quote(iconset_dir))
-        local sizes = { 16, 32, 64, 128, 256, 512, 1024 }
-        for _, s in ipairs(sizes) do
-            local out1 = string.format("%s/icon_%dx%d.png", iconset_dir, s, s)
-            exec(string.format("sips -z %d %d %s --out %s > /dev/null 2>&1", s, s, shell_quote(src_img), shell_quote(out1)))
-            if s <= 512 then
-                local s2 = s * 2
-                local out2 = string.format("%s/icon_%dx%d@2x.png", iconset_dir, s, s)
-                exec(string.format("sips -z %d %d %s --out %s > /dev/null 2>&1", s2, s2, shell_quote(src_img), shell_quote(out2)))
-            end
-        end
-        exec("iconutil -c icns " .. shell_quote(iconset_dir) .. " -o src-tauri/icons/icon.icns 2>/dev/null || true")
         exec("rm -rf " .. shell_quote(iconset_dir))
-        success("Generated src-tauri/icons/icon.icns")
+        exec("mkdir -p " .. shell_quote(iconset_dir))
+        local specs = {
+            { name = "icon_16x16.png", size = 16 },
+            { name = "icon_16x16@2x.png", size = 32 },
+            { name = "icon_32x32.png", size = 32 },
+            { name = "icon_32x32@2x.png", size = 64 },
+            { name = "icon_128x128.png", size = 128 },
+            { name = "icon_128x128@2x.png", size = 256 },
+            { name = "icon_256x256.png", size = 256 },
+            { name = "icon_256x256@2x.png", size = 512 },
+            { name = "icon_512x512.png", size = 512 },
+            { name = "icon_512x512@2x.png", size = 1024 },
+        }
+        for _, sp in ipairs(specs) do
+            local out = iconset_dir .. "/" .. sp.name
+            exec(string.format("sips -s format png -z %d %d %s --out %s > /dev/null 2>&1", sp.size, sp.size, shell_quote(src_img), shell_quote(out)))
+        end
+        exec("iconutil -c icns " .. shell_quote(iconset_dir) .. " -o src-tauri/icons/icon.icns")
+        exec("rm -rf " .. shell_quote(iconset_dir))
+
+        -- Also generate standard PNGs
+        exec(string.format("sips -s format png -z 512 512 %s --out src-tauri/icons/icon.png > /dev/null 2>&1", shell_quote(src_img)))
+        exec(string.format("sips -s format png -z 128 128 %s --out src-tauri/icons/128x128.png > /dev/null 2>&1", shell_quote(src_img)))
+        exec(string.format("sips -s format png -z 32 32 %s --out src-tauri/icons/32x32.png > /dev/null 2>&1", shell_quote(src_img)))
+
+        success("Generated src-tauri/icons/icon.icns and PNG icons successfully")
     else
         warn("Automated icon generation is currently supported natively on macOS via sips/iconutil.")
     end
