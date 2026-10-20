@@ -1,6 +1,7 @@
 #include "native_bridge.h"
 #include "origin_check.hpp"
 #include "asset_resolver.hpp"
+#include "security_policy.hpp"
 
 #include <iostream>
 #include <string>
@@ -69,37 +70,40 @@ extern char **environ;
 #include <sys/random.h>
 #endif
 
-static int g_dev_mode = 0;
-static std::string g_dev_url = "";
+int g_dev_mode = 0;
+std::string g_dev_url = "";
 static std::string g_csp_policy_custom = "";
 
-static const std::string g_csp_policy_release = "default-src 'self' tauri: asset:; script-src 'self' tauri: asset:; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: tauri:; connect-src 'self' tauri: ipc: https://tauri.localhost;";
-
 static std::string get_effective_csp() {
-    if (!g_csp_policy_custom.empty()) return g_csp_policy_custom;
-    if (g_dev_mode) {
-        return "default-src 'self' tauri: asset:; script-src 'self' tauri: asset: 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: tauri:; connect-src 'self' tauri: ipc: https://tauri.localhost http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:*;";
-    }
-    return g_csp_policy_release;
+    return SecurityPolicy::build_default_csp(g_dev_mode != 0, g_csp_policy_custom);
 }
 
 static std::string generate_session_token() {
     unsigned char buf[32];
+    bool ok = false;
 #if defined(__APPLE__)
     arc4random_buf(buf, sizeof(buf));
+    ok = true;
 #elif defined(_WIN32)
-    BCryptGenRandom(NULL, buf, sizeof(buf), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    NTSTATUS status = BCryptGenRandom(NULL, buf, sizeof(buf), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    ok = BCRYPT_SUCCESS(status);
 #else
     ssize_t ret = getrandom(buf, sizeof(buf), 0);
-    if (ret != sizeof(buf)) {
+    if (ret == sizeof(buf)) {
+        ok = true;
+    } else {
         int fd = open("/dev/urandom", O_RDONLY);
         if (fd >= 0) {
             ssize_t r = read(fd, buf, sizeof(buf));
-            (void)r;
             close(fd);
+            ok = (r == sizeof(buf));
         }
     }
 #endif
+    if (!ok) {
+        ::fprintf(stderr, "[tauri-lua] CRITICAL: System RNG failure while generating session token!\n");
+        std::abort();
+    }
     char hex[65];
     for (size_t i = 0; i < sizeof(buf); ++i) {
         snprintf(hex + (i * 2), 3, "%02x", buf[i]);
@@ -953,11 +957,21 @@ void platform_window_start_dragging(const char *label) {
 struct EvalPayload {
     webview_t w;
     std::string js;
+    bool check_origin;
 };
 
 static void dispatch_eval_cb(webview_t w, void *arg) {
+    (void)w;
     EvalPayload *p = static_cast<EvalPayload *>(arg);
-    webview_eval(p->w, p->js.c_str());
+    if (!p) return;
+    if (p->check_origin) {
+        std::string current_origin;
+        if (get_native_window_origin(p->w, current_origin) && OriginValidator::is_allowed(current_origin, g_dev_mode != 0, g_dev_url)) {
+            webview_eval(p->w, p->js.c_str());
+        }
+    } else {
+        webview_eval(p->w, p->js.c_str());
+    }
     delete p;
 }
 
@@ -979,25 +993,27 @@ void platform_window_init_script(const char *label, const char *js) {
 
 void platform_window_eval(const char *label, const char *js) {
     if (!label || !js) return;
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    if (strcmp(label, "*") == 0) {
-        for (auto &pair : g_windows) {
-            std::string current_origin;
-            if (get_native_window_origin(pair.second.w, current_origin) && OriginValidator::is_allowed(current_origin, g_dev_mode != 0, g_dev_url)) {
-                EvalPayload *p = new EvalPayload();
-                p->w = pair.second.w;
-                p->js = js;
-                webview_dispatch(pair.second.w, dispatch_eval_cb, p);
+    std::vector<std::pair<webview_t, bool>> targets;
+    {
+        std::lock_guard<std::mutex> lock(g_windows_mutex);
+        if (strcmp(label, "*") == 0) {
+            for (auto &pair : g_windows) {
+                targets.push_back({pair.second.w, true});
+            }
+        } else {
+            auto it = g_windows.find(label);
+            if (it != g_windows.end()) {
+                targets.push_back({it->second.w, false});
             }
         }
-        return;
     }
-    auto it = g_windows.find(label);
-    if (it != g_windows.end()) {
+    // Lock is released! No lock inversion, no deadlock!
+    for (auto &tgt : targets) {
         EvalPayload *p = new EvalPayload();
-        p->w = it->second.w;
+        p->w = tgt.first;
         p->js = js;
-        webview_dispatch(it->second.w, dispatch_eval_cb, p);
+        p->check_origin = tgt.second;
+        webview_dispatch(tgt.first, dispatch_eval_cb, p);
     }
 }
 
@@ -1725,6 +1741,15 @@ void platform_notification_send(const char *title, const char *body) {
         NOTIFYICONDATAW nid;
         ZeroMemory(&nid, sizeof(nid));
         nid.cbSize = sizeof(nid);
+        HWND hwnd = NULL;
+        {
+            std::lock_guard<std::mutex> lock(g_windows_mutex);
+            if (!g_windows.empty()) {
+                hwnd = static_cast<HWND>(webview_get_window(g_windows.begin()->second.w));
+            }
+        }
+        nid.hWnd = hwnd;
+        nid.uID = 1001;
         nid.uFlags = NIF_INFO | NIF_MESSAGE;
         nid.dwInfoFlags = NIIF_INFO;
 
@@ -1816,6 +1841,9 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     // Try connecting as a secondary instance first
     int client_sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (client_sock >= 0) {
+#if defined(FD_CLOEXEC)
+        fcntl(client_sock, F_SETFD, FD_CLOEXEC);
+#endif
         struct sockaddr_un addr;
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
@@ -1849,6 +1877,9 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     // Become primary instance server
     int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd < 0) return -1;
+#if defined(FD_CLOEXEC)
+    fcntl(server_fd, F_SETFD, FD_CLOEXEC);
+#endif
 
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -1890,6 +1921,9 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
                 if (!g_single_instance_running) break;
                 continue;
             }
+#if defined(FD_CLOEXEC)
+            fcntl(client_fd, F_SETFD, FD_CLOEXEC);
+#endif
 
             // Verify peer UID: reject connections from other users.
 #if defined(__APPLE__) && defined(LOCAL_PEERCRED)
@@ -2165,7 +2199,12 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
     DWORD path_len = GetEnvironmentVariableW(L"PATH", path_env, 32768);
     LPCWSTR search_path = (path_len > 0 && path_len < 32768) ? path_env : L"";
     DWORD found = SearchPathW(search_path, prog_w.c_str(), L".exe", MAX_PATH, abs_path_w, NULL);
-    LPCWSTR app_name_ptr = (found > 0) ? abs_path_w : NULL;
+    if (found == 0) {
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return nullptr;
+    }
+    LPCWSTR app_name_ptr = abs_path_w;
 
     std::wstring cmd_line_w;
     auto append_quoted_w = [&](const std::string &arg) {
@@ -2249,6 +2288,10 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
     if (pipe(pipe_fds) != 0) {
         return nullptr;
     }
+#if defined(FD_CLOEXEC)
+    fcntl(pipe_fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pipe_fds[1], F_SETFD, FD_CLOEXEC);
+#endif
 
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
@@ -3087,5 +3130,42 @@ const char *platform_get_app_name() {
     return g_app_name.c_str();
 }
 
+int platform_is_origin_allowed(const char *url) {
+    if (!url || url[0] == '\0') return 0;
+    return OriginValidator::is_allowed(url, g_dev_mode != 0, g_dev_url) ? 1 : 0;
+}
+
+int platform_resolve_path(const char *in_path, char *out_path, int max_len) {
+    if (!in_path || in_path[0] == '\0' || !out_path || max_len <= 0) return 0;
+    std::filesystem::path p(in_path);
+    std::error_code ec;
+    std::filesystem::path resolved;
+    if (std::filesystem::exists(p, ec)) {
+        resolved = std::filesystem::canonical(p, ec);
+        if (ec) {
+            ec.clear();
+            resolved = std::filesystem::weakly_canonical(p, ec);
+        }
+    } else {
+        std::filesystem::path parent = p.parent_path();
+        std::filesystem::path filename = p.filename();
+        if (!parent.empty() && std::filesystem::exists(parent, ec)) {
+            std::filesystem::path canon_parent = std::filesystem::canonical(parent, ec);
+            if (ec) {
+                ec.clear();
+                canon_parent = std::filesystem::weakly_canonical(parent, ec);
+            }
+            resolved = canon_parent / filename;
+        } else {
+            resolved = std::filesystem::weakly_canonical(p, ec);
+        }
+    }
+    if (ec) return 0;
+    std::string s = resolved.generic_string();
+    if (s.size() >= static_cast<size_t>(max_len)) return 0;
+    strncpy(out_path, s.c_str(), max_len - 1);
+    out_path[max_len - 1] = '\0';
+    return 1;
+}
 
 }

@@ -34,6 +34,8 @@ void bridge_terminate();
 
 int platform_list_dir(const char *dir_path, char *out_buf, int max_len);
 void platform_set_assets_path(const char *path);
+int platform_is_origin_allowed(const char *url);
+int platform_resolve_path(const char *in_path, char *out_path, int max_len);
 
 int platform_window_create(const char *label, const char *title, const char *url, int width, int height, int resizable, int decorations, int transparent);
 void platform_window_close(const char *label);

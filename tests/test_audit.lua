@@ -141,7 +141,10 @@ test("Blocks dangerous command execution flags (git -c, find -exec)", function()
     local app = tauri.new({
         security = {
             capabilities = { "shell:execute" },
-            allowed_programs = { "git", "find" }
+            allowed_programs = {
+                { name = "git", any_args = true },
+                { name = "find", any_args = true }
+            }
         }
     })
     local ok_git, err_git = pcall(function()

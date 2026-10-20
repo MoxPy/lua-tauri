@@ -11,6 +11,7 @@
 #include "src/origin_check.hpp"
 #include "src/resource_resolver.hpp"
 #include "src/asset_resolver.hpp"
+#include "src/security_policy.hpp"
 
 // ---------------------------------------------------------------------------
 // 1. OriginValidator Tests (§4)
@@ -389,6 +390,44 @@ void test_csp_injection() {
     std::cout << "  -> PASSED" << std::endl;
 }
 
+// ---------------------------------------------------------------------------
+// 8. Security Policy, Frame Origin & Navigation Tests (N4)
+// ---------------------------------------------------------------------------
+void test_security_policy() {
+    std::cout << "[Test] SecurityPolicy CSP, Navigation & Frame Origin (N4)..." << std::endl;
+
+    // 1. CSP builder checks
+    std::string release_csp = SecurityPolicy::build_default_csp(false);
+    assert(release_csp.find("frame-src 'none'") != std::string::npos);
+    assert(release_csp.find("object-src 'none'") != std::string::npos);
+    assert(release_csp.find("base-uri 'self'") != std::string::npos);
+    assert(release_csp.find("form-action 'self'") != std::string::npos);
+    assert(release_csp.find("frame-ancestors 'none'") != std::string::npos);
+
+    std::string dev_csp = SecurityPolicy::build_default_csp(true);
+    assert(dev_csp.find("frame-src 'none'") != std::string::npos);
+    assert(dev_csp.find("frame-ancestors 'none'") != std::string::npos);
+
+    std::string custom = "default-src 'none';";
+    assert(SecurityPolicy::build_default_csp(false, custom) == custom);
+
+    // 2. Navigation Policy checks
+    assert(SecurityPolicy::is_navigation_allowed("tauri://localhost", false));
+    assert(SecurityPolicy::is_navigation_allowed("https://tauri.localhost/index.html", false));
+    assert(SecurityPolicy::is_navigation_allowed("about:blank", false));
+    assert(!SecurityPolicy::is_navigation_allowed("https://tauri.localhost.evil.com/x", false));
+    assert(!SecurityPolicy::is_navigation_allowed("https://tauri.localhost@evil.com/", false));
+    assert(!SecurityPolicy::is_navigation_allowed("https://evil.com/phish", false));
+    assert(!SecurityPolicy::is_navigation_allowed("http://localhost:3000/", false));
+
+    // 3. Subframe IPC / Message source checks
+    assert(SecurityPolicy::is_frame_source_allowed("https://tauri.localhost/page.html", "https://tauri.localhost/index.html", false));
+    assert(!SecurityPolicy::is_frame_source_allowed("https://evil.com/iframe.html", "https://tauri.localhost/index.html", false));
+    assert(!SecurityPolicy::is_frame_source_allowed("https://tauri.localhost@evil.com/", "https://tauri.localhost/index.html", false));
+
+    std::cout << "  -> PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "=== Running C++ Native Security Tests (Set 1 & Set 2) ===" << std::endl;
     test_origin_validator();
@@ -398,6 +437,7 @@ int main() {
     test_asset_resolver();
     test_json_escaping();
     test_csp_injection();
+    test_security_policy();
     std::cout << "All C++ Native Security Tests PASSED!" << std::endl;
     return 0;
 }

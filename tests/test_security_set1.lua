@@ -81,11 +81,37 @@ do
     end)
     check("$HOME/Documents/** allows deep nested file", ok5, err5)
 
-    -- Sibling lookalike directory denied
-    local ok6, _ = pcall(function()
-        app_scoped.security:assert_scope(desktop .. "evil/notes.txt", app_scoped.base_paths)
+    -- N1 Regression: Sibling lookalike directories denied
+    local ok6a, _ = pcall(function()
+        app_scoped.security:assert_scope(home .. "/Documentsevil/x", app_scoped.base_paths)
     end)
-    check("Sibling lookalike directory (Desktop_evil) denied", not ok6)
+    check("N1: Sibling lookalike directory (Documentsevil/x) denied", not ok6a)
+
+    local ok6b, _ = pcall(function()
+        app_scoped.security:assert_scope(home .. "/Documents-secret/x", app_scoped.base_paths)
+    end)
+    check("N1: Sibling lookalike directory (Documents-secret/x) denied", not ok6b)
+
+    local ok6c, _ = pcall(function()
+        app_scoped.security:assert_scope(home .. "/DocumentsX", app_scoped.base_paths)
+    end)
+    check("N1: Sibling lookalike directory (DocumentsX) denied", not ok6c)
+
+    -- N1: Legitimate paths under $HOME/Documents/** allowed
+    local ok6d, _ = pcall(function()
+        app_scoped.security:assert_scope(home .. "/Documents", app_scoped.base_paths)
+    end)
+    check("N1: Base directory itself ($HOME/Documents) allowed", ok6d)
+
+    local ok6e, _ = pcall(function()
+        app_scoped.security:assert_scope(home .. "/Documents/a", app_scoped.base_paths)
+    end)
+    check("N1: Direct child under recursive scope allowed", ok6e)
+
+    local ok6f, _ = pcall(function()
+        app_scoped.security:assert_scope(home .. "/Documents/a/b/c", app_scoped.base_paths)
+    end)
+    check("N1: Nested children under recursive scope allowed", ok6f)
 
     -- Traversal outside root denied
     local ok7, _ = pcall(function()
@@ -93,7 +119,7 @@ do
     end)
     check("Directory traversal (../.ssh/id_rsa) denied", not ok7)
 
-    -- Traversal with %2e denied
+    -- Traversal with %2e denied (R6)
     local ok8, _ = pcall(function()
         app_scoped.security:assert_scope(desktop .. "/%2e%2e/.ssh/id_rsa", app_scoped.base_paths)
     end)
@@ -104,6 +130,32 @@ do
         app_scoped.security:assert_scope(desktop .. "/file.txt\0/../../etc/passwd", app_scoped.base_paths)
     end)
     check("NUL byte in path rejected", not ok9 and err9:find("NUL") ~= nil)
+
+    -- N2: Symlink escape containment test
+    do
+        local temp_root = "/tmp/tauri_test_symlink_" .. tostring(os.time())
+        os.execute("mkdir -p " .. temp_root .. "/scope " .. temp_root .. "/secret")
+        local f = io.open(temp_root .. "/secret/topsecret.txt", "w")
+        if f then
+            f:write("TOPSECRET_CONTENT")
+            f:close()
+        end
+        os.execute("ln -s " .. temp_root .. "/secret/topsecret.txt " .. temp_root .. "/scope/symlink_out.txt 2>/dev/null")
+
+        local app_symlink = tauri.new({
+            security = {
+                capabilities = { "fs:read-text-file", "fs:write-text-file", "fs:remove" },
+                scope = { temp_root .. "/scope/**" }
+            }
+        })
+
+        local ok_sym, err_sym = pcall(function()
+            app_symlink.security:assert_scope(temp_root .. "/scope/symlink_out.txt", app_symlink.base_paths)
+        end)
+        check("N2: Symlink escaping allowed scope root is denied", not ok_sym)
+
+        os.execute("rm -rf " .. temp_root)
+    end
 
     -- (c) fs:remove requires its own capability
     local app_write_only = tauri.new({
@@ -213,14 +265,37 @@ do
         check(string.format("Empty capabilities denies '%s'", cmd), not ok and err:find("Capability non autorizzata") ~= nil)
     end
 
-    -- Window Create URL gating: external URL requires window:create:external
+    -- N3: Window Create URL gating: external / lookalike URLs require window:create:external
     local app_core = tauri.new({
         security = { capabilities = { "core:default" } }
     })
     local ok_ext, err_ext = pcall(function()
         app_core.commands["tauri:window:create"]({ url = "https://attacker.example/phish.html" })
     end)
-    check("tauri:window:create denies external URL under core:default", not ok_ext and err_ext:find("window:create:external") ~= nil)
+    check("N3: tauri:window:create denies external URL under core:default", not ok_ext and err_ext:find("window:create:external") ~= nil)
+
+    local ok_n3_1, err_n3_1 = pcall(function()
+        app_core.commands["tauri:window:create"]({ url = "https://tauri.localhost.evil.com/x" })
+    end)
+    check("N3: tauri:window:create denies https://tauri.localhost.evil.com/x", not ok_n3_1 and err_n3_1:find("window:create:external") ~= nil)
+
+    local ok_n3_2, err_n3_2 = pcall(function()
+        app_core.commands["tauri:window:create"]({ url = "https://tauri.localhost@evil.com/" })
+    end)
+    check("N3: tauri:window:create denies https://tauri.localhost@evil.com/", not ok_n3_2 and err_n3_2:find("window:create:external") ~= nil)
+
+    local ok_n3_3, err_n3_3 = pcall(function()
+        app_core.commands["tauri:window:create"]({ url = "tauri://evil/x" })
+    end)
+    check("N3: tauri:window:create denies tauri://evil/x", not ok_n3_3 and err_n3_3:find("window:create:external") ~= nil)
+
+    -- R1: Event dispatch and __TAURI_DISPATCH_EMIT__
+    local received_event = nil
+    app_core:listen("app://sync-event", function(payload)
+        received_event = payload
+    end)
+    _G.__TAURI_DISPATCH_EMIT__("app://sync-event", "{\"data\":\"verified\", \"id\":42}")
+    check("R1: __TAURI_DISPATCH_EMIT__ dispatches safely to app listeners", received_event and received_event.data == "verified" and received_event.id == 42)
 end
 
 -- ---------------------------------------------------------------------------
@@ -343,17 +418,41 @@ do
     end)
     check("Unlisted argument ('clone') rejected", not ok_arg_fail)
 
-    -- (d) Dangerous argument blocking
+    -- (d) R4: String entry defaults to denying non-empty arguments (no arg allowlist)
     local app_open_git = tauri.new({
         security = {
             capabilities = { "shell:execute" },
-            allowed_programs = { "git" } -- no arg whitelist
+            allowed_programs = { "git" } -- string entry: no arg allowlist
         }
     })
-    local ok_dang, err_dang = pcall(function()
-        app_open_git.security:assert_args("git", { "-c", "core.fsmonitor=calc.exe" })
+    local ok_no_arg = pcall(function()
+        app_open_git.security:assert_args("git", {})
     end)
-    check("Dangerous git argument ('-c') is blocked", not ok_dang and err_dang:find("dangerous") ~= nil)
+    check("R4: String entry allows command with empty arguments", ok_no_arg)
+
+    local ok_str_args, err_str_args = pcall(function()
+        app_open_git.security:assert_args("git", { "status" })
+    end)
+    check("R4: String entry denies arguments without explicit allowlist/opt-in", not ok_str_args and err_str_args:find("no arg allowlist") ~= nil)
+
+    -- (e) Dangerous argument blocking and explicit any_args opt-in (R4)
+    local app_any_git = tauri.new({
+        security = {
+            capabilities = { "shell:execute" },
+            allowed_programs = {
+                { name = "git", any_args = true }
+            }
+        }
+    })
+    local ok_safe_any = pcall(function()
+        app_any_git.security:assert_args("git", { "status", "--short" })
+    end)
+    check("R4: Explicit any_args = true permits safe non-empty arguments", ok_safe_any)
+
+    local ok_dang, err_dang = pcall(function()
+        app_any_git.security:assert_args("git", { "-c", "core.fsmonitor=calc.exe" })
+    end)
+    check("Dangerous git argument ('-c') is blocked even with any_args = true", not ok_dang and err_dang:find("dangerous") ~= nil)
 end
 
 print("\n=======================================================")

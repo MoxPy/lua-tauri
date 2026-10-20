@@ -41,6 +41,22 @@ assert(d5 == nil and err5 ~= nil, "Unescaped control chars must be rejected")
 assert_eq(json.encode({}), "{}", "Empty table must encode to {}")
 assert_eq(json.encode({1, 2, 3}), "[1,2,3]", "Array must encode to [1,2,3]")
 
+-- R2: Empty array preservation
+local empty_arr = json.decode("[]")
+assert_eq(json.encode(empty_arr), "[]", "Decoded empty array must re-encode to []")
+assert_eq(json.encode(json.empty_array), "[]", "json.empty_array encodes to []")
+
+-- R2: Null preservation and index integrity in arrays
+local arr_with_null = json.decode("[1,null,3]")
+assert(arr_with_null[1] == 1, "arr[1] is 1")
+assert(arr_with_null[2] == json.null, "arr[2] is json.null")
+assert(arr_with_null[3] == 3, "arr[3] is 3")
+assert_eq(json.encode(arr_with_null), "[1,null,3]", "[1,null,3] round-trips without shifting indices")
+
+-- R2: High-precision / large integer encoding without exponent
+local big_int = 8944394323791464
+assert_eq(json.encode(big_int), "8944394323791464", "Large integer encodes without scientific exponent")
+
 local enc_str = json.encode("line1\nline2\t\"quoted\"")
 assert_eq(enc_str, '"line1\\nline2\\t\\"quoted\\""', "String encoding with escapes")
 

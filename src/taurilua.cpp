@@ -10,6 +10,7 @@
 #include "isolate_pool.hpp"
 
 #include "resource_resolver.hpp"
+#include "asset_resolver.hpp"
 
 struct taurilua_app {
     lua_State *L = nullptr;
@@ -46,7 +47,9 @@ static std::string lua_quote_string(const std::string &str) {
 
 static void on_bridge_ipc(const char *window_label, const char *seq, const char *req) {
     if (g_active_app && g_active_app->isolate_pool) {
-        g_active_app->isolate_pool->enqueue(window_label, seq, req);
+        if (!g_active_app->isolate_pool->enqueue(window_label, seq, req)) {
+            platform_window_return_async(window_label, seq, 1, "{\"error\":\"IPC request rejected: queue full or payload exceeded 10MB limit\"}");
+        }
     }
 }
 
@@ -414,9 +417,10 @@ void taurilua_emit(taurilua_app_t *app, const char *event_name, const char *payl
     } else {
         lua_pop(app->L, 1);
         // Fallback: evaluate window.__TAURI__.event.emit across windows safely quoted
-        std::string safe_event = lua_quote_string(event_name);
+        std::string safe_event = json_escape_string(event_name);
+        std::string safe_payload = (payload_json && payload_json[0] != '\0') ? payload_json : "{}";
         std::string js = std::string("if(window.__TAURI__&&window.__TAURI__.event){window.__TAURI__.event.emit(") +
-                         safe_event + "," + (payload_json ? payload_json : "{}") + ");}";
+                         safe_event + "," + safe_payload + ");}";
         platform_window_eval("main", js.c_str());
     }
 }

@@ -4,6 +4,7 @@
 
 #include "taurilua.h"
 #include "native_bridge.h"
+#include "asset_resolver.hpp"
 
 #if !defined(_WIN32)
 #include <unistd.h>
@@ -23,24 +24,9 @@ static std::string make_instance_payload(int argc, char **argv) {
     std::string json = "{\"args\":[";
     for (int i = 0; i < argc; ++i) {
         if (i > 0) json += ",";
-        json += "\"";
-        for (const char *p = argv[i]; *p; ++p) {
-            if (*p == '"') json += "\\\"";
-            else if (*p == '\\') json += "\\\\";
-            else if (*p == '\n') json += "\\n";
-            else if (*p == '\r') json += "\\r";
-            else if (*p == '\t') json += "\\t";
-            else json += *p;
-        }
-        json += "\"";
+        json += json_escape_string(argv[i] ? argv[i] : "");
     }
-    json += "],\"cwd\":\"";
-    for (char c : cwd) {
-        if (c == '"') json += "\\\"";
-        else if (c == '\\') json += "\\\\";
-        else json += c;
-    }
-    json += "\"}";
+    json += "],\"cwd\":" + json_escape_string(cwd) + "}";
     return json;
 }
 

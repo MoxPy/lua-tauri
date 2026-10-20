@@ -5,6 +5,10 @@
 #include <map>
 #include <functional>
 #include <cstring>
+#include "security_policy.hpp"
+
+extern int g_dev_mode;
+extern std::string g_dev_url;
 
 typedef void *webview_t;
 
@@ -56,7 +60,7 @@ struct WebviewImpl {
 
 static bool g_has_main_window = false;
 
-@interface TauriBridgeScriptHandler : NSObject <WKScriptMessageHandler, NSWindowDelegate>
+@interface TauriBridgeScriptHandler : NSObject <WKScriptMessageHandler, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate>
 @property (nonatomic, assign) WebviewImpl *impl;
 @end
 
@@ -76,6 +80,20 @@ static bool g_has_main_window = false;
     if (it != self.impl->bindings.end() && it->second.fn) {
         it->second.fn([seq UTF8String], [req UTF8String], it->second.arg);
     }
+}
+
+- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    NSURL *url = navigationAction.request.URL;
+    std::string s_url = url ? [[url absoluteString] UTF8String] : "";
+    if (SecurityPolicy::is_navigation_allowed(s_url, g_dev_mode != 0, g_dev_url)) {
+        decisionHandler(WKNavigationActionPolicyAllow);
+    } else {
+        decisionHandler(WKNavigationActionPolicyCancel);
+    }
+}
+
+- (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures {
+    return nil; // Block unexpected popup windows
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
@@ -299,6 +317,8 @@ static inline webview_t webview_create(int debug, void *window) {
         [impl->window setReleasedWhenClosed:NO];
         [impl->window setDelegate:handler];
         impl->wk = [[WKWebView alloc] initWithFrame:frame configuration:config];
+        [impl->wk setNavigationDelegate:handler];
+        [impl->wk setUIDelegate:handler];
         if (debug) {
             if ([impl->wk respondsToSelector:@selector(setInspectable:)]) {
                 [impl->wk performSelector:@selector(setInspectable:) withObject:@YES];
@@ -588,15 +608,20 @@ static inline webview_t webview_create(int debug, void *window) {
                                                         if (swritten > 0) source_u8.resize(static_cast<size_t>(swritten - 1));
                                                     }
                                                     CoTaskMemFree(source_w);
-                                                    if (!source_u8.empty()) {
-                                                        bool is_local = (source_u8.rfind("tauri://", 0) == 0 ||
-                                                                         source_u8.rfind("https://tauri.localhost", 0) == 0 ||
-                                                                         source_u8.rfind("http://localhost:", 0) == 0 ||
-                                                                         source_u8.rfind("http://127.0.0.1:", 0) == 0);
-                                                        if (!is_local) {
-                                                            CoTaskMemFree(json_str);
-                                                            return S_OK; // Reject cross-origin or untrusted subframe message
+                                                    LPWSTR top_w = nullptr;
+                                                    std::string top_u8;
+                                                    if (SUCCEEDED(sender->get_Source(&top_w)) && top_w) {
+                                                        int tlen = WideCharToMultiByte(CP_UTF8, 0, top_w, -1, NULL, 0, NULL, NULL);
+                                                        if (tlen > 0) {
+                                                            top_u8.resize(tlen);
+                                                            int twritten = WideCharToMultiByte(CP_UTF8, 0, top_w, -1, &top_u8[0], tlen, NULL, NULL);
+                                                            if (twritten > 0) top_u8.resize(static_cast<size_t>(twritten - 1));
                                                         }
+                                                        CoTaskMemFree(top_w);
+                                                    }
+                                                    if (!SecurityPolicy::is_frame_source_allowed(source_u8, top_u8, g_dev_mode != 0, g_dev_url)) {
+                                                        CoTaskMemFree(json_str);
+                                                        return S_OK; // Reject cross-origin or untrusted subframe message
                                                     }
                                                 }
 
@@ -652,6 +677,38 @@ static inline webview_t webview_create(int debug, void *window) {
                                             return S_OK;
                                         }).Get(),
                                     &token);
+
+                                EventRegistrationToken navToken;
+                                impl->webview->add_NavigationStarting(
+                                    Callback<ICoreWebView2NavigationStartingEventHandler>(
+                                        [](ICoreWebView2 *sender, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
+                                            (void)sender;
+                                            LPWSTR uri_w = nullptr;
+                                            if (SUCCEEDED(args->get_Uri(&uri_w)) && uri_w) {
+                                                int len = WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, NULL, 0, NULL, NULL);
+                                                std::string u8(len > 0 ? len : 0, '\0');
+                                                if (len > 0) {
+                                                    int written = WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, &u8[0], len, NULL, NULL);
+                                                    if (written > 0) u8.resize(static_cast<size_t>(written - 1));
+                                                }
+                                                CoTaskMemFree(uri_w);
+                                                if (!SecurityPolicy::is_navigation_allowed(u8, g_dev_mode != 0, g_dev_url)) {
+                                                    args->put_Cancel(TRUE);
+                                                }
+                                            }
+                                            return S_OK;
+                                        }).Get(),
+                                    &navToken);
+
+                                EventRegistrationToken newWinToken;
+                                impl->webview->add_NewWindowRequested(
+                                    Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+                                        [](ICoreWebView2 *sender, ICoreWebView2NewWindowRequestedEventArgs *args) -> HRESULT {
+                                            (void)sender;
+                                            args->put_Handled(TRUE);
+                                            return S_OK;
+                                        }).Get(),
+                                    &newWinToken);
                             }
                             return S_OK;
                         }).Get());
@@ -904,6 +961,26 @@ static inline webview_t webview_create(int debug, void *window) {
     webkit_user_content_controller_register_script_message_handler(impl->ucc, "__tauri_bridge__");
     g_signal_connect(impl->ucc, "script-message-received::__tauri_bridge__", G_CALLBACK(on_gtk_script_message), impl);
     g_signal_connect(impl->window, "delete-event", G_CALLBACK(on_gtk_window_delete_event), impl);
+
+    g_signal_connect(impl->wk, "decide-policy", G_CALLBACK(+[](WebKitWebView *web_view, WebKitPolicyDecision *decision, WebKitPolicyDecisionType type, gpointer user_data) -> gboolean {
+        (void)web_view; (void)user_data;
+        if (type == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION) {
+            WebKitNavigationPolicyDecision *nav_decision = WEBKIT_NAVIGATION_POLICY_DECISION(decision);
+            WebKitNavigationAction *action = webkit_navigation_policy_decision_get_navigation_action(nav_decision);
+            WebKitURIRequest *req = webkit_navigation_action_get_request(action);
+            const gchar *uri = webkit_uri_request_get_uri(req);
+            if (uri && !SecurityPolicy::is_navigation_allowed(uri, g_dev_mode != 0, g_dev_url)) {
+                webkit_policy_decision_ignore(decision);
+                return TRUE;
+            }
+        }
+        return FALSE;
+    }), NULL);
+
+    g_signal_connect(impl->wk, "create", G_CALLBACK(+[](WebKitWebView *web_view, WebKitNavigationAction *nav_action, gpointer user_data) -> GtkWidget * {
+        (void)web_view; (void)nav_action; (void)user_data;
+        return NULL;
+    }), NULL);
 
     gtk_container_add(GTK_CONTAINER(impl->window), impl->wk);
     gtk_widget_show_all(impl->window);

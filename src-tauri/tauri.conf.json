@@ -37,9 +37,9 @@
       ],
       "csp": "default-src 'self' tauri: asset:; script-src 'self' tauri: asset:; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: tauri:; connect-src 'self' tauri: ipc:;",
       "scope": [
-        "$APPDATA/**",
-        "$DESKTOP/**",
-        "$HOME/Documents/**"
+        "$APPDATA/com.tauri.lua/**",
+        "$DESKTOP/tauri-app-sandbox/**",
+        "$HOME/Documents/tauri-app-sandbox/**"
       ]
     }
   },

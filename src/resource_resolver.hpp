@@ -18,24 +18,6 @@
 
 namespace ResourceResolver {
 
-inline bool is_dev_mode(bool config_dev_mode = false) {
-    if (config_dev_mode) return true;
-    const char *env = getenv("TAURILUA_DEV");
-    return (env && env[0] != '\0' && strcmp(env, "0") != 0);
-}
-
-inline bool file_exists(const std::string &path) {
-    if (path.empty()) return false;
-    std::error_code ec;
-    return std::filesystem::exists(path, ec);
-}
-
-inline std::string read_file_string(const std::string &path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return "";
-    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-}
-
 inline std::string get_executable_dir() {
 #if defined(__APPLE__)
     char buf[1024];
@@ -71,6 +53,32 @@ inline std::string get_executable_dir() {
     }
     return "";
 #endif
+}
+
+inline bool is_packaged() {
+    std::string exe_dir = get_executable_dir();
+    if (exe_dir.find(".app/Contents/MacOS") != std::string::npos) return true;
+    if (exe_dir.rfind("/usr/bin", 0) == 0 || exe_dir.rfind("/usr/local/bin", 0) == 0) return true;
+    return false;
+}
+
+inline bool is_dev_mode(bool config_dev_mode = false) {
+    if (is_packaged()) return false;
+    if (config_dev_mode) return true;
+    const char *env = getenv("TAURILUA_DEV");
+    return (env && env[0] != '\0' && strcmp(env, "0") != 0);
+}
+
+inline bool file_exists(const std::string &path) {
+    if (path.empty()) return false;
+    std::error_code ec;
+    return std::filesystem::exists(path, ec);
+}
+
+inline std::string read_file_string(const std::string &path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return "";
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
 inline std::string resolve_bundle_resource(const std::string &rel_path) {

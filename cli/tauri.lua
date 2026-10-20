@@ -878,10 +878,6 @@ local function cmd_dev(args)
     ensure_rocks_installed(conf, false, false, has_flag(args, "--allow-custom-server"))
 
     local dev_url = build_conf.devUrl or build_conf.devPath
-    local dev_port = dev_url and dev_url:match(":(%d+)")
-    if dev_port and ffi.os ~= "Windows" then
-        exec("lsof -ti :" .. dev_port .. " 2>/dev/null | xargs kill -9 2>/dev/null || true")
-    end
 
     local dev_server_pid = nil
     local before_dev = build_conf.beforeDevCommand
@@ -1001,9 +997,6 @@ local function cmd_dev(args)
         end
         if dev_server_pid and ffi.C.kill(dev_server_pid, 0) == 0 then
             ffi.C.kill(dev_server_pid, 9)
-        end
-        if dev_port and ffi.os ~= "Windows" then
-            exec("lsof -ti :" .. dev_port .. " 2>/dev/null | xargs kill -9 2>/dev/null || true")
         end
         pcall(function() os.remove(".dev_server.log") end)
         os.exit(0)

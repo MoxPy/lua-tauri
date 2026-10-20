@@ -228,6 +228,8 @@ void bridge_set_dev_url(const char *url);
 
 int platform_list_dir(const char *dir_path, char *out_buf, int max_len);
 void platform_set_assets_path(const char *path);
+int platform_is_origin_allowed(const char *url);
+int platform_resolve_path(const char *in_path, char *out_path, int max_len);
 
 int platform_window_create(const char *label, const char *title, const char *url, int width, int height, int resizable, int decorations, int transparent);
 void platform_window_close(const char *label);
@@ -360,6 +362,21 @@ end
 
 local json = {}
 
+local null_mt = {
+    __tostring = function() return "null" end,
+    __is_json_null = true
+}
+json.null = setmetatable({}, null_mt)
+
+local array_mt = {
+    __tostring = function() return "[]" end,
+    __is_json_array = true
+}
+json.empty_array = setmetatable({}, array_mt)
+json.array = function(t)
+    return setmetatable(t or {}, array_mt)
+end
+
 local function utf8_encode(cp)
     if cp < 0x80 then
         return string.char(cp)
@@ -396,7 +413,7 @@ end
 function json.encode(val, visited)
     visited = visited or {}
     local t = type(val)
-    if t == "nil" then
+    if val == nil or val == json.null or (t == "table" and getmetatable(val) and getmetatable(val).__is_json_null) then
         return "null"
     elseif t == "boolean" then
         return val and "true" or "false"
@@ -406,7 +423,11 @@ function json.encode(val, visited)
         elseif val == math.huge or val == -math.huge then
             error("JSON encode error: Infinity is not allowed in RFC 8259")
         end
-        return tostring(val)
+        if math.floor(val) == val and math.abs(val) < 1e15 then
+            return string.format("%.0f", val)
+        else
+            return string.format("%.17g", val)
+        end
     elseif t == "string" then
         return encode_string(val)
     elseif t == "table" then
@@ -414,6 +435,9 @@ function json.encode(val, visited)
             error("JSON encode error: circular reference detected")
         end
         visited[val] = true
+
+        local mt = getmetatable(val)
+        local is_explicit_array = (mt and mt.__is_json_array == true) or (val == json.empty_array)
 
         local is_array = true
         local max_idx = 0
@@ -429,10 +453,13 @@ function json.encode(val, visited)
 
         if count == 0 then
             visited[val] = nil
+            if is_explicit_array then
+                return "[]"
+            end
             return "{}"
         end
 
-        if is_array and max_idx == count then
+        if (is_array and max_idx == count) or (is_explicit_array and is_array) then
             local parts = {}
             for i = 1, max_idx do
                 parts[i] = json.encode(val[i], visited)
@@ -603,7 +630,7 @@ function json.decode(str)
         pos = pos + 1
         depth = depth + 1
         if depth > max_depth then return nil, "maximum depth exceeded" end
-        local arr = {}
+        local arr = setmetatable({}, array_mt)
         skip_ws()
         if pos <= len and str:sub(pos, pos) == ']' then
             pos = pos + 1
@@ -611,11 +638,13 @@ function json.decode(str)
             return arr
         end
 
+        local idx = 1
         while pos <= len do
             skip_ws()
             local val, err = parse_value()
             if err then return nil, err end
-            table.insert(arr, val)
+            arr[idx] = (val == nil) and json.null or val
+            idx = idx + 1
 
             skip_ws()
             if pos <= len and str:sub(pos, pos) == ']' then
@@ -805,19 +834,25 @@ function Security.new(config)
     -- String entry means: program allowed (subject to dangerous flag blocking).
     -- Table entry means: program allowed ONLY with args from the given list.
     self.allowed_programs = sec.allowed_programs or sec.allowed_commands or {}
-    -- Build a fast-lookup map: program_name -> arg_whitelist (false = any args ok, table = strict args)
+    -- Build a fast-lookup map: program_name -> arg_policy (false = explicit opt-in for any args, table = strict args)
     self._program_map = {}
     for _, entry in ipairs(self.allowed_programs) do
         if type(entry) == "string" then
             if entry == "*" then
-                self._program_map["*"] = false  -- wildcard: any program
+                self._program_map["*"] = {}
             else
-                self._program_map[entry] = false  -- specific program
+                self._program_map[entry] = {}
             end
         elseif type(entry) == "table" then
             local prog = entry.name or entry.program or entry.cmd
             if prog then
-                self._program_map[prog] = entry.args or false
+                if entry.any_args == true or entry.args == "*" or entry.args == false then
+                    self._program_map[prog] = false  -- explicit opt-in for any arguments
+                elseif type(entry.args) == "table" then
+                    self._program_map[prog] = entry.args
+                else
+                    self._program_map[prog] = {}
+                end
             end
         end
     end
@@ -911,6 +946,9 @@ function Security:assert_args(program, args)
     end
 
     if type(arg_policy) == "table" then
+        if #arg_policy == 0 and #args > 0 then
+            error(string.format("Shell: arguments not permitted for program '%s' (no arg allowlist defined)", program))
+        end
         local whiteset = {}
         for _, a in ipairs(arg_policy) do whiteset[tostring(a)] = true end
         for _, arg in ipairs(args) do
@@ -927,14 +965,6 @@ function Security:assert_args(program, args)
     end
 end
 
-local function decode_uri_components(p)
-    return p:gsub("%%([0-9a-fA-F][0-9a-fA-F])", function(hex)
-        local b = tonumber(hex, 16)
-        if b and b ~= 0 then return string.char(b) end
-        return ""
-    end)
-end
-
 local function canonicalize_path(path)
     if type(path) ~= "string" or path == "" then
         return ""
@@ -942,9 +972,9 @@ local function canonicalize_path(path)
     if path:find("\0", 1, true) then
         error("Percorso non valido: contiene caratteri NUL")
     end
-    path = decode_uri_components(path)
-    if path:find("\0", 1, true) then
-        error("Percorso non valido: contiene caratteri NUL")
+    local p_lower = path:lower()
+    if p_lower:match("%%2e") or p_lower:match("%%2f") or p_lower:match("%%5c") or p_lower:match("%%00") then
+        error("Percorso non valido: sequenze percent-encoding ambigue rilevate")
     end
 
     path = path:gsub("\\", "/")
@@ -984,6 +1014,22 @@ local function canonicalize_path(path)
     return res
 end
 
+local function real_filesystem_path(path)
+    if type(path) ~= "string" or path == "" then return "" end
+    local canon = canonicalize_path(path)
+    if clib and clib.platform_resolve_path then
+        local buf = ffi.new("char[4096]")
+        local ok = clib.platform_resolve_path(canon, buf, 4096)
+        if ok == 1 then
+            local resolved = ffi.string(buf)
+            if resolved ~= "" then
+                return resolved:gsub("\\", "/")
+            end
+        end
+    end
+    return canon
+end
+
 local function glob_to_lua_pattern(glob_str)
     local s = glob_str:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1")
     s = s:gsub("%*%*", "\1")
@@ -999,7 +1045,7 @@ function Security:assert_scope(target_path, base_paths)
     if type(target_path) ~= "string" or target_path == "" then
         error("Percorso file non specificato o non valido")
     end
-    local normalized = canonicalize_path(target_path)
+    local normalized = real_filesystem_path(target_path)
 
     local function substitute_base(str)
         return str:gsub("%$([A-Z_]+)", function(var)
@@ -1015,20 +1061,24 @@ function Security:assert_scope(target_path, base_paths)
         if type(pattern) == "string" and pattern ~= "" then
             local resolved = substitute_base(pattern):gsub("\\", "/")
             local is_recursive = resolved:match("%*%*$") ~= nil
-            local is_direct = resolved:match("%*%$") ~= nil and not is_recursive
-            local canonical_base = canonicalize_path(resolved:gsub("/%*%*?$", ""))
+            local is_direct = (resolved:match("%*$") ~= nil) and not is_recursive
+            local base_str = resolved:gsub("/%*%*?$", "")
+            local canonical_base = real_filesystem_path(base_str)
+            local escaped_base = canonical_base:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1")
 
             if is_recursive then
-                local pat = "^" .. canonical_base:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1") .. "/?.*$"
-                if normalized:match(pat) then return true end
+                if normalized == canonical_base or normalized:match("^" .. escaped_base .. "/.*$") then
+                    return normalized
+                end
             elseif is_direct then
-                local pat = "^" .. canonical_base:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1") .. "/[^/]*$"
-                if normalized:match(pat) then return true end
+                if normalized:match("^" .. escaped_base .. "/[^/]+$") then
+                    return normalized
+                end
             else
-                local canonical_pat = canonicalize_path(resolved)
+                local canonical_pat = real_filesystem_path(resolved)
                 local pat = glob_to_lua_pattern(canonical_pat)
-                if normalized:match(pat) or normalized == canonical_pat then
-                    return true
+                if normalized == canonical_pat or normalized:match(pat) then
+                    return normalized
                 end
             end
         end
@@ -2030,6 +2080,22 @@ function Tauri:_setup_asset_scheme()
     end
 end
 
+local function is_trusted_origin(url_str)
+    if not url_str or url_str == "" then return false end
+    if clib and clib.platform_is_origin_allowed then
+        return clib.platform_is_origin_allowed(url_str) == 1
+    end
+    if url_str:find("@", 1, true) then return false end
+    local lower = url_str:lower()
+    if lower == "tauri://localhost" or lower:match("^tauri://localhost[/%?#]") then
+        return true
+    end
+    if lower == "https://tauri.localhost" or lower:match("^https://tauri%.localhost[/%?#]") then
+        return true
+    end
+    return false
+end
+
 function Tauri:_register_builtins()
     self:register("tauri:state:get", function(payload)
         self.security:assert_capability("tauri:state:get")
@@ -2202,19 +2268,14 @@ function Tauri:_register_builtins()
 
         if not raw_url or raw_url == "" then
             url = self.default_origin
-            is_trusted = true
-        elseif raw_url:match("^tauri://") or raw_url:match("^https://tauri%.localhost") then
+            is_trusted = is_trusted_origin(url)
+        elseif is_trusted_origin(raw_url) then
             url = raw_url
             is_trusted = true
-        elseif raw_url:match("^https?://") then
-            if self.default_origin and raw_url:sub(1, #self.default_origin) == self.default_origin then
-                url = raw_url
-                is_trusted = true
-            else
-                self.security:assert_capability("window:create:external")
-                url = raw_url
-                is_trusted = false
-            end
+        elseif raw_url:match("^https?://") or raw_url:match("^tauri://") then
+            self.security:assert_capability("window:create:external")
+            url = raw_url
+            is_trusted = false
         else
             -- Relative path: join onto default_origin
             if self.default_origin:match("/$") then
@@ -2222,7 +2283,10 @@ function Tauri:_register_builtins()
             else
                 url = self.default_origin .. "/" .. raw_url:gsub("^/", "")
             end
-            is_trusted = true
+            is_trusted = is_trusted_origin(url)
+            if not is_trusted then
+                self.security:assert_capability("window:create:external")
+            end
         end
 
         local width = (payload and payload.width) or 800
@@ -2345,8 +2409,8 @@ function Tauri:_register_builtins()
 
     self:register("tauri:fs:read_text_file", function(payload)
         self.security:assert_capability("fs:read-text-file")
-        self.security:assert_scope(payload.path, self.base_paths)
-        local f, err = io.open(payload.path, "r")
+        local safe_path = self.security:assert_scope(payload.path, self.base_paths)
+        local f, err = io.open(safe_path, "r")
         if not f then error(err) end
         local content = f:read("*a")
         f:close()
@@ -2355,8 +2419,8 @@ function Tauri:_register_builtins()
 
     self:register("tauri:fs:write_text_file", function(payload)
         self.security:assert_capability("fs:write-text-file")
-        self.security:assert_scope(payload.path, self.base_paths)
-        local f, err = io.open(payload.path, "w")
+        local safe_path = self.security:assert_scope(payload.path, self.base_paths)
+        local f, err = io.open(safe_path, "w")
         if not f then error(err) end
         f:write(tostring(payload.contents or ""))
         f:close()
@@ -2365,10 +2429,10 @@ function Tauri:_register_builtins()
 
     self:register("tauri:fs:read_dir", function(payload)
         self.security:assert_capability("fs:read-dir")
-        self.security:assert_scope(payload.path, self.base_paths)
+        local safe_path = self.security:assert_scope(payload.path, self.base_paths)
         local entries = {}
         if ffi.os == "Windows" then
-            local search_path = payload.path:gsub("[/\\]+$", "") .. "\\*"
+            local search_path = safe_path:gsub("[/\\]+$", "") .. "\\*"
             local k32 = clib
             pcall(function() k32 = ffi.load("kernel32") end)
             local mb2wc = (k32 and k32.MultiByteToWideChar) or clib.MultiByteToWideChar
@@ -2406,7 +2470,7 @@ function Tauri:_register_builtins()
                 error("Impossibile aprire la directory: " .. payload.path)
             end
         else
-            local dir = clib.opendir(payload.path)
+            local dir = clib.opendir(safe_path)
             if dir == nil then error("Impossibile aprire la directory: " .. payload.path) end
             while true do
                 local entry = clib.readdir(dir)
@@ -2423,8 +2487,8 @@ function Tauri:_register_builtins()
 
     self:register("tauri:fs:remove", function(payload)
         self.security:assert_capability("fs:remove")
-        self.security:assert_scope(payload.path, self.base_paths)
-        if clib.remove(payload.path) ~= 0 then
+        local safe_path = self.security:assert_scope(payload.path, self.base_paths)
+        if clib.remove(safe_path) ~= 0 then
             error("Impossibile eliminare: " .. payload.path)
         end
         return true
@@ -2565,12 +2629,29 @@ function Tauri:listen(event_name, handler)
 end
 
 function Tauri:emit(event_name, payload)
+    if self.listeners and self.listeners[event_name] then
+        for _, cb in ipairs(self.listeners[event_name]) do
+            pcall(cb, payload)
+        end
+    end
     local js = string.format(
         "if(window.__TAURI__&&window.__TAURI__.event){window.__TAURI__.event._dispatch(%s,%s);}",
         json.encode(event_name),
         json.encode(payload)
     )
     clib.platform_window_eval("*", js)
+end
+
+function _G.__TAURI_DISPATCH_EMIT__(event_name, payload_json)
+    if not g_tauri_instance then return end
+    local payload = {}
+    if payload_json and payload_json ~= "" then
+        local ok, decoded = pcall(json.decode, payload_json)
+        if ok and decoded ~= nil then
+            payload = decoded
+        end
+    end
+    g_tauri_instance:emit(event_name, payload)
 end
 
 function Tauri:create_main_window()
@@ -2606,13 +2687,16 @@ function Tauri:create_main_window()
         end
     end
 
+    local is_trusted = is_trusted_origin(url)
     pcall(function() clib.platform_set_client_script(TAURI_CLIENT_SCRIPT) end)
     clib.platform_window_create("main", title, url, width, height, resizable, decorations, transparent)
-    pcall(function() clib.platform_window_init_script("main", TAURI_CLIENT_SCRIPT) end)
-    clib.platform_window_eval("main", TAURI_CLIENT_SCRIPT)
-    for _, p in ipairs(self.plugin_list or {}) do
-        if type(p.js) == "string" and p.js ~= "" then
-            clib.platform_window_eval("main", p.js)
+    if is_trusted then
+        pcall(function() clib.platform_window_init_script("main", TAURI_CLIENT_SCRIPT) end)
+        clib.platform_window_eval("main", TAURI_CLIENT_SCRIPT)
+        for _, p in ipairs(self.plugin_list or {}) do
+            if type(p.js) == "string" and p.js ~= "" then
+                clib.platform_window_eval("main", p.js)
+            end
         end
     end
     self.windows["main"] = true
