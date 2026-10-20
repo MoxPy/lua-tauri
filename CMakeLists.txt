@@ -27,10 +27,10 @@ find_library(LUAJIT_LIB
 
 # Compiler warnings and security hardening flags
 if(MSVC)
-    add_compile_options(/W4 /GS /guard:cf)
+    add_compile_options(/W4 /wd4100 /GS /guard:cf)
     add_link_options(/guard:cf /DYNAMICBASE /NXCOMPAT)
 else()
-    add_compile_options(-Wall -Wextra -Wformat -Wformat-security -fstack-protector-strong)
+    add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wformat -Wformat-security -fstack-protector-strong)
     if(NOT APPLE)
         add_compile_definitions(_FORTIFY_SOURCE=2)
         add_link_options(-Wl,-z,relro -Wl,-z,now)
