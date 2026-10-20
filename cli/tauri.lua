@@ -1591,6 +1591,17 @@ local function cmd_build(args)
         end
         exec("cp -r " .. shell_quote(frontend_dist) .. "/* " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist .. "/"))
 
+        if file_exists("src-tauri/binaries") then
+            info("Packaging native sidecar binaries into Debian package...")
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/binaries"))
+            exec("cp -r src-tauri/binaries/* " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/binaries/") .. " 2>/dev/null || true")
+        end
+
+        if file_exists("src-tauri/src") then
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/src"))
+            exec("cp src-tauri/src/*.lua " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/src/") .. " 2>/dev/null || true")
+        end
+
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
             info("Packaging LuaRocks dependencies into Debian package...")
