@@ -617,8 +617,10 @@ local function ensure_runtime_built(release_mode)
             end
         end
 
-        exec("cmake -B build -S " .. shell_quote(ENGINE_ROOT) .. " -DAPP_DIR=" .. shell_quote(cwd) .. " -DCMAKE_BUILD_TYPE=" .. shell_quote(build_type) .. " > /dev/null")
-        exec("cmake --build build --config " .. shell_quote(build_type) .. " > /dev/null")
+        info("Configuring CMake for Tauri-Lua runtime...")
+        exec("cmake -B build -S " .. shell_quote(ENGINE_ROOT) .. " -DAPP_DIR=" .. shell_quote(cwd) .. " -DCMAKE_BUILD_TYPE=" .. shell_quote(build_type))
+        info("Building Tauri-Lua runtime with CMake...")
+        exec("cmake --build build --config " .. shell_quote(build_type))
         success("Runtime built successfully.")
         if ffi.os == "Windows" then
             bin = file_exists("build/Release/tauri_app.exe") and "build/Release/tauri_app.exe" or "build/tauri_app.exe"
@@ -1587,43 +1589,51 @@ local function cmd_build(args)
         io.stdout:write("        " .. colors.green .. dmg_file .. colors.reset .. "\n")
 
     elseif os_name == "Linux" then
-        local deb_dir = target_dir .. "/deb/" .. app_name .. "_" .. version .. "_amd64"
-        info("Bundling Debian (.deb)...")
+        local deb_pkg_name = app_name:gsub("%s+", "-"):gsub("[^%w%+%-%._]", ""):lower():gsub("^%-+", ""):gsub("%-+$", "")
+        if deb_pkg_name == "" then deb_pkg_name = "tauri-app" end
+        local deb_dir = target_dir .. "/deb/" .. deb_pkg_name .. "_" .. version .. "_amd64"
+        info("Bundling Debian (.deb) package `" .. deb_pkg_name .. "`...")
         exec("mkdir -p " .. shell_quote(deb_dir .. "/DEBIAN"))
         exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/bin"))
-        exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist))
+        exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/" .. frontend_dist))
 
-        exec("cp " .. shell_quote(bin_path) .. " " .. shell_quote(deb_dir .. "/usr/bin/" .. app_name))
+        exec("cp " .. shell_quote(bin_path) .. " " .. shell_quote(deb_dir .. "/usr/bin/" .. deb_pkg_name))
+        if app_name ~= deb_pkg_name then
+            exec("ln -sf " .. shell_quote(deb_pkg_name) .. " " .. shell_quote(deb_dir .. "/usr/bin/" .. app_name) .. " 2>/dev/null || true")
+        end
+
         if file_exists("build/libtaurilua.so") then
             exec("cp build/libtaurilua.so " .. shell_quote(deb_dir .. "/usr/bin/") .. " 2>/dev/null || true")
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/lib") .. " && cp build/libtaurilua.so " .. shell_quote(deb_dir .. "/usr/lib/") .. " 2>/dev/null || true")
         end
-        exec("cp -r " .. shell_quote(frontend_dist) .. "/* " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/" .. frontend_dist .. "/"))
+        exec("cp -r " .. shell_quote(frontend_dist) .. "/* " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/" .. frontend_dist .. "/"))
 
         if file_exists("src-tauri/binaries") then
             info("Packaging native sidecar binaries into Debian package...")
-            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/binaries"))
-            exec("cp -r src-tauri/binaries/* " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/binaries/") .. " 2>/dev/null || true")
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries"))
+            exec("cp -r src-tauri/binaries/* " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/") .. " 2>/dev/null || true")
+            exec("chmod +x " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/*") .. " 2>/dev/null || true")
         end
 
         if file_exists("src-tauri/src") then
-            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/src"))
-            exec("cp src-tauri/src/*.lua " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/src/") .. " 2>/dev/null || true")
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/src"))
+            exec("cp src-tauri/src/*.lua " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/src/") .. " 2>/dev/null || true")
         end
 
         if file_exists("src-tauri/plugins") then
             info("Packaging plugins into Debian package...")
-            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/plugins"))
-            copy_dir_recursive("src-tauri/plugins", deb_dir .. "/usr/share/" .. app_name .. "/plugins")
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/plugins"))
+            copy_dir_recursive("src-tauri/plugins", deb_dir .. "/usr/share/" .. deb_pkg_name .. "/plugins")
         elseif file_exists("plugins") then
             info("Packaging plugins into Debian package...")
-            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/plugins"))
-            copy_dir_recursive("plugins", deb_dir .. "/usr/share/" .. app_name .. "/plugins")
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/plugins"))
+            copy_dir_recursive("plugins", deb_dir .. "/usr/share/" .. deb_pkg_name .. "/plugins")
         end
 
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
             info("Packaging LuaRocks dependencies into Debian package...")
-            local rocks_dest = deb_dir .. "/usr/share/" .. app_name .. "/rocks"
+            local rocks_dest = deb_dir .. "/usr/share/" .. deb_pkg_name .. "/rocks"
             copy_dir_recursive(rocks_tree, rocks_dest)
         end
 
@@ -1634,10 +1644,10 @@ Priority: optional
 Architecture: amd64
 Maintainer: Developer <dev@example.com>
 Description: %s built with Tauri-Lua
-]], app_name, version, app_name)
+]], deb_pkg_name, version, app_name)
 
         write_file(deb_dir .. "/DEBIAN/control", control)
-        exec("dpkg-deb --build " .. shell_quote(deb_dir) .. " " .. shell_quote(target_dir .. "/deb") .. " > /dev/null")
+        exec("dpkg-deb --build " .. shell_quote(deb_dir) .. " " .. shell_quote(target_dir .. "/deb"))
         success("Finished bundle at " .. target_dir .. "/deb")
 
     elseif os_name == "Windows" then

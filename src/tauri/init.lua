@@ -186,7 +186,8 @@ local function setup_module_search_paths()
             table.insert(extra_lua_paths, exec_dir .. "/plugins/?/init.lua")
             table.insert(extra_lua_paths, exec_dir .. "/../share/plugins/?.lua")
             table.insert(extra_lua_paths, exec_dir .. "/../share/plugins/?/init.lua")
-            local pkg_name = (type(conf) == "table" and conf.package and conf.package.productName) or "app"
+            local raw_name = (type(conf) == "table" and conf.package and conf.package.productName) or "app"
+            local pkg_name = raw_name:gsub("%s+", "-"):gsub("[^%w%+%-%._]", ""):lower():gsub("^%-+", ""):gsub("%-+$", "")
             table.insert(extra_lua_paths, "/usr/share/" .. pkg_name .. "/plugins/?.lua")
             table.insert(extra_lua_paths, "/usr/share/" .. pkg_name .. "/plugins/?/init.lua")
             table.insert(extra_lua_paths, exec_dir .. "/rocks/share/lua/5.1/?.lua")

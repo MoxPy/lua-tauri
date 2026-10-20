@@ -6,13 +6,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_program(LUAJIT_BIN luajit REQUIRED)
 
-find_path(LUAJIT_INCLUDE_DIR lua.hpp
+find_path(LUAJIT_INCLUDE_DIR
+    NAMES lua.hpp lua.h
     REQUIRED
     HINTS
     /usr/include/luajit-2.1
     /usr/local/include/luajit-2.1
+    /usr/include/luajit-2.0
     /opt/homebrew/include/luajit-2.1
     ${LUAJIT_ROOT}/include
+    PATH_SUFFIXES
+    luajit-2.1
+    luajit-2.0
 )
 
 find_library(LUAJIT_LIB
@@ -20,6 +25,8 @@ find_library(LUAJIT_LIB
     REQUIRED
     HINTS
     /usr/lib
+    /usr/lib/x86_64-linux-gnu
+    /usr/lib/aarch64-linux-gnu
     /usr/local/lib
     /opt/homebrew/lib
     ${LUAJIT_ROOT}/lib
