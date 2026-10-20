@@ -1494,6 +1494,14 @@ local function cmd_build(args)
             exec("cp src-tauri/src/*.lua " .. shell_quote(res_dir .. "/") .. " 2>/dev/null || true")
         end
 
+        if file_exists("src-tauri/plugins") then
+            info("Packaging plugins into macOS App bundle...")
+            copy_dir_recursive("src-tauri/plugins", res_dir .. "/plugins")
+        elseif file_exists("plugins") then
+            info("Packaging plugins into macOS App bundle...")
+            copy_dir_recursive("plugins", res_dir .. "/plugins")
+        end
+
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
             info("Packaging LuaRocks dependencies into macOS App bundle...")
@@ -1602,6 +1610,16 @@ local function cmd_build(args)
             exec("cp src-tauri/src/*.lua " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/src/") .. " 2>/dev/null || true")
         end
 
+        if file_exists("src-tauri/plugins") then
+            info("Packaging plugins into Debian package...")
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/plugins"))
+            copy_dir_recursive("src-tauri/plugins", deb_dir .. "/usr/share/" .. app_name .. "/plugins")
+        elseif file_exists("plugins") then
+            info("Packaging plugins into Debian package...")
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/plugins"))
+            copy_dir_recursive("plugins", deb_dir .. "/usr/share/" .. app_name .. "/plugins")
+        end
+
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
             info("Packaging LuaRocks dependencies into Debian package...")
@@ -1635,6 +1653,15 @@ Description: %s built with Tauri-Lua
             exec('copy "' .. luajit_env .. '\\bin\\lua51.dll" "' .. win_dir .. '\\" 2>NUL || copy "' .. luajit_env .. '\\lua51.dll" "' .. win_dir .. '\\" 2>NUL || rem')
         end
         exec('xcopy /E /I "' .. frontend_dist .. '" "' .. win_dir .. '\\' .. frontend_dist .. '"')
+
+        if file_exists("src-tauri\\plugins") or file_exists("src-tauri/plugins") then
+            local psrc = file_exists("src-tauri\\plugins") and "src-tauri\\plugins" or "src-tauri/plugins"
+            info("Packaging plugins into Windows standalone bundle...")
+            copy_dir_recursive(psrc, win_dir .. "\\plugins")
+        elseif file_exists("plugins") then
+            info("Packaging plugins into Windows standalone bundle...")
+            copy_dir_recursive("plugins", win_dir .. "\\plugins")
+        end
 
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "\\share") or file_exists(rocks_tree .. "\\lib") or file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then

@@ -105,6 +105,9 @@ local function setup_module_search_paths()
             "./?/init.lua",
             "./src-tauri/?.lua",
             "./src-tauri/?/init.lua",
+            "./src-tauri/plugins/?.lua",
+            "./src-tauri/plugins/?/init.lua",
+            "./src-tauri/plugins/?/src/?.lua",
             "./plugins/?.lua",
             "./plugins/?/init.lua",
             "./plugins/?/src/?.lua",
@@ -168,12 +171,24 @@ local function setup_module_search_paths()
             table.insert(extra_lua_paths, res_dir .. "/src/?/init.lua")
             table.insert(extra_lua_paths, res_dir .. "/src-tauri/src/?.lua")
             table.insert(extra_lua_paths, res_dir .. "/src-tauri/src/?/init.lua")
+            table.insert(extra_lua_paths, res_dir .. "/plugins/?.lua")
+            table.insert(extra_lua_paths, res_dir .. "/plugins/?/init.lua")
+            table.insert(extra_lua_paths, res_dir .. "/plugins/?/src/?.lua")
+            table.insert(extra_lua_paths, res_dir .. "/src-tauri/plugins/?.lua")
+            table.insert(extra_lua_paths, res_dir .. "/src-tauri/plugins/?/init.lua")
             table.insert(extra_lua_paths, res_dir .. "/rocks/share/lua/5.1/?.lua")
             table.insert(extra_lua_paths, res_dir .. "/rocks/share/lua/5.1/?/init.lua")
             table.insert(extra_c_paths,   res_dir .. "/rocks/lib/lua/5.1/?.so")
             table.insert(extra_c_paths,   res_dir .. "/rocks/lib/lua/5.1/?.dylib")
         else
             -- Linux / Windows standalone or installed packages
+            table.insert(extra_lua_paths, exec_dir .. "/plugins/?.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/plugins/?/init.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/../share/plugins/?.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/../share/plugins/?/init.lua")
+            local pkg_name = (type(conf) == "table" and conf.package and conf.package.productName) or "app"
+            table.insert(extra_lua_paths, "/usr/share/" .. pkg_name .. "/plugins/?.lua")
+            table.insert(extra_lua_paths, "/usr/share/" .. pkg_name .. "/plugins/?/init.lua")
             table.insert(extra_lua_paths, exec_dir .. "/rocks/share/lua/5.1/?.lua")
             table.insert(extra_lua_paths, exec_dir .. "/rocks/share/lua/5.1/?/init.lua")
             table.insert(extra_lua_paths, exec_dir .. "/../Resources/rocks/share/lua/5.1/?.lua")
