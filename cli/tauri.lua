@@ -468,7 +468,7 @@ end
 local function shell_quote(str)
     local s = tostring(str)
     if ffi.os == "Windows" then
-        s = s:gsub("%%", "%%%%")
+        s = s:gsub("%%", "^%%")
         s = s:gsub('(\\*)"', '%1%1\\"')
         local trailing_bs = s:match("(\\+)$")
         if trailing_bs then
@@ -871,16 +871,16 @@ local function get_installed_rock_details(rocks_dir, rock_name)
     }
 end
 
-local function read_lockfile()
-    local lock_path = get_lockfile_path()
+local function read_lockfile(custom_path)
+    local lock_path = custom_path or get_lockfile_path()
     if not file_exists(lock_path) then return nil end
     local content = read_file(lock_path)
     if not content or content == "" then return nil end
     return json.decode(content)
 end
 
-local function save_lockfile(lock_data)
-    local lock_path = get_lockfile_path()
+local function save_lockfile(lock_data, custom_path)
+    local lock_path = custom_path or get_lockfile_path()
     local lines = {}
     table.insert(lines, "{")
     table.insert(lines, '  "version": 1,')
@@ -1262,7 +1262,7 @@ end
 -- ==========================================================
 local function cmd_dev(args)
     local conf, conf_path = load_config()
-    local app_name, version = get_app_meta(conf)
+    local app_name, version, identifier = get_app_meta(conf)
     local build_conf = conf.build or {}
 
     info("Starting Tauri-Lua development for `" .. app_name .. "` v" .. version)

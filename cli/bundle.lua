@@ -7,7 +7,7 @@ local version = "1.0.0"
 local function shell_quote(str)
     local s = tostring(str)
     if ffi.os == "Windows" then
-        s = s:gsub("%%", "%%%%")
+        s = s:gsub("%%", "^%%")
         s = s:gsub('(\\*)"', '%1%1\\"')
         local trailing_bs = s:match("(\\+)$")
         if trailing_bs then

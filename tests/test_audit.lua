@@ -237,8 +237,8 @@ test("Lockfile serialization produces deterministic JSON structure", function()
     }
     local temp_lock = "target/test_tauri.lock"
     os.execute("mkdir -p target 2>/dev/null")
-    cli.save_lockfile(test_lock)
-    local loaded = cli.read_lockfile()
+    cli.save_lockfile(test_lock, temp_lock)
+    local loaded = cli.read_lockfile(temp_lock)
     assert(loaded and loaded.version == 1, "Lockfile version must be 1")
     assert(loaded.rocks and loaded.rocks.inspect, "Inspect rock must be present in lockfile")
     assert(loaded.rocks.inspect.version == "3.1.3-1", "Exact pinned version recorded")
