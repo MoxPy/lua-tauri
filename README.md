@@ -1623,66 +1623,43 @@ When running `./lua-tauri build`:
 2. Any native executable files inside are signed during the macOS codesigning phase.
 3. The resulting `.dmg` and `.app` bundles are completely self-contained ("batteries-included") and operate independently of development directories.
 
-#### Resolving Binary Paths at Runtime in Lua
-Use `_NSGetExecutablePath` via LuaJIT FFI to resolve the path within the macOS application bundle, with a fallback for local `./lua-tauri dev`:
+#### Native Runtime Sidecar API (`app:spawn_sidecar`)
+`lua-tauri` provides native, zero-configuration sidecar process management built directly into the engine. The framework automatically discovers platform-specific binaries (`x86_64`, `arm64`, `.exe`), loads `.env` variables, passes CLI arguments, manages PID tracking, and guarantees automatic termination when the application window closes:
 
 ```lua
-local sidecar = {}
+local Tauri = require("tauri")
+local app = Tauri.init()
 
-function sidecar.get_path()
-    local ffi = require("ffi")
-    if ffi.os == "OSX" then
-        ffi.cdef[[ int _NSGetExecutablePath(char* buf, uint32_t* bufsize); ]]
-        local buf = ffi.new("char[1024]")
-        local size = ffi.new("uint32_t[1]", 1024)
-        if ffi.C._NSGetExecutablePath(buf, size) == 0 then
-            local full = ffi.string(buf)
-            local macos_dir = full:match("^(.*)/Contents/MacOS/")
-            if macos_dir then
-                local res_bin = macos_dir .. "/Contents/Resources/binaries/api-server"
-                local f = io.open(res_bin, "r")
-                if f then f:close(); return res_bin end
-            end
-        end
-    end
-    -- Fallback for local development
-    return "src-tauri/binaries/api-server"
-end
-
-function sidecar.start(port)
-    local bin = sidecar.get_path()
-    local dir = bin:match("^(.*)/[^/]+$") or "."
-    local cmd = string.format("cd \"%s\" && \"%s\" --port %d > /tmp/sidecar.log 2>&1 & echo $!", dir, bin, port)
-    local handle = io.popen(cmd)
-    local pid = handle and tonumber(handle:read("*l"))
-    if handle then handle:close() end
-    return pid
-end
-
-return sidecar
-```
-
-#### Lifecycle Management
-Register lifecycle hooks in `main.lua` to ensure background sidecars terminate gracefully when the user closes the application:
-
-```lua
-local sidecar = require("sidecar")
-local pid = nil
-
--- Launch sidecar on main isolate thread only
+-- Launch native sidecar on the main thread (worker isolates do not duplicate sidecars)
 if not __IS_ISOLATE_WORKER__ then
-    pid = sidecar.start(8060)
-
-    app:on_window_event(function(event)
-        if event.event == "close-requested" and pid then
-            os.execute("kill -15 " .. tostring(pid) .. " 2>/dev/null")
-            os.execute("kill -9 " .. tostring(pid) .. " 2>/dev/null")
-        end
-    end)
-
-    app:create_main_window()
+    local api = app:spawn_sidecar("api-server", {
+        port = 8060,
+        ipc_command = "api:get_endpoint" -- Automatically registers IPC command for frontend
+    })
+    
+    print("[SIDECAR] Running at:", api.base_url, "PID:", api.pid)
 end
+
+app:create_main_window()
 ```
+
+##### Supported Options
+| Option | Type | Description |
+|---|---|---|
+| `port` | `number` | Sets the listening port and injects `PORT=<port>` into the environment |
+| `host` | `string` | Bind host (default: `"127.0.0.1"`) |
+| `args` | `table` | Array of command-line flags and arguments |
+| `env` | `table` | Additional environment variables |
+| `env_file` | `string` | Custom path to `.env` file (auto-discovered if omitted) |
+| `ipc_command` | `string` | Command name to automatically register for web frontend access |
+| `auto_kill` | `boolean` | Automatically terminate sidecar when app exits (default: `true`) |
+
+##### Sidecar Object Methods
+- `sidecar.pid`: The active process ID.
+- `sidecar.base_url`: Convenient URL string (e.g. `http://127.0.0.1:8060`).
+- `sidecar:is_running()`: Returns `true` if the process is currently active.
+- `sidecar:kill(sig)`: Terminates the process (default: SIGTERM followed by SIGKILL).
+- `sidecar:to_table()`: Serializes sidecar metadata for IPC response.
 
 ---
 

@@ -26,6 +26,54 @@ end
 -- Relative cwd paths (./  ../) are restricted to DEV mode only, activated
 -- by setting the TAURILUA_DEV=1 environment variable (set by `lua-tauri dev`).
 -- ============================================================================
+local function get_executable_dir()
+    local dir = nil
+    pcall(function()
+        if ffi.os == "OSX" then
+            ffi.cdef[[
+                int _NSGetExecutablePath(char* buf, uint32_t* bufsize);
+            ]]
+            local buf = ffi.new("char[1024]")
+            local size = ffi.new("uint32_t[1]", 1024)
+            if ffi.C._NSGetExecutablePath(buf, size) == 0 then
+                local full_path = ffi.string(buf)
+                dir = full_path:match("^(.*)/[^/]+$")
+            end
+        elseif ffi.os == "Linux" then
+            ffi.cdef[[
+                ssize_t readlink(const char *path, char *buf, size_t bufsiz);
+            ]]
+            local buf = ffi.new("char[1024]")
+            local len = ffi.C.readlink("/proc/self/exe", buf, 1024)
+            if len > 0 then
+                local full_path = ffi.string(buf, len)
+                dir = full_path:match("^(.*)/[^/]+$")
+            end
+        elseif ffi.os == "Windows" then
+            ffi.cdef[[
+                uint32_t GetModuleFileNameW(void* hModule, uint16_t* lpFilename, uint32_t nSize);
+                int WideCharToMultiByte(uint32_t CodePage, uint32_t dwFlags, const uint16_t* lpWideCharStr, int cchWideChar, char* lpMultiByteStr, int cbMultiByte, const char* lpDefaultChar, int* lpUsedDefaultChar);
+            ]]
+            local k32 = nil
+            pcall(function() k32 = ffi.load("kernel32") end)
+            local fn = (k32 and k32.GetModuleFileNameW) or ffi.C.GetModuleFileNameW
+            local wbuf = ffi.new("uint16_t[1024]")
+            local wlen = fn(nil, wbuf, 1024)
+            if wlen > 0 then
+                local wctomb = (k32 and k32.WideCharToMultiByte) or ffi.C.WideCharToMultiByte
+                local ulen = wctomb(65001, 0, wbuf, wlen, nil, 0, nil, nil)
+                if ulen > 0 then
+                    local ubuf = ffi.new("char[?]", ulen)
+                    wctomb(65001, 0, wbuf, wlen, ubuf, ulen, nil, nil)
+                    local full_path = ffi.string(ubuf, ulen):gsub("\\", "/")
+                    dir = full_path:match("^(.*)/[^/]+$")
+                end
+            end
+        end
+    end)
+    return dir
+end
+
 local function setup_module_search_paths()
     -- Detect dev mode via env variable (set before Lua state is created).
     -- __TAURI_DEV__ is injected later by the C host, so we cannot use it here.
@@ -39,54 +87,6 @@ local function setup_module_search_paths()
     end
 
     local dev_mode = is_dev_mode()
-
-    local function get_executable_dir()
-        local dir = nil
-        pcall(function()
-            if ffi.os == "OSX" then
-                ffi.cdef[[
-                    int _NSGetExecutablePath(char* buf, uint32_t* bufsize);
-                ]]
-                local buf = ffi.new("char[1024]")
-                local size = ffi.new("uint32_t[1]", 1024)
-                if ffi.C._NSGetExecutablePath(buf, size) == 0 then
-                    local full_path = ffi.string(buf)
-                    dir = full_path:match("^(.*)/[^/]+$")
-                end
-            elseif ffi.os == "Linux" then
-                ffi.cdef[[
-                    ssize_t readlink(const char *path, char *buf, size_t bufsiz);
-                ]]
-                local buf = ffi.new("char[1024]")
-                local len = ffi.C.readlink("/proc/self/exe", buf, 1024)
-                if len > 0 then
-                    local full_path = ffi.string(buf, len)
-                    dir = full_path:match("^(.*)/[^/]+$")
-                end
-            elseif ffi.os == "Windows" then
-                ffi.cdef[[
-                    uint32_t GetModuleFileNameW(void* hModule, uint16_t* lpFilename, uint32_t nSize);
-                    int WideCharToMultiByte(uint32_t CodePage, uint32_t dwFlags, const uint16_t* lpWideCharStr, int cchWideChar, char* lpMultiByteStr, int cbMultiByte, const char* lpDefaultChar, int* lpUsedDefaultChar);
-                ]]
-                local k32 = nil
-                pcall(function() k32 = ffi.load("kernel32") end)
-                local fn = (k32 and k32.GetModuleFileNameW) or ffi.C.GetModuleFileNameW
-                local wbuf = ffi.new("uint16_t[1024]")
-                local wlen = fn(nil, wbuf, 1024)
-                if wlen > 0 then
-                    local wctomb = (k32 and k32.WideCharToMultiByte) or ffi.C.WideCharToMultiByte
-                    local ulen = wctomb(65001, 0, wbuf, wlen, nil, 0, nil, nil)
-                    if ulen > 0 then
-                        local ubuf = ffi.new("char[?]", ulen)
-                        wctomb(65001, 0, wbuf, wlen, ubuf, ulen, nil, nil)
-                        local full_path = ffi.string(ubuf, ulen):gsub("\\", "/")
-                        dir = full_path:match("^(.*)/[^/]+$")
-                    end
-                end
-            end
-        end)
-        return dir
-    end
 
     local exec_dir = get_executable_dir()
 
@@ -1880,6 +1880,330 @@ local TAURI_CLIENT_SCRIPT = [[
 })();
 ]]
 
+
+-- ============================================================================
+-- Native Sidecar Process Manager
+-- Spawns, manages, and terminates background native binaries bundled with the app.
+-- Automatically resolves target architecture, platform bundles, and lifecycle.
+-- ============================================================================
+local Sidecar = {}
+Sidecar.__index = Sidecar
+
+local function file_readable(path)
+    if not path or path == '' then return false end
+    local f = io.open(path, 'r')
+    if f then
+        f:close()
+        return true
+    end
+    return false
+end
+
+local function sh_quote(s)
+    s = tostring(s or '')
+    return "'" .. s:gsub("'", "'\''") .. "'"
+end
+
+local function parse_env_file(path)
+    local vars = {}
+    local f = io.open(path, 'r')
+    if not f then return vars end
+    for line in f:lines() do
+        line = line:gsub('^%s+', ''):gsub('%s+$', '')
+        if line ~= '' and not line:match('^#') then
+            local k, v = line:match('^([%w_]+)%s*=%s*(.*)$')
+            if k and v then
+                if (v:sub(1,1) == '"' and v:sub(-1,-1) == '"') or
+                   (v:sub(1,1) == "'" and v:sub(-1,-1) == "'") then
+                    v = v:sub(2, -2)
+                end
+                vars[k] = v
+            end
+        end
+    end
+    f:close()
+    return vars
+end
+
+function Sidecar.resolve_path(name, app_name)
+    if not name or name == '' then return nil end
+    app_name = app_name or 'tauri-lua-app'
+
+    local os_name = ffi.os
+    local arch_name = ffi.arch
+    local norm_arch = (arch_name == 'arm64' or arch_name == 'aarch64') and 'arm64' or 'amd64'
+
+    -- Generate target binary candidates
+    local candidates = {}
+    if os_name == 'Windows' then
+        table.insert(candidates, name .. '.exe')
+        table.insert(candidates, name .. '-windows-' .. norm_arch .. '.exe')
+        table.insert(candidates, name)
+    elseif os_name == 'Linux' then
+        table.insert(candidates, name .. '-linux-' .. norm_arch)
+        if norm_arch == 'arm64' then
+            table.insert(candidates, name .. '-linux-aarch64')
+        else
+            table.insert(candidates, name .. '-linux-x86_64')
+        end
+        table.insert(candidates, name)
+    else -- OSX / macOS
+        table.insert(candidates, name .. '-darwin-' .. norm_arch)
+        table.insert(candidates, name .. '-macos-' .. norm_arch)
+        table.insert(candidates, name)
+    end
+
+    local exec_dir = get_executable_dir()
+    local search_dirs = {}
+
+    -- 1. macOS Bundle Resources (.app/Contents/Resources/binaries)
+    if exec_dir and exec_dir:match('/Contents/MacOS$') then
+        local res_dir = exec_dir:gsub('/MacOS$', '/Resources')
+        table.insert(search_dirs, res_dir .. '/binaries')
+        table.insert(search_dirs, res_dir)
+    end
+
+    -- 2. Linux System packages (/usr/share/<app-name>/binaries)
+    if os_name == 'Linux' then
+        local clean_name = app_name:gsub('[^%w_%- ]', '')
+        local slug_name = clean_name:lower():gsub('%s+', '-')
+        table.insert(search_dirs, '/usr/share/' .. clean_name .. '/binaries')
+        table.insert(search_dirs, '/usr/share/' .. slug_name .. '/binaries')
+        table.insert(search_dirs, '/usr/local/share/' .. clean_name .. '/binaries')
+        table.insert(search_dirs, '/usr/local/share/' .. slug_name .. '/binaries')
+        table.insert(search_dirs, '/opt/' .. clean_name .. '/binaries')
+        table.insert(search_dirs, '/opt/' .. slug_name .. '/binaries')
+        local appdir = os.getenv('APPDIR')
+        if appdir and appdir ~= '' then
+            table.insert(search_dirs, appdir .. '/usr/share/' .. clean_name .. '/binaries')
+            table.insert(search_dirs, appdir .. '/usr/share/' .. slug_name .. '/binaries')
+        end
+    end
+
+    -- 3. Standalone binary-adjacent paths
+    if exec_dir then
+        table.insert(search_dirs, exec_dir .. '/binaries')
+        table.insert(search_dirs, exec_dir)
+    end
+
+    -- 4. Development mode relative paths
+    table.insert(search_dirs, 'src-tauri/binaries')
+    table.insert(search_dirs, 'binaries')
+    table.insert(search_dirs, './src-tauri/binaries')
+    table.insert(search_dirs, './binaries')
+    table.insert(search_dirs, '../src-tauri/binaries')
+    table.insert(search_dirs, '../binaries')
+
+    for _, dir in ipairs(search_dirs) do
+        for _, bin_file in ipairs(candidates) do
+            local full_path = dir .. '/' .. bin_file
+            if file_readable(full_path) then
+                if os_name ~= 'Windows' then
+                    pcall(os.execute, 'chmod +x ' .. sh_quote(full_path) .. ' 2>/dev/null')
+                end
+                return full_path
+            end
+        end
+    end
+
+    if file_readable(name) then
+        return name
+    end
+
+    return nil
+end
+
+function Sidecar.find_env_file(bin_path, app_name, custom_env_file)
+    if custom_env_file and file_readable(custom_env_file) then
+        return custom_env_file
+    end
+
+    local search_paths = {}
+    if bin_path then
+        local bin_dir = bin_path:match('^(.*)/[^/]+$')
+        if bin_dir then
+            table.insert(search_paths, bin_dir .. '/.env')
+            local parent_dir = bin_dir:match('^(.*)/[^/]+$')
+            if parent_dir then
+                table.insert(search_paths, parent_dir .. '/.env')
+            end
+        end
+    end
+
+    local exec_dir = get_executable_dir()
+    if exec_dir and exec_dir:match('/Contents/MacOS$') then
+        local res_dir = exec_dir:gsub('/MacOS$', '/Resources')
+        table.insert(search_paths, res_dir .. '/binaries/.env')
+        table.insert(search_paths, res_dir .. '/.env')
+    end
+
+    if app_name and ffi.os == 'Linux' then
+        local slug_name = app_name:lower():gsub('%s+', '-')
+        table.insert(search_paths, '/usr/share/' .. app_name .. '/binaries/.env')
+        table.insert(search_paths, '/etc/' .. slug_name .. '/.env')
+    end
+
+    table.insert(search_paths, 'src-tauri/binaries/.env')
+    table.insert(search_paths, 'src-tauri/.env')
+    table.insert(search_paths, './src-tauri/binaries/.env')
+    table.insert(search_paths, './src-tauri/.env')
+    table.insert(search_paths, '.env')
+    table.insert(search_paths, './.env')
+    table.insert(search_paths, '../.env')
+
+    for _, p in ipairs(search_paths) do
+        if file_readable(p) then
+            return p
+        end
+    end
+    return nil
+end
+
+function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
+    local app_instance = nil
+    local name = nil
+    local opts = nil
+
+    if type(self_or_name) == 'table' and (self_or_name.config or self_or_name == Tauri) then
+        app_instance = self_or_name
+        name = name_or_opts
+        opts = maybe_opts or {}
+    else
+        name = self_or_name
+        opts = name_or_opts or {}
+        app_instance = maybe_opts or g_tauri_instance
+    end
+
+    local app_name = (app_instance and app_instance.config and (app_instance.config.productName or (app_instance.config.package and app_instance.config.package.name))) or 'tauri-lua-app'
+    local bin_path = Sidecar.resolve_path(name, app_name)
+    if not bin_path then
+        error(string.format("Sidecar binary '%s' not found for platform %s (%s)", tostring(name), ffi.os, ffi.arch))
+    end
+
+    local env_file = Sidecar.find_env_file(bin_path, app_name, opts.env_file)
+    local env_vars = env_file and parse_env_file(env_file) or {}
+
+    if opts.env and type(opts.env) == 'table' then
+        for k, v in pairs(opts.env) do
+            env_vars[k] = tostring(v)
+        end
+    end
+
+    local port = opts.port or tonumber(env_vars['PORT']) or 8060
+    env_vars['PORT'] = tostring(port)
+    if not env_vars['FRONTEND_URL'] then
+        env_vars['FRONTEND_URL'] = '*'
+    end
+
+    local host = opts.host or '127.0.0.1'
+    local bin_dir = opts.cwd or bin_path:match('^(.*)/[^/]+$') or '.'
+    local log_file = opts.log_file or string.format('/tmp/%s_%s.log', app_name:lower():gsub('[^%w_]', '_'), tostring(name):lower():gsub('[^%w_]', '_'))
+
+    local sc = setmetatable({
+        name = name,
+        app_name = app_name,
+        binary_path = bin_path,
+        env_file = env_file,
+        env = env_vars,
+        host = host,
+        port = port,
+        base_url = string.format('http://%s:%d', host, port),
+        log_file = log_file,
+        pid = nil,
+        auto_kill = opts.auto_kill ~= false
+    }, Sidecar)
+
+    local env_parts = {}
+    for k, v in pairs(env_vars) do
+        if k:match('^[%w_]+$') then
+            table.insert(env_parts, k .. '=' .. sh_quote(v))
+        end
+    end
+    local env_str = table.concat(env_parts, ' ')
+    if env_str ~= '' then env_str = env_str .. ' ' end
+
+    local args_parts = {}
+    if opts.args and type(opts.args) == 'table' then
+        for _, a in ipairs(opts.args) do
+            table.insert(args_parts, sh_quote(a))
+        end
+    elseif opts.port then
+        table.insert(args_parts, '--port')
+        table.insert(args_parts, sh_quote(port))
+    end
+    local args_str = #args_parts > 0 and (' ' .. table.concat(args_parts, ' ')) or ''
+
+    if ffi.os == 'Windows' then
+        local win_args = ''
+        if #args_parts > 0 then win_args = ' ' .. table.concat(args_parts, ' ') end
+        local cmd = string.format('start /B "" %s%s > %s 2>&1', sh_quote((bin_path:gsub("/", [[\]]))), win_args, sh_quote((log_file:gsub("/", [[\]]))))
+        os.execute(cmd)
+    else
+        local cmd = string.format('cd %s && %s%s%s > %s 2>&1 & echo $!',
+            sh_quote(bin_dir),
+            env_str,
+            sh_quote(bin_path),
+            args_str,
+            sh_quote(log_file)
+        )
+        local handle = io.popen(cmd)
+        if handle then
+            local pid_str = handle:read('*l')
+            handle:close()
+            sc.pid = tonumber(pid_str)
+        end
+    end
+
+    if app_instance then
+        app_instance.sidecars = app_instance.sidecars or {}
+        table.insert(app_instance.sidecars, sc)
+
+        if opts.ipc_command then
+            app_instance:register(opts.ipc_command, function()
+                return sc:to_table()
+            end)
+        end
+    end
+
+    return sc
+end
+
+function Sidecar:is_running()
+    if not self.pid or self.pid <= 0 then return false end
+    if ffi.os == 'Windows' then return true end
+    local code = os.execute(string.format('kill -0 %d 2>/dev/null', self.pid))
+    return code == 0
+end
+
+function Sidecar:kill(sig)
+    if self.pid and self.pid > 0 then
+        local s = sig or 15
+        pcall(os.execute, string.format('kill -%d %d 2>/dev/null', s, self.pid))
+        if not sig then
+            pcall(os.execute, string.format('(sleep 0.1 && kill -9 %d 2>/dev/null) &', self.pid))
+        end
+        self.pid = nil
+    end
+    return true
+end
+
+function Sidecar:stop()
+    return self:kill()
+end
+
+function Sidecar:to_table()
+    return {
+        name = self.name,
+        pid = self.pid,
+        host = self.host,
+        port = self.port,
+        base_url = self.base_url,
+        running = self:is_running(),
+        binary_path = self.binary_path,
+        log_file = self.log_file
+    }
+end
+
 local Tauri = {}
 Tauri.__index = Tauri
 Tauri._filter_absolute_only = filter_absolute_only
@@ -1936,6 +2260,7 @@ function Tauri.new(config)
     local ok_theme, theme_val = pcall(function() return ffi.string(clib.platform_get_theme()) end)
     self._current_theme = ok_theme and theme_val or "light"
     self.json = json
+    self.sidecars = {}
     self.state = State.new(json)
 
     self.clipboard = {
@@ -1992,6 +2317,14 @@ function Tauri:set_csp(csp)
     if type(csp) == "string" and csp ~= "" then
         clib.platform_set_csp(csp)
     end
+end
+
+function Tauri:spawn_sidecar(name, opts)
+    return Sidecar.spawn(self, name, opts)
+end
+
+function Tauri:sidecar(name, opts)
+    return Sidecar.spawn(self, name, opts)
 end
 
 function Tauri:on_window_event(cb)
@@ -2892,6 +3225,14 @@ function __TAURI_DISPATCH_WINDOW_CLOSE__(label)
     end
 
     g_tauri_instance:emit("tauri://close-requested", { label = event.label })
+    if not event._prevented and g_tauri_instance and g_tauri_instance.sidecars then
+        for _, sc in ipairs(g_tauri_instance.sidecars) do
+            if sc.auto_kill ~= false then
+                pcall(function() sc:kill() end)
+            end
+        end
+    end
+
 
     return event._prevented and 1 or 0
 end
@@ -3022,6 +3363,8 @@ function __TAURI_DISPATCH_FILE_DROP__(label, event_type, payload_json)
 end
 
 Tauri.Menu = Menu
+Tauri.Sidecar = Sidecar
+Tauri.spawn_sidecar = Sidecar.spawn
 Tauri.Submenu = Submenu
 Tauri.MenuItem = MenuItem
 Tauri.CheckMenuItem = CheckMenuItem
@@ -3065,6 +3408,10 @@ return {
         def = def or {}
         def.name = name
         return def
+    end,
+    Sidecar = Sidecar,
+    spawn_sidecar = function(name, opts)
+        return Sidecar.spawn(name, opts, g_tauri_instance)
     end,
     Menu = Menu,
     Submenu = Submenu,
