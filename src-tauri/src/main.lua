@@ -17,13 +17,15 @@ if not app.state:has("visit_count") then
 end
 
 app:register("increment_counter", function()
-    local current = app.state:get("visit_count") or 0
-    local next_val = current + 1
-    app.state:set("visit_count", next_val)
+    local next_val = app.state:update("visit_count", function(current)
+        return (current or 0) + 1
+    end)
 
-    local meta = app.state:get("session_meta") or {}
-    meta.last_worker_id = __ISOLATE_WORKER_ID__ or 0
-    app.state:set("session_meta", meta)
+    app.state:update("session_meta", function(meta)
+        meta = meta or {}
+        meta.last_worker_id = __ISOLATE_WORKER_ID__ or 0
+        return meta
+    end)
 
     return {
         count = next_val,
@@ -59,14 +61,15 @@ app:register("parallel_workload", function(payload)
         end
     end
 
-    local current = app.state:get("visit_count") or 0
-    app.state:set("visit_count", current + 1)
+    local next_val = app.state:update("visit_count", function(current)
+        return (current or 0) + 1
+    end)
 
     return {
         isolateId = isolate_id,
         limit = limit,
         primeCount = count,
-        totalCalls = current + 1,
+        totalCalls = next_val,
         elapsedSeconds = os.clock() - start_time
     }
 end)

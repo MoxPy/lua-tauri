@@ -114,9 +114,8 @@ inline std::string resolve_config_json(bool dev_mode, const unsigned char *embed
     if (dev_mode) {
         if (file_exists("src-tauri/tauri.conf.json")) return read_file_string("src-tauri/tauri.conf.json");
     }
-    std::string bundle_conf = resolve_bundle_resource("tauri.conf.json");
-    if (!bundle_conf.empty()) return read_file_string(bundle_conf);
 
+    // In release mode (!dev_mode), strictly enforce embedded configuration from binary headers
     if (embedded_json && embedded_len > 0) {
         return std::string((const char *)embedded_json, embedded_len);
     }

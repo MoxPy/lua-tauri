@@ -78,7 +78,11 @@ Tauri-Lua adheres to a **Deny-by-Default** capability model:
 * Unauthenticated archive download and extraction has been completely removed from the runtime core. Calls to `tauri:updater:check` and `tauri:updater:install` fail closed with an explicit error.
 
 ### 4. Development Mode vs Release Isolation (`TAURILUA_DEV`)
-* **Release Mode:** The runtime does not resolve or load loose files from the current working directory (`CWD`). Scripts and configuration must be embedded into the binary as pre-compiled LuaJIT bytecode and compiled headers (`tauri_bc.h`, `main_bc.h`, `config_json.h`).
+* **Release Mode:** The runtime does not resolve or load loose files from the current working directory (`CWD`) or bundle `Resources`. Scripts and configuration must be embedded into the binary as pre-compiled LuaJIT bytecode and compiled headers (`tauri_bc.h`, `main_bc.h`, `config_json.h`). `ResourceResolver::resolve_config_json(false, ...)` ignores any loose `tauri.conf.json` on disk to prevent unauthorized capability escalation.
+* **Release Packaging:** `lua-tauri build` strictly excludes plain-text Lua source files (`src-tauri/src/*`) and `tauri.conf.json` from the output application bundle.
+* **macOS Hardened Runtime & Code Signing:**
+  - `src-tauri/entitlements.plist` strictly enables only `com.apple.security.cs.allow-jit` (required for LuaJIT JIT compiler pages) and `com.apple.security.network.client`. Insecure entitlements (`com.apple.security.cs.allow-unsigned-executable-memory` and `com.apple.security.cs.disable-library-validation`) are removed.
+  - Release packaging signs all bundled dynamic libraries (`.dylib`, `.so`) individually before signing the application bundle with `--options runtime` and `--entitlements src-tauri/entitlements.plist`, avoiding deprecated `--deep`.
 * **Development Mode (`TAURILUA_DEV=1`):** Resolves local workspace scripts and assets for hot-reloading, allows connection to local development HTTP/WebSocket servers, and relaxes CSP `script-src` to include `'unsafe-inline'`.
 
 ---

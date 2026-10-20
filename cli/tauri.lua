@@ -33,109 +33,401 @@ local function err(msg)     log_tag("Error", colors.red, msg) end
 local function running(msg) log_tag("Running", colors.cyan, colors.dim .. "`" .. msg .. "`" .. colors.reset) end
 
 -- ==========================================================
--- Simple Pure-Lua JSON Parser (Encode & Decode)
+-- Strict RFC 8259 JSON Parser (Encode & Decode)
 -- ==========================================================
 local json = {}
 
-local function escape_str(s)
-    local map = { ['\\'] = '\\\\', ['"'] = '\\"', ['\b'] = '\\b', ['\f'] = '\\f', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t' }
-    return s:gsub('[\\"\b\f\n\r\t]', map)
+local null_mt = {
+    __tostring = function() return "null" end,
+    __is_json_null = true
+}
+json.null = setmetatable({}, null_mt)
+
+local array_mt = {
+    __tostring = function() return "[]" end,
+    __is_json_array = true
+}
+json.empty_array = setmetatable({}, array_mt)
+json.array = function(t)
+    return setmetatable(t or {}, array_mt)
 end
 
-function json.encode(val)
+local function utf8_encode(cp)
+    if cp < 0x80 then
+        return string.char(cp)
+    elseif cp < 0x800 then
+        return string.char(0xC0 + math.floor(cp / 0x40), 0x80 + (cp % 0x40))
+    elseif cp < 0x10000 then
+        return string.char(0xE0 + math.floor(cp / 0x1000), 0x80 + (math.floor(cp / 0x40) % 0x40), 0x80 + (cp % 0x40))
+    else
+        return string.char(
+            0xF0 + math.floor(cp / 0x40000),
+            0x80 + (math.floor(cp / 0x1000) % 0x40),
+            0x80 + (math.floor(cp / 0x40) % 0x40),
+            0x80 + (cp % 0x40)
+        )
+    end
+end
+
+local escape_map = {
+    ['"'] = '\\"',
+    ['\\'] = '\\\\',
+    ['\b'] = '\\b',
+    ['\f'] = '\\f',
+    ['\n'] = '\\n',
+    ['\r'] = '\\r',
+    ['\t'] = '\\t'
+}
+
+local function encode_string(s)
+    return '"' .. s:gsub('[%z\1-\31\\"]', function(c)
+        return escape_map[c] or string.format('\\u%04x', string.byte(c))
+    end) .. '"'
+end
+
+function json.encode(val, visited)
+    visited = visited or {}
     local t = type(val)
-    if t == "nil" then return "null"
-    elseif t == "boolean" then return val and "true" or "false"
-    elseif t == "number" then return tostring(val)
-    elseif t == "string" then return '"' .. escape_str(val) .. '"'
+    if val == nil or val == json.null or (t == "table" and getmetatable(val) and getmetatable(val).__is_json_null) then
+        return "null"
+    elseif t == "boolean" then
+        return val and "true" or "false"
+    elseif t == "number" then
+        if val ~= val then
+            error("JSON encode error: NaN is not allowed in RFC 8259")
+        elseif val == math.huge or val == -math.huge then
+            error("JSON encode error: Infinity is not allowed in RFC 8259")
+        end
+        if math.floor(val) == val and math.abs(val) < 1e15 then
+            return string.format("%.0f", val)
+        else
+            return string.format("%.17g", val)
+        end
+    elseif t == "string" then
+        return encode_string(val)
     elseif t == "table" then
+        if visited[val] then
+            error("JSON encode error: circular reference detected")
+        end
+        visited[val] = true
+
+        local mt = getmetatable(val)
+        local is_explicit_array = (mt and mt.__is_json_array == true) or (val == json.empty_array)
+
         local is_array = true
         local max_idx = 0
-        for k, v in pairs(val) do
+        local count = 0
+        for k, _ in pairs(val) do
+            count = count + 1
             if type(k) == "number" and k > 0 and math.floor(k) == k then
                 if k > max_idx then max_idx = k end
             else
                 is_array = false
-                break
             end
         end
-        if is_array then
-            local items = {}
-            for i = 1, max_idx do items[i] = json.encode(val[i]) end
-            return "[" .. table.concat(items, ",") .. "]"
-        else
-            local fields = {}
-            for k, v in pairs(val) do
-                table.insert(fields, string.format("%q:%s", tostring(k), json.encode(v)))
-            end
-            return "{" .. table.concat(fields, ",") .. "}"
-        end
-    end
-    return "null"
-end
 
-local function parse_value(str, idx)
-    idx = str:find("%S", idx) or idx
-    local char = str:sub(idx, idx)
-    if char == "{" then
-        local obj = {}
-        idx = idx + 1
-        while true do
-            idx = str:find("%S", idx) or idx
-            if str:sub(idx, idx) == "}" then return obj, idx + 1 end
-            if str:sub(idx, idx) == "," then idx = idx + 1 end
-            idx = str:find("%S", idx) or idx
-            if str:sub(idx, idx) == "}" then return obj, idx + 1 end
-            local key, next_idx = parse_value(str, idx)
-            idx = str:find("%S", next_idx) or next_idx
-            if str:sub(idx, idx) == ":" then idx = idx + 1 end
-            local val
-            val, idx = parse_value(str, idx)
-            obj[key] = val
-        end
-    elseif char == "[" then
-        local arr = {}
-        idx = idx + 1
-        while true do
-            idx = str:find("%S", idx) or idx
-            if str:sub(idx, idx) == "]" then return arr, idx + 1 end
-            if str:sub(idx, idx) == "," then idx = idx + 1 end
-            idx = str:find("%S", idx) or idx
-            if str:sub(idx, idx) == "]" then return arr, idx + 1 end
-            local val
-            val, idx = parse_value(str, idx)
-            table.insert(arr, val)
-        end
-    elseif char == '"' then
-        local end_idx = idx + 1
-        while true do
-            end_idx = str:find('"', end_idx)
-            if not end_idx then return "", #str + 1 end
-            local backslashes = 0
-            local b_idx = end_idx - 1
-            while b_idx >= idx and str:sub(b_idx, b_idx) == "\\" do
-                backslashes = backslashes + 1
-                b_idx = b_idx - 1
+        if count == 0 then
+            visited[val] = nil
+            if is_explicit_array then
+                return "[]"
             end
-            if backslashes % 2 == 0 then break end
-            end_idx = end_idx + 1
+            return "{}"
         end
-        local val = str:sub(idx + 1, end_idx - 1)
-        val = val:gsub('\\"', '"'):gsub('\\\\', '\\'):gsub('\\n', '\n'):gsub('\\r', '\r'):gsub('\\t', '\t')
-        return val, end_idx + 1
-    elseif str:sub(idx, idx + 3) == "true" then return true, idx + 4
-    elseif str:sub(idx, idx + 4) == "false" then return false, idx + 5
-    elseif str:sub(idx, idx + 3) == "null" then return nil, idx + 4
+
+        if (is_array and max_idx == count) or (is_explicit_array and is_array) then
+            local parts = {}
+            for i = 1, max_idx do
+                parts[i] = json.encode(val[i], visited)
+            end
+            visited[val] = nil
+            return "[" .. table.concat(parts, ",") .. "]"
+        else
+            local parts = {}
+            for k, v in pairs(val) do
+                table.insert(parts, encode_string(tostring(k)) .. ":" .. json.encode(v, visited))
+            end
+            visited[val] = nil
+            return "{" .. table.concat(parts, ",") .. "}"
+        end
     else
-        local next_delim = str:find("[,%]}%s]", idx) or (#str + 1)
-        local raw = str:sub(idx, next_delim - 1)
-        return tonumber(raw) or raw, next_delim
+        error("JSON encode error: unsupported type " .. t)
     end
 end
 
 function json.decode(str)
-    if not str or str == "" then return nil end
-    return parse_value(str, 1)
+    if type(str) ~= "string" or str == "" then
+        return nil, "empty input"
+    end
+
+    local len = #str
+    local pos = 1
+    local depth = 0
+    local max_depth = 128
+
+    local function skip_ws()
+        while pos <= len do
+            local c = str:sub(pos, pos)
+            if c == " " or c == "\t" or c == "\r" or c == "\n" then
+                pos = pos + 1
+            else
+                break
+            end
+        end
+    end
+
+    local parse_value
+
+    local function parse_string()
+        pos = pos + 1
+        local chunks = {}
+        local start = pos
+        while pos <= len do
+            local c = str:sub(pos, pos)
+            if c == '"' then
+                if pos > start then
+                    table.insert(chunks, str:sub(start, pos - 1))
+                end
+                pos = pos + 1
+                return table.concat(chunks)
+            elseif c == '\\' then
+                if pos > start then
+                    table.insert(chunks, str:sub(start, pos - 1))
+                end
+                pos = pos + 1
+                if pos > len then return nil, "unterminated escape sequence" end
+                local esc = str:sub(pos, pos)
+                if esc == '"' or esc == '\\' or esc == '/' then
+                    table.insert(chunks, esc)
+                    pos = pos + 1
+                elseif esc == 'b' then
+                    table.insert(chunks, "\b")
+                    pos = pos + 1
+                elseif esc == 'f' then
+                    table.insert(chunks, "\f")
+                    pos = pos + 1
+                elseif esc == 'n' then
+                    table.insert(chunks, "\n")
+                    pos = pos + 1
+                elseif esc == 'r' then
+                    table.insert(chunks, "\r")
+                    pos = pos + 1
+                elseif esc == 't' then
+                    table.insert(chunks, "\t")
+                    pos = pos + 1
+                elseif esc == 'u' then
+                    pos = pos + 1
+                    if pos + 3 > len then return nil, "incomplete \\uXXXX escape" end
+                    local hex = str:sub(pos, pos + 3)
+                    if not hex:match("^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$") then
+                        return nil, "invalid \\uXXXX escape: " .. hex
+                    end
+                    pos = pos + 4
+                    local cp = tonumber(hex, 16)
+                    if cp >= 0xD800 and cp <= 0xDBFF then
+                        if str:sub(pos, pos + 1) == "\\u" then
+                            local low_hex = str:sub(pos + 2, pos + 5)
+                            if low_hex:match("^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$") then
+                                local low = tonumber(low_hex, 16)
+                                if low >= 0xDC00 and low <= 0xDFFF then
+                                    pos = pos + 6
+                                    cp = 0x10000 + ((cp - 0xD800) * 0x400) + (low - 0xDC00)
+                                end
+                            end
+                        end
+                    end
+                    table.insert(chunks, utf8_encode(cp))
+                else
+                    return nil, "invalid escape char \\" .. esc
+                end
+                start = pos
+            else
+                local b = string.byte(c)
+                if b < 32 then
+                    return nil, "unescaped control character in string"
+                end
+                pos = pos + 1
+            end
+        end
+        return nil, "unterminated string"
+    end
+
+    local function parse_object()
+        pos = pos + 1
+        depth = depth + 1
+        if depth > max_depth then return nil, "maximum depth exceeded" end
+        local obj = {}
+        skip_ws()
+        if pos <= len and str:sub(pos, pos) == '}' then
+            pos = pos + 1
+            depth = depth - 1
+            return obj
+        end
+
+        while pos <= len do
+            skip_ws()
+            if pos > len then return nil, "unterminated object" end
+            if str:sub(pos, pos) ~= '"' then
+                return nil, "expected string key in object at position " .. pos
+            end
+            local key, err = parse_string()
+            if not key then return nil, err end
+
+            skip_ws()
+            if pos > len or str:sub(pos, pos) ~= ':' then
+                return nil, "expected ':' after key in object at position " .. pos
+            end
+            pos = pos + 1
+
+            skip_ws()
+            local val, val_err = parse_value()
+            if val_err then return nil, val_err end
+            obj[key] = val
+
+            skip_ws()
+            if pos <= len and str:sub(pos, pos) == '}' then
+                pos = pos + 1
+                depth = depth - 1
+                return obj
+            elseif pos <= len and str:sub(pos, pos) == ',' then
+                pos = pos + 1
+                skip_ws()
+                if pos <= len and str:sub(pos, pos) == '}' then
+                    return nil, "trailing comma in object"
+                end
+            else
+                return nil, "expected ',' or '}' in object at position " .. pos
+            end
+        end
+        return nil, "unterminated object"
+    end
+
+    local function parse_array()
+        pos = pos + 1
+        depth = depth + 1
+        if depth > max_depth then return nil, "maximum depth exceeded" end
+        local arr = setmetatable({}, array_mt)
+        skip_ws()
+        if pos <= len and str:sub(pos, pos) == ']' then
+            pos = pos + 1
+            depth = depth - 1
+            return arr
+        end
+
+        local idx = 1
+        while pos <= len do
+            skip_ws()
+            local val, err = parse_value()
+            if err then return nil, err end
+            arr[idx] = (val == nil) and json.null or val
+            idx = idx + 1
+
+            skip_ws()
+            if pos <= len and str:sub(pos, pos) == ']' then
+                pos = pos + 1
+                depth = depth - 1
+                return arr
+            elseif pos <= len and str:sub(pos, pos) == ',' then
+                pos = pos + 1
+                skip_ws()
+                if pos <= len and str:sub(pos, pos) == ']' then
+                    return nil, "trailing comma in array"
+                end
+            else
+                return nil, "expected ',' or ']' in array at position " .. pos
+            end
+        end
+        return nil, "unterminated array"
+    end
+
+    local function parse_number()
+        local start = pos
+        if str:sub(pos, pos) == '-' then pos = pos + 1 end
+        if pos > len then return nil, "invalid number" end
+        if str:sub(pos, pos) == '0' then
+            pos = pos + 1
+        elseif str:sub(pos, pos):match("^[1-9]$") then
+            while pos <= len and str:sub(pos, pos):match("^[0-9]$") do
+                pos = pos + 1
+            end
+        else
+            return nil, "invalid number format at position " .. pos
+        end
+
+        if pos <= len and str:sub(pos, pos) == '.' then
+            pos = pos + 1
+            if pos > len or not str:sub(pos, pos):match("^[0-9]$") then
+                return nil, "invalid fractional number"
+            end
+            while pos <= len and str:sub(pos, pos):match("^[0-9]$") do
+                pos = pos + 1
+            end
+        end
+
+        if pos <= len and (str:sub(pos, pos) == 'e' or str:sub(pos, pos) == 'E') then
+            pos = pos + 1
+            if pos <= len and (str:sub(pos, pos) == '+' or str:sub(pos, pos) == '-') then
+                pos = pos + 1
+            end
+            if pos > len or not str:sub(pos, pos):match("^[0-9]$") then
+                return nil, "invalid exponent in number"
+            end
+            while pos <= len and str:sub(pos, pos):match("^[0-9]$") do
+                pos = pos + 1
+            end
+        end
+
+        local num_str = str:sub(start, pos - 1)
+        local num = tonumber(num_str)
+        if not num then return nil, "cannot convert number " .. num_str end
+        return num
+    end
+
+    function parse_value()
+        skip_ws()
+        if pos > len then return nil, "unexpected end of input" end
+        local c = str:sub(pos, pos)
+        if c == '{' then
+            return parse_object()
+        elseif c == '[' then
+            return parse_array()
+        elseif c == '"' then
+            return parse_string()
+        elseif c == 't' then
+            if str:sub(pos, pos + 3) == "true" then
+                pos = pos + 4
+                return true
+            else
+                return nil, "unexpected token at position " .. pos
+            end
+        elseif c == 'f' then
+            if str:sub(pos, pos + 4) == "false" then
+                pos = pos + 5
+                return false
+            else
+                return nil, "unexpected token at position " .. pos
+            end
+        elseif c == 'n' then
+            if str:sub(pos, pos + 3) == "null" then
+                pos = pos + 4
+                return nil
+            else
+                return nil, "unexpected token at position " .. pos
+            end
+        elseif c == '-' or c:match("^[0-9]$") then
+            return parse_number()
+        else
+            return nil, "unexpected character '" .. c .. "' at position " .. pos
+        end
+    end
+
+    skip_ws()
+    local val, err = parse_value()
+    if err then return nil, err end
+    skip_ws()
+    if pos <= len then
+        return nil, "trailing garbage after top-level JSON value at position " .. pos
+    end
+    return val
 end
 
 -- ==========================================================
@@ -174,11 +466,48 @@ local function exec(cmd)
 end
 
 local function shell_quote(str)
+    local s = tostring(str)
     if ffi.os == "Windows" then
-        local s = tostring(str):gsub('"', '""')
+        s = s:gsub("%%", "%%%%")
+        s = s:gsub('(\\*)"', '%1%1\\"')
+        local trailing_bs = s:match("(\\+)$")
+        if trailing_bs then
+            s = s .. trailing_bs
+        end
         return '"' .. s .. '"'
     else
-        return "'" .. tostring(str):gsub("'", "'\\''") .. "'"
+        return "'" .. s:gsub("'", "'\\''") .. "'"
+    end
+end
+
+local function make_dir(path)
+    if ffi.os == "Windows" then
+        local win_path = path:gsub("/", "\\")
+        os.execute('mkdir "' .. win_path .. '" 2>NUL')
+    else
+        exec("mkdir -p " .. shell_quote(path))
+    end
+end
+
+local function remove_dir_recursive(path)
+    if not file_exists(path) then return end
+    if ffi.os == "Windows" then
+        local win_path = path:gsub("/", "\\")
+        os.execute('rmdir /s /q "' .. win_path .. '" 2>NUL')
+    else
+        os.execute("rm -rf " .. shell_quote(path) .. " 2>/dev/null")
+    end
+end
+
+local function copy_dir_recursive(src, dest)
+    if ffi.os == "Windows" then
+        local win_src = src:gsub("/", "\\")
+        local win_dest = dest:gsub("/", "\\")
+        make_dir(dest)
+        os.execute('xcopy /E /I /Y /Q "' .. win_src .. '" "' .. win_dest .. '\\" >NUL 2>NUL')
+    else
+        exec("mkdir -p " .. shell_quote(dest))
+        exec("cp -R " .. shell_quote(src) .. "/. " .. shell_quote(dest) .. "/")
     end
 end
 
@@ -263,6 +592,10 @@ end
 -- ==========================================================
 local function ensure_runtime_built(release_mode)
     local bin = "build/tauri_app"
+    if ffi.os == "Windows" then
+        bin = file_exists("build/Release/tauri_app.exe") and "build/Release/tauri_app.exe" or "build/tauri_app.exe"
+    end
+
     if not release_mode then
         if file_exists(bin) then return bin end
         if file_exists(ENGINE_ROOT .. "/build/tauri_app") then
@@ -276,10 +609,22 @@ local function ensure_runtime_built(release_mode)
         local p = io.popen("pwd 2>/dev/null")
         local cwd = p and p:read("*l") or "."
         if p then p:close() end
+
+        -- Force clean regeneration of embedded headers in release mode to avoid stale dev/fallback artifacts
+        if release_mode then
+            if file_exists("build/generated") then
+                remove_dir_recursive("build/generated")
+            end
+        end
+
         exec("cmake -B build -S " .. shell_quote(ENGINE_ROOT) .. " -DAPP_DIR=" .. shell_quote(cwd) .. " -DCMAKE_BUILD_TYPE=" .. shell_quote(build_type) .. " > /dev/null")
         exec("cmake --build build --config " .. shell_quote(build_type) .. " > /dev/null")
         success("Runtime built successfully.")
-        bin = "build/tauri_app"
+        if ffi.os == "Windows" then
+            bin = file_exists("build/Release/tauri_app.exe") and "build/Release/tauri_app.exe" or "build/tauri_app.exe"
+        else
+            bin = "build/tauri_app"
+        end
     end
     return bin
 end
@@ -287,45 +632,6 @@ end
 -- ==========================================================
 -- Hermetic LuaRocks Dependency Management & Bundler
 -- ==========================================================
-local function shell_quote(str)
-    if ffi.os == "Windows" then
-        local s = tostring(str):gsub('"', '""')
-        return '"' .. s .. '"'
-    else
-        return "'" .. tostring(str):gsub("'", "'\\''") .. "'"
-    end
-end
-
-local function make_dir(path)
-    if ffi.os == "Windows" then
-        local win_path = path:gsub("/", "\\")
-        os.execute('mkdir "' .. win_path .. '" 2>NUL')
-    else
-        exec("mkdir -p " .. shell_quote(path))
-    end
-end
-
-local function remove_dir_recursive(path)
-    if not file_exists(path) then return end
-    if ffi.os == "Windows" then
-        local win_path = path:gsub("/", "\\")
-        os.execute('rmdir /s /q "' .. win_path .. '" 2>NUL')
-    else
-        os.execute("rm -rf " .. shell_quote(path) .. " 2>/dev/null")
-    end
-end
-
-local function copy_dir_recursive(src, dest)
-    if ffi.os == "Windows" then
-        local win_src = src:gsub("/", "\\")
-        local win_dest = dest:gsub("/", "\\")
-        make_dir(dest)
-        os.execute('xcopy /E /I /Y /Q "' .. win_src .. '" "' .. win_dest .. '\\" >NUL 2>NUL')
-    else
-        exec("mkdir -p " .. shell_quote(dest))
-        exec("cp -R " .. shell_quote(src) .. "/. " .. shell_quote(dest) .. "/")
-    end
-end
 
 local function parse_rock_server_url(srv)
     if type(srv) ~= "string" or srv == "" then
@@ -459,6 +765,80 @@ local function compute_file_checksum(filepath)
     return "unknown"
 end
 
+local function get_installed_rock_files(rocks_dir, rock_name, ver)
+    local base = rocks_dir .. "/lib/luarocks/rocks-5.1/" .. rock_name .. "/" .. ver
+    local manifest_file = base .. "/rock_manifest"
+    local files = {}
+    if file_exists(manifest_file) then
+        table.insert(files, manifest_file)
+        local content = read_file(manifest_file)
+        if content then
+            local env = {}
+            local fn = loadstring(content)
+            if fn then
+                setfenv(fn, env)
+                pcall(fn)
+                local mf = env.rock_manifest
+                if type(mf) == "table" then
+                    if type(mf.lua) == "table" then
+                        for rel, _ in pairs(mf.lua) do
+                            local p = rocks_dir .. "/share/lua/5.1/" .. rel
+                            if file_exists(p) then table.insert(files, p) end
+                        end
+                    end
+                    if type(mf.lib) == "table" then
+                        for rel, _ in pairs(mf.lib) do
+                            local p = rocks_dir .. "/lib/lua/5.1/" .. rel
+                            if file_exists(p) then table.insert(files, p) end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(files)
+    return files
+end
+
+local function compute_composite_checksum(file_list)
+    if not file_list or #file_list == 0 then return "sha256:unknown" end
+    if #file_list == 1 then
+        return compute_file_checksum(file_list[1])
+    end
+    local quoted = {}
+    for _, f in ipairs(file_list) do
+        table.insert(quoted, shell_quote(f))
+    end
+    local file_args = table.concat(quoted, " ")
+    local cmd
+    if ffi.os == "OSX" then
+        cmd = "shasum -a 256 " .. file_args .. " 2>/dev/null | shasum -a 256 2>/dev/null"
+    elseif ffi.os == "Linux" then
+        cmd = "sha256sum " .. file_args .. " 2>/dev/null | sha256sum 2>/dev/null"
+    else
+        local hashes = {}
+        for _, f in ipairs(file_list) do
+            table.insert(hashes, compute_file_checksum(f))
+        end
+        local combined = table.concat(hashes, "\n")
+        local h = 5381
+        for i = 1, #combined do
+            h = (h * 33 + string.byte(combined, i)) % 4294967296
+        end
+        return string.format("hash:%08x", h)
+    end
+    local p = io.popen(cmd)
+    if p then
+        local out = p:read("*l")
+        p:close()
+        if out then
+            local hash = out:match("(%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x)")
+            if hash then return "sha256:" .. hash end
+        end
+    end
+    return compute_file_checksum(file_list[1])
+end
+
 local function get_installed_rock_details(rocks_dir, rock_name)
     local base = rocks_dir .. "/lib/luarocks/rocks-5.1/" .. rock_name
     if not file_exists(base) then return nil end
@@ -479,14 +859,15 @@ local function get_installed_rock_details(rocks_dir, rock_name)
     p:close()
     if #versions == 0 then return nil end
     local ver = versions[1]
-    local manifest_file = base .. "/" .. ver .. "/rock_manifest"
+    local installed_files = get_installed_rock_files(rocks_dir, rock_name, ver)
     local checksum = "sha256:unknown"
-    if file_exists(manifest_file) then
-        checksum = compute_file_checksum(manifest_file)
+    if #installed_files > 0 then
+        checksum = compute_composite_checksum(installed_files)
     end
     return {
         version = ver,
-        checksum = checksum
+        checksum = checksum,
+        files = installed_files
     }
 end
 
@@ -711,9 +1092,19 @@ local function ensure_rocks_installed(conf, force, is_build, allow_custom_server
     if is_build and lock and lock.rocks then
         for _, rock_def in ipairs(rocks) do
             local lock_entry = lock.rocks[rock_def.name]
-            if lock_entry then
-                if rock_def.version and lock_entry.version and rock_def.version ~= lock_entry.version then
-                    error("Lockfile mismatch for '" .. rock_def.name .. "': tauri.conf.json requires " .. rock_def.version .. " but tauri.lock specifies " .. lock_entry.version)
+            if not lock_entry then
+                error("Lockfile missing entry for rock '" .. rock_def.name .. "'. Run 'lua-tauri dev' or 'lua-tauri rocks install' to generate tauri.lock first.")
+            end
+            if rock_def.version and lock_entry.version and rock_def.version ~= lock_entry.version then
+                error("Lockfile mismatch for '" .. rock_def.name .. "': tauri.conf.json requires " .. rock_def.version .. " but tauri.lock specifies " .. lock_entry.version)
+            end
+            local details = get_installed_rock_details(rocks_dir, rock_def.name)
+            if not details then
+                error("LuaRock '" .. rock_def.name .. "' is not installed in hermetic tree '" .. rocks_dir .. "'")
+            end
+            if lock_entry.checksum and lock_entry.checksum ~= "" and lock_entry.checksum ~= "sha256:unknown" then
+                if details.checksum ~= lock_entry.checksum then
+                    error("Checksum verification failed for LuaRock '" .. rock_def.name .. "': lockfile expected " .. lock_entry.checksum .. " but found " .. details.checksum)
                 end
             end
         end
@@ -759,21 +1150,23 @@ local function ensure_rocks_installed(conf, force, is_build, allow_custom_server
             success("Hermetic LuaRocks tree synchronized (" .. installed_count .. " packages installed/updated).")
         end
 
-        -- Update or create lockfile
-        local lock_data = lock or { version = 1, rocks = {} }
-        lock_data.rocks = lock_data.rocks or {}
-        for _, rock_def in ipairs(rocks) do
-            local details = get_installed_rock_details(rocks_dir, rock_def.name)
-            local installed_ver = (details and details.version) or rock_def.version or "unknown"
-            local checksum = (details and details.checksum) or "sha256:unknown"
-            lock_data.rocks[rock_def.name] = {
-                version = installed_ver,
-                checksum = checksum,
-                server = rock_def.server or "https://luarocks.org"
-            }
+        -- Update or create lockfile only during dev/install, NEVER overwrite during production build
+        if not is_build then
+            local lock_data = lock or { version = 1, rocks = {} }
+            lock_data.rocks = lock_data.rocks or {}
+            for _, rock_def in ipairs(rocks) do
+                local details = get_installed_rock_details(rocks_dir, rock_def.name)
+                local installed_ver = (details and details.version) or rock_def.version or "unknown"
+                local checksum = (details and details.checksum) or "sha256:unknown"
+                lock_data.rocks[rock_def.name] = {
+                    version = installed_ver,
+                    checksum = checksum,
+                    server = rock_def.server or "https://luarocks.org"
+                }
+            end
+            save_lockfile(lock_data)
+            info("Saved dependency lockfile: " .. get_lockfile_path())
         end
-        save_lockfile(lock_data)
-        info("Saved dependency lockfile: " .. get_lockfile_path())
     end
     return true
 end
@@ -896,12 +1289,14 @@ local function cmd_dev(args)
         end
     end
 
-    local dev_url = build_conf.devUrl or build_conf.devPath
-    if dev_url and dev_url:match("^https?://") then
+    if dev_url and type(dev_url) == "string" and dev_url ~= "" then
+        if not dev_url:match("^https?://[a-zA-Z0-9%.%-_]+:%d+/?$") and not dev_url:match("^https?://[a-zA-Z0-9%.%-_]+/?$") then
+            error("Invalid or insecure devUrl format in configuration: " .. tostring(dev_url))
+        end
         info("Waiting for dev server at " .. dev_url .. " ...")
         local ready = false
         for i = 1, 60 do
-            local p = io.popen("curl -s -o /dev/null -w '%{http_code}' " .. dev_url .. " 2>/dev/null")
+            local p = io.popen("curl -s -o /dev/null -w '%{http_code}' " .. shell_quote(dev_url) .. " 2>/dev/null")
             local code = p and p:read("*a")
             if p then p:close() end
             if code and tonumber(code) and tonumber(code) > 0 then
@@ -1090,17 +1485,6 @@ local function cmd_build(args)
         end
         exec("cp -r " .. shell_quote(frontend_dist) .. " " .. shell_quote(res_dir .. "/"))
 
-        if file_exists("src-tauri/tauri.conf.json") then
-            exec("cp src-tauri/tauri.conf.json " .. shell_quote(res_dir .. "/tauri.conf.json"))
-        end
-
-        if file_exists("src-tauri/src") then
-            info("Packaging backend Lua sources into macOS App bundle...")
-            exec("mkdir -p " .. shell_quote(res_dir .. "/src-tauri/src"))
-            exec("cp -r src-tauri/src/* " .. shell_quote(res_dir .. "/src-tauri/src/"))
-            exec("cp -r src-tauri/src/* " .. shell_quote(res_dir .. "/"))
-        end
-
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
             info("Packaging LuaRocks dependencies into macOS App bundle...")
@@ -1137,7 +1521,31 @@ local function cmd_build(args)
             exec("cp src-tauri/icons/icon.icns " .. shell_quote(res_dir .. "/icon.icns"))
         end
         write_file(macos_bundle_dir .. "/Contents/Info.plist", plist)
-        exec("codesign --force --deep --sign - " .. shell_quote(macos_bundle_dir) .. " 2>/dev/null || true")
+
+        local sign_identity = os.getenv("APPLE_SIGNING_IDENTITY") or "-"
+        info("Signing macOS application bundle with identity: " .. sign_identity)
+        -- Sign nested dynamic libraries first (without --deep)
+        if file_exists(macos_dir .. "/libtaurilua.dylib") then
+            exec("codesign --force --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_dir .. "/libtaurilua.dylib") .. " 2>/dev/null || true")
+        end
+        local p_dylibs = io.popen("find " .. shell_quote(res_dir) .. " -type f \\( -name '*.dylib' -o -name '*.so' \\) 2>/dev/null")
+        if p_dylibs then
+            for dylib_path in p_dylibs:lines() do
+                if dylib_path ~= "" then
+                    exec("codesign --force --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(dylib_path) .. " 2>/dev/null || true")
+                end
+            end
+            p_dylibs:close()
+        end
+
+        -- Sign main bundle with Hardened Runtime and entitlements (avoiding deprecated --deep)
+        local sign_opts = "--force --options runtime"
+        if file_exists("src-tauri/entitlements.plist") then
+            sign_opts = sign_opts .. " --entitlements " .. shell_quote("src-tauri/entitlements.plist")
+        elseif file_exists(ENGINE_ROOT .. "/src-tauri/entitlements.plist") then
+            sign_opts = sign_opts .. " --entitlements " .. shell_quote(ENGINE_ROOT .. "/src-tauri/entitlements.plist")
+        end
+        exec("codesign " .. sign_opts .. " --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_bundle_dir) .. " 2>/dev/null || codesign --force --sign - " .. shell_quote(macos_bundle_dir) .. " 2>/dev/null || true")
 
         local dmg_file = dmg_dir .. "/" .. app_name .. "_" .. version .. "_x64.dmg"
         info("Creating DMG disk image: " .. dmg_file)
@@ -1353,8 +1761,9 @@ end
 -- 3. Register standard IPC command
 app:register("greet", function(payload)
     local name = (payload and payload.name and payload.name ~= "") and payload.name or "Developer"
-    local count = app.state:get("counter") + 1
-    app.state:set("counter", count)
+    local count = app.state:update("counter", function(c)
+        return (c or 0) + 1
+    end)
 
     return {
         greeting = "Hello " .. name .. "! ⚡️",
@@ -1686,9 +2095,17 @@ greetBtn.addEventListener('click', async () => {
   try {
     greetBtn.textContent = 'Invoking...';
     const res = await window.__TAURI__.invoke('greet', { name });
+    greetOutput.replaceChildren();
+    const strong = document.createElement('strong');
+    strong.textContent = res.greeting || '';
+    const br = document.createElement('br');
+    const small = document.createElement('small');
+    small.style.color = '#94a3b8';
+    small.textContent = `Worker #${res.workerId} | ${res.engine} | Call #${res.invocations}`;
+    greetOutput.appendChild(strong);
+    greetOutput.appendChild(br);
+    greetOutput.appendChild(small);
     greetOutput.classList.remove('hidden');
-    greetOutput.innerHTML = `<strong>${res.greeting}</strong><br>` +
-      `<small style="color: #94a3b8">Worker #${res.workerId} | ${res.engine} | Call #${res.invocations}</small>`;
   } catch (err) {
     greetOutput.classList.remove('hidden');
     greetOutput.textContent = 'Error: ' + err;
@@ -2595,6 +3012,8 @@ end
 
 if _G.TAURI_CLI_TEST_MODE then
     return {
+        json = json,
+        shell_quote = shell_quote,
         parse_rock_server_url = parse_rock_server_url,
         validate_rock_server = validate_rock_server,
         validate_rock_name = validate_rock_name,
@@ -2603,6 +3022,8 @@ if _G.TAURI_CLI_TEST_MODE then
         read_lockfile = read_lockfile,
         save_lockfile = save_lockfile,
         compute_file_checksum = compute_file_checksum,
+        compute_composite_checksum = compute_composite_checksum,
+        get_installed_rock_files = get_installed_rock_files,
         get_installed_rock_details = get_installed_rock_details,
         ensure_rocks_installed = ensure_rocks_installed,
     }

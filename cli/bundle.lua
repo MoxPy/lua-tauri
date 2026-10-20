@@ -4,6 +4,21 @@ local os_name = ffi.os
 local app_name = "tauri-lua-app"
 local version = "1.0.0"
 
+local function shell_quote(str)
+    local s = tostring(str)
+    if ffi.os == "Windows" then
+        s = s:gsub("%%", "%%%%")
+        s = s:gsub('(\\*)"', '%1%1\\"')
+        local trailing_bs = s:match("(\\+)$")
+        if trailing_bs then
+            s = s .. trailing_bs
+        end
+        return '"' .. s .. '"'
+    else
+        return "'" .. s:gsub("'", "'\\''") .. "'"
+    end
+end
+
 local function exec(cmd)
     local ret = os.execute(cmd)
     if ret ~= 0 and ret ~= true then
@@ -39,14 +54,14 @@ if os_name == "OSX" then
     local macos_dir = bundle_dir .. "/Contents/MacOS"
     local res_dir = bundle_dir .. "/Contents/Resources"
     local fw_dir = bundle_dir .. "/Contents/Frameworks"
-    exec("mkdir -p " .. macos_dir)
-    exec("mkdir -p " .. res_dir)
-    exec("mkdir -p " .. fw_dir)
-    exec("cp build/tauri_app " .. macos_dir .. "/" .. app_name)
+    exec("mkdir -p " .. shell_quote(macos_dir))
+    exec("mkdir -p " .. shell_quote(res_dir))
+    exec("mkdir -p " .. shell_quote(fw_dir))
+    exec("cp build/tauri_app " .. shell_quote(macos_dir .. "/" .. app_name))
     if file_exists("build/libtaurilua.dylib") then
-        exec("cp build/libtaurilua.dylib " .. fw_dir .. "/")
+        exec("cp build/libtaurilua.dylib " .. shell_quote(fw_dir .. "/"))
     end
-    exec("cp -r dist " .. res_dir .. "/")
+    exec("cp -r dist " .. shell_quote(res_dir .. "/"))
     
     local plist = string.format([[<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -68,8 +83,10 @@ if os_name == "OSX" then
 </plist>]], app_name, app_name, app_name, version)
     
     local f = io.open(bundle_dir .. "/Contents/Info.plist", "w")
-    f:write(plist)
-    f:close()
+    if f then
+        f:write(plist)
+        f:close()
+    end
     local dmg_path = string.format("build/%s_%s_%s.dmg", app_name, version, raw_arch)
     local diskutil_cmd = "diskutil image create from --volumeName " .. shell_quote(app_name) .. " --format UDZO " .. shell_quote(bundle_dir) .. " " .. shell_quote(dmg_path) .. " > /dev/null 2>&1"
     if os.execute(diskutil_cmd) ~= 0 then
@@ -79,15 +96,15 @@ if os_name == "OSX" then
 elseif os_name == "Linux" then
     local _, deb_arch = detect_arch()
     local deb_dir = string.format("build/%s_%s_%s", app_name, version, deb_arch)
-    exec("mkdir -p " .. deb_dir .. "/DEBIAN")
-    exec("mkdir -p " .. deb_dir .. "/usr/bin")
-    exec("mkdir -p " .. deb_dir .. "/usr/lib")
-    exec("mkdir -p " .. deb_dir .. "/usr/share/" .. app_name .. "/dist")
-    exec("cp build/tauri_app " .. deb_dir .. "/usr/bin/" .. app_name)
+    exec("mkdir -p " .. shell_quote(deb_dir .. "/DEBIAN"))
+    exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/bin"))
+    exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/lib"))
+    exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/dist"))
+    exec("cp build/tauri_app " .. shell_quote(deb_dir .. "/usr/bin/" .. app_name))
     if file_exists("build/libtaurilua.so") then
-        exec("cp build/libtaurilua.so " .. deb_dir .. "/usr/lib/")
+        exec("cp build/libtaurilua.so " .. shell_quote(deb_dir .. "/usr/lib/"))
     end
-    exec("cp -r dist/* " .. deb_dir .. "/usr/share/" .. app_name .. "/dist/")
+    exec("cp -r dist/* " .. shell_quote(deb_dir .. "/usr/share/" .. app_name .. "/dist/"))
     
     local control = string.format([[Package: %s
 Version: %s
@@ -101,25 +118,27 @@ Description: Tauri-Lua - LuaJIT-powered desktop application runtime
 ]], app_name, version, deb_arch)
     
     local f = io.open(deb_dir .. "/DEBIAN/control", "w")
-    f:write(control)
-    f:close()
-    exec("dpkg-deb --build " .. deb_dir)
+    if f then
+        f:write(control)
+        f:close()
+    end
+    exec("dpkg-deb --build " .. shell_quote(deb_dir))
 
 elseif os_name == "Windows" then
     local out_dir = "build\\" .. app_name .. "-standalone"
-    exec("mkdir " .. out_dir)
-    exec("copy build\\Release\\tauri_app.exe " .. out_dir .. "\\ 2>NUL || copy build\\tauri_app.exe " .. out_dir .. "\\")
+    exec('mkdir "' .. out_dir .. '" 2>NUL || rem')
+    exec('copy build\\Release\\tauri_app.exe "' .. out_dir .. '\\" 2>NUL || copy build\\tauri_app.exe "' .. out_dir .. '\\"')
     if file_exists("build\\Release\\taurilua.dll") then
-        exec("copy build\\Release\\taurilua.dll " .. out_dir .. "\\")
+        exec('copy build\\Release\\taurilua.dll "' .. out_dir .. '\\"')
     elseif file_exists("build\\taurilua.dll") then
-        exec("copy build\\taurilua.dll " .. out_dir .. "\\")
+        exec('copy build\\taurilua.dll "' .. out_dir .. '\\"')
     end
     -- Include LuaJIT DLL (lua51.dll / luajit.dll) for execution on machines without toolchains
-    exec("copy build\\Release\\lua51.dll " .. out_dir .. "\\ 2>NUL || copy build\\lua51.dll " .. out_dir .. "\\ 2>NUL || copy build\\Release\\luajit.dll " .. out_dir .. "\\ 2>NUL || copy build\\luajit.dll " .. out_dir .. "\\ 2>NUL || rem")
+    exec('copy build\\Release\\lua51.dll "' .. out_dir .. '\\" 2>NUL || copy build\\lua51.dll "' .. out_dir .. '\\" 2>NUL || copy build\\Release\\luajit.dll "' .. out_dir .. '\\" 2>NUL || copy build\\luajit.dll "' .. out_dir .. '\\" 2>NUL || rem')
     local luajit_env = os.getenv("LUAJIT_ROOT")
     if luajit_env then
-        exec('copy "' .. luajit_env .. '\\bin\\lua51.dll" ' .. out_dir .. '\\ 2>NUL || copy "' .. luajit_env .. '\\lua51.dll" ' .. out_dir .. '\\ 2>NUL || rem')
+        exec('copy "' .. luajit_env .. '\\bin\\lua51.dll" "' .. out_dir .. '\\" 2>NUL || copy "' .. luajit_env .. '\\lua51.dll" "' .. out_dir .. '\\" 2>NUL || rem')
     end
-    exec("xcopy /E /I dist " .. out_dir .. "\\dist")
-    exec("tar -czf build\\" .. app_name .. "-windows-x64.zip -C build " .. app_name .. "-standalone")
+    exec('xcopy /E /I dist "' .. out_dir .. '\\dist"')
+    exec('tar -czf "build\\' .. app_name .. '-windows-x64.zip" -C build "' .. app_name .. '-standalone"')
 end
