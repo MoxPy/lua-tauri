@@ -71,7 +71,10 @@ if os_name == "OSX" then
     f:write(plist)
     f:close()
     local dmg_path = string.format("build/%s_%s_%s.dmg", app_name, version, raw_arch)
-    exec("hdiutil create -volname " .. app_name .. " -srcfolder " .. bundle_dir .. " -ov -format UDZO " .. dmg_path)
+    local diskutil_cmd = "diskutil image create from --volumeName " .. shell_quote(app_name) .. " --format UDZO " .. shell_quote(bundle_dir) .. " " .. shell_quote(dmg_path) .. " > /dev/null 2>&1"
+    if os.execute(diskutil_cmd) ~= 0 then
+        exec("hdiutil create -volname " .. shell_quote(app_name) .. " -srcfolder " .. shell_quote(bundle_dir) .. " -ov -format UDZO " .. shell_quote(dmg_path) .. " > /dev/null 2>&1")
+    end
 
 elseif os_name == "Linux" then
     local _, deb_arch = detect_arch()

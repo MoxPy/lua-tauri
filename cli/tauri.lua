@@ -1148,7 +1148,10 @@ local function cmd_build(args)
 
         local dmg_file = dmg_dir .. "/" .. app_name .. "_" .. version .. "_x64.dmg"
         info("Creating DMG disk image: " .. dmg_file)
-        exec("hdiutil create -volname " .. shell_quote(app_name) .. " -srcfolder " .. shell_quote(macos_bundle_dir) .. " -ov -format UDZO " .. shell_quote(dmg_file) .. " > /dev/null")
+        local diskutil_cmd = "diskutil image create from --volumeName " .. shell_quote(app_name) .. " --format UDZO " .. shell_quote(macos_bundle_dir) .. " " .. shell_quote(dmg_file) .. " > /dev/null 2>&1"
+        if os.execute(diskutil_cmd) ~= 0 then
+            exec("hdiutil create -volname " .. shell_quote(app_name) .. " -srcfolder " .. shell_quote(macos_bundle_dir) .. " -ov -format UDZO " .. shell_quote(dmg_file) .. " > /dev/null 2>&1")
+        end
 
         success("Finished 2 bundles at:")
         io.stdout:write("        " .. colors.green .. macos_bundle_dir .. colors.reset .. "\n")
