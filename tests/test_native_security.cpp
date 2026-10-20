@@ -5,9 +5,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <fstream>
+#include <filesystem>
 
 #include "src/origin_check.hpp"
 #include "src/resource_resolver.hpp"
+#include "src/asset_resolver.hpp"
 
 // ---------------------------------------------------------------------------
 // 1. OriginValidator Tests (§4)
@@ -200,76 +203,201 @@ void test_windows_ipc_json_parsing() {
     assert(seq == "1");
 
     std::string req = extract_json_string(msg, "req");
-    // Pre-fix, extract_field returned "[\" because it cut off at the first unescaped quote!
     assert(req == "[\"tauri:fs:read_text_file\",{\"path\":\"file.txt\"},\"tok123\"]");
 
     std::cout << "  -> PASSED" << std::endl;
 }
 
 // ---------------------------------------------------------------------------
-// 5. Asset Resolver & MIME Tests (§7)
+// 5. Production Asset Resolver & Symlink Containment Tests (§7)
 // ---------------------------------------------------------------------------
-static std::string get_mime(const std::string &path) {
-    auto ends_with = [](const std::string &s, const std::string &suffix) {
-        if (s.size() < suffix.size()) return false;
-        return s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
-    };
-    std::string lower = path;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    if (ends_with(lower, ".html") || ends_with(lower, ".htm")) return "text/html";
-    if (ends_with(lower, ".js") || ends_with(lower, ".mjs")) return "application/javascript";
-    if (ends_with(lower, ".css")) return "text/css";
-    if (ends_with(lower, ".json")) return "application/json";
-    if (ends_with(lower, ".png")) return "image/png";
-    if (ends_with(lower, ".jpg") || ends_with(lower, ".jpeg")) return "image/jpeg";
-    if (ends_with(lower, ".svg")) return "image/svg+xml";
-    if (ends_with(lower, ".wasm")) return "application/wasm";
-    return "application/octet-stream";
-}
-
-static bool is_safe_asset_path(const std::string &raw_path) {
-    if (raw_path.empty()) return false;
-    if (raw_path.find('\0') != std::string::npos) return false;
-    if (raw_path.find('\\') != std::string::npos) return false;
-    if (raw_path.find("..") != std::string::npos) return false;
-    if (raw_path.find("%2e") != std::string::npos || raw_path.find("%2E") != std::string::npos) return false;
-    if (raw_path.find(':') != std::string::npos) return false;
-    return true;
-}
-
 void test_asset_resolver() {
-    std::cout << "[Test] Asset Path Containment & Suffix MIME (§7)..." << std::endl;
+    std::cout << "[Test] Production Asset Resolver & Symlink Containment (resolve_contained_asset)..." << std::endl;
 
-    // MIME suffix test: substring trick must not classify a.html.png as text/html
-    assert(get_mime("index.html") == "text/html");
-    assert(get_mime("style.css") == "text/css");
-    assert(get_mime("main.js") == "application/javascript");
-    assert(get_mime("a.html.png") == "image/png");
-    assert(get_mime("a.css.jpg") == "image/jpeg");
+    // 1. MIME suffix test from asset_resolver.hpp
+    assert(get_mime_type("index.html") == "text/html");
+    assert(get_mime_type("style.css") == "text/css");
+    assert(get_mime_type("main.js") == "application/javascript");
+    assert(get_mime_type("a.html.png") == "image/png");
+    assert(get_mime_type("a.css.jpg") == "image/jpeg");
+    assert(get_mime_type("image.ico") == "image/x-icon");
+    assert(get_mime_type("app.wasm") == "application/wasm");
+    assert(get_mime_type("unknown.xyz") == "application/octet-stream");
 
-    // Path containment test: traversal and tricks rejected
-    assert(is_safe_asset_path("index.html"));
-    assert(is_safe_asset_path("assets/style.css"));
-    assert(!is_safe_asset_path("../etc/passwd"));
-    assert(!is_safe_asset_path("assets/../../secret"));
-    assert(!is_safe_asset_path("assets/%2e%2e/secret"));
-    assert(!is_safe_asset_path("..\\windows\\win.ini"));
-    assert(!is_safe_asset_path("C:/boot.ini"));
-    std::string nul_path = "index.html";
-    nul_path += '\0';
-    nul_path += "extra";
-    assert(!is_safe_asset_path(nul_path));
+    // 2. Real filesystem containment test
+    std::filesystem::path temp_dir = std::filesystem::temp_directory_path() / ("tauri_test_assets_" + std::to_string(rand()));
+    std::filesystem::path outside_dir = std::filesystem::temp_directory_path() / ("tauri_test_outside_" + std::to_string(rand()));
+    std::error_code ec;
+    std::filesystem::create_directories(temp_dir / "sub", ec);
+    std::filesystem::create_directories(outside_dir, ec);
+
+    // Create real files in asset tree
+    std::ofstream(temp_dir / "index.html") << "<h1>Test</h1>";
+    std::ofstream(temp_dir / "style.css") << "body { color: red; }";
+    std::ofstream(temp_dir / "sub" / "app.js") << "console.log('ok');";
+
+    // Create a secret file outside the asset tree
+    std::filesystem::path secret_file = outside_dir / "secret.txt";
+    std::ofstream(secret_file) << "SUPER_SECRET_KEY";
+
+    // Create symlink inside pointing to internal file (safe)
+    std::filesystem::path internal_link = temp_dir / "internal_link.css";
+    std::filesystem::create_symlink(temp_dir / "style.css", internal_link, ec);
+
+    // Create symlink pointing outside asset root (dangerous jailbreak attempt!)
+    std::filesystem::path escape_link = temp_dir / "escape_link.txt";
+    std::filesystem::create_symlink(secret_file, escape_link, ec);
+
+    std::string root_str = temp_dir.string();
+    std::string out_path;
+
+    // (a) Valid files resolve correctly
+    assert(resolve_contained_asset(root_str, "index.html", out_path));
+    assert(std::filesystem::equivalent(out_path, temp_dir / "index.html"));
+
+    assert(resolve_contained_asset(root_str, "/", out_path)); // Root resolves to index.html
+    assert(std::filesystem::equivalent(out_path, temp_dir / "index.html"));
+
+    assert(resolve_contained_asset(root_str, "sub/app.js", out_path));
+    assert(std::filesystem::equivalent(out_path, temp_dir / "sub" / "app.js"));
+
+    // (b) Internal symlink resolves safely
+    if (std::filesystem::exists(internal_link)) {
+        assert(resolve_contained_asset(root_str, "internal_link.css", out_path));
+        assert(std::filesystem::equivalent(out_path, temp_dir / "style.css"));
+    }
+
+    // (c) External symlink escaping root MUST BE REJECTED
+    if (std::filesystem::exists(escape_link)) {
+        assert(!resolve_contained_asset(root_str, "escape_link.txt", out_path));
+    }
+
+    // (d) Directory traversal attacks MUST BE REJECTED
+    assert(!resolve_contained_asset(root_str, "../etc/passwd", out_path));
+    assert(!resolve_contained_asset(root_str, "sub/../../secret.txt", out_path));
+    assert(!resolve_contained_asset(root_str, "sub/%2e%2e/%2e%2e/secret.txt", out_path));
+    assert(!resolve_contained_asset(root_str, "sub/%2E%2E/app.js", out_path));
+    assert(!resolve_contained_asset(root_str, "..\\windows\\win.ini", out_path));
+    assert(!resolve_contained_asset(root_str, "C:/boot.ini", out_path));
+    assert(!resolve_contained_asset(root_str, "/etc/passwd", out_path));
+
+    // (e) Injection tricks (NUL bytes, directories, non-existent)
+    std::string nul_str = "index.html"; nul_str += '\0'; nul_str += "extra";
+    assert(!resolve_contained_asset(root_str, nul_str, out_path));
+    assert(!resolve_contained_asset(root_str, "index.html%00extra", out_path));
+    assert(!resolve_contained_asset(root_str, "sub", out_path)); // directory rejection
+    assert(!resolve_contained_asset(root_str, "non_existent.html", out_path));
+
+    // Cleanup
+    std::filesystem::remove_all(temp_dir, ec);
+    std::filesystem::remove_all(outside_dir, ec);
+
+    std::cout << "  -> PASSED" << std::endl;
+}
+
+// ---------------------------------------------------------------------------
+// 6. JSON String Escaping for File Drops & Interop (Point 2)
+// ---------------------------------------------------------------------------
+void test_json_escaping() {
+    std::cout << "[Test] RFC 8259 JSON String Escaping (json_escape_string)..." << std::endl;
+
+    // Control characters (\n, \r, \t, \b, \f)
+    std::string with_ctrl = "line1\nline2\r\ttabbed\b\fform";
+    std::string esc_ctrl = json_escape_string(with_ctrl);
+    assert(esc_ctrl == "\"line1\\nline2\\r\\ttabbed\\b\\fform\"");
+
+    // Quotes and backslashes
+    std::string with_quotes = "path\\to\\\"file\".txt";
+    std::string esc_quotes = json_escape_string(with_quotes);
+    assert(esc_quotes == "\"path\\\\to\\\\\\\"file\\\".txt\"");
+
+    // Low ASCII control characters (< 0x20)
+    std::string low_ascii = std::string("test") + '\x01' + '\x1f';
+    std::string esc_low = json_escape_string(low_ascii);
+    assert(esc_low == "\"test\\u0001\\u001f\"");
+
+    // UTF-8 multi-byte characters must NOT be corrupted or over-escaped
+    std::string unicode_str = "/Users/test/日本語_ディレクトリ/Café_☕_🚀.png";
+    std::string esc_unicode = json_escape_string(unicode_str);
+    assert(esc_unicode == "\"/Users/test/日本語_ディレクトリ/Café_☕_🚀.png\"");
+
+    // Full JSON array construction mimicking platform_dispatch_file_drop
+    std::vector<std::string> paths = {
+        "/path/to/normal.txt",
+        "/path/with\nnewline/file.txt",
+        "/path/with\"quotes\"/file.png",
+        "/path/with\\backslash/file.pdf",
+        "/path/with_unicode_漢字/Café.jpg"
+    };
+    std::string json = "{\"paths\":[";
+    for (size_t i = 0; i < paths.size(); ++i) {
+        if (i > 0) json += ",";
+        json += json_escape_string(paths[i]);
+    }
+    json += "],\"position\":{\"x\":100,\"y\":200}}";
+
+    assert(json.find("\"/path/with\\nnewline/file.txt\"") != std::string::npos);
+    assert(json.find("\"/path/with\\\"quotes\\\"/file.png\"") != std::string::npos);
+    assert(json.find("\"/path/with\\\\backslash/file.pdf\"") != std::string::npos);
+    assert(json.find("\"/path/with_unicode_漢字/Café.jpg\"") != std::string::npos);
+
+    std::cout << "  -> PASSED" << std::endl;
+}
+
+// ---------------------------------------------------------------------------
+// 7. Robust Dual-Layer CSP Meta Injection (Point 5)
+// ---------------------------------------------------------------------------
+void test_csp_injection() {
+    std::cout << "[Test] Robust CSP Meta Injection (inject_csp_meta)..." << std::endl;
+
+    std::string default_csp = "default-src 'self' tauri: asset:; script-src 'self' tauri: asset:;";
+
+    // (a) Normal HTML with <head>
+    std::string html1 = "<!DOCTYPE html><html><head><title>App</title></head><body></body></html>";
+    inject_csp_meta(html1, default_csp);
+    assert(html1.find("<meta http-equiv=\"Content-Security-Policy\" content=\"" + default_csp + "\">") != std::string::npos);
+
+    // (b) Case-insensitive <HEAD> with attributes
+    std::string html2 = "<html><HEAD class=\"theme-dark\"><title>App</title></HEAD></html>";
+    inject_csp_meta(html2, default_csp);
+    assert(html2.find("<meta http-equiv=\"Content-Security-Policy\" content=\"" + default_csp + "\">") != std::string::npos);
+
+    // (c) Comment containing Content-Security-Policy must NOT prevent injection
+    std::string html3 = "<html><!-- Comment mentioning Content-Security-Policy --><head></head></html>";
+    inject_csp_meta(html3, default_csp);
+    assert(has_existing_csp_meta(html3));
+    assert(html3.find("<meta http-equiv=\"Content-Security-Policy\"") != std::string::npos);
+
+    // (d) Script string containing Content-Security-Policy must NOT prevent injection
+    std::string html4 = "<html><head><script>console.log('Content-Security-Policy header');</script></head></html>";
+    inject_csp_meta(html4, default_csp);
+    assert(has_existing_csp_meta(html4));
+    assert(html4.find("<meta http-equiv=\"Content-Security-Policy\"") != std::string::npos);
+
+    // (e) Existing real CSP meta tag must NOT be duplicated
+    std::string html5 = "<html><head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'\"></head></html>";
+    std::string orig = html5;
+    inject_csp_meta(html5, default_csp);
+    assert(html5 == orig); // Unchanged!
+
+    // (f) HTML without <head> tag
+    std::string html6 = "<!DOCTYPE html><html><body><h1>Hello</h1></body></html>";
+    inject_csp_meta(html6, default_csp);
+    assert(html6.find("<meta http-equiv=\"Content-Security-Policy\"") != std::string::npos);
+    assert(html6.find("<head>") != std::string::npos);
 
     std::cout << "  -> PASSED" << std::endl;
 }
 
 int main() {
-    std::cout << "=== Running C++ Native Security Tests (Set 1) ===" << std::endl;
+    std::cout << "=== Running C++ Native Security Tests (Set 1 & Set 2) ===" << std::endl;
     test_origin_validator();
     test_resource_resolver();
     test_token_verification();
     test_windows_ipc_json_parsing();
     test_asset_resolver();
+    test_json_escaping();
+    test_csp_injection();
     std::cout << "All C++ Native Security Tests PASSED!" << std::endl;
     return 0;
 }

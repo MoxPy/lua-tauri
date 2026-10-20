@@ -118,7 +118,7 @@ static std::string g_app_name = "";
 static inline void platform_apply_app_name_macos(const char *name) {
     if (!name || name[0] == '\0') return;
     g_app_name = name;
-    run_on_main_sync(^{
+    run_on_main_async(^{
         NSString *appName = [NSString stringWithUTF8String:g_app_name.c_str()];
         [[NSProcessInfo processInfo] setProcessName:appName];
 
@@ -579,9 +579,35 @@ static inline webview_t webview_create(int debug, void *window) {
                                             LPWSTR json_str = nullptr;
                                             args->get_WebMessageAsJson(&json_str);
                                             if (json_str) {
+                                                LPWSTR source_w = nullptr;
+                                                if (SUCCEEDED(args->get_Source(&source_w)) && source_w) {
+                                                    int slen = WideCharToMultiByte(CP_UTF8, 0, source_w, -1, NULL, 0, NULL, NULL);
+                                                    std::string source_u8(slen > 0 ? slen : 0, '\0');
+                                                    if (slen > 0) {
+                                                        int swritten = WideCharToMultiByte(CP_UTF8, 0, source_w, -1, &source_u8[0], slen, NULL, NULL);
+                                                        if (swritten > 0) source_u8.resize(static_cast<size_t>(swritten - 1));
+                                                    }
+                                                    CoTaskMemFree(source_w);
+                                                    if (!source_u8.empty()) {
+                                                        bool is_local = (source_u8.rfind("tauri://", 0) == 0 ||
+                                                                         source_u8.rfind("https://tauri.localhost", 0) == 0 ||
+                                                                         source_u8.rfind("http://localhost:", 0) == 0 ||
+                                                                         source_u8.rfind("http://127.0.0.1:", 0) == 0);
+                                                        if (!is_local) {
+                                                            CoTaskMemFree(json_str);
+                                                            return S_OK; // Reject cross-origin or untrusted subframe message
+                                                        }
+                                                    }
+                                                }
+
                                                 int len = WideCharToMultiByte(CP_UTF8, 0, json_str, -1, NULL, 0, NULL, NULL);
-                                                std::string u8(len, 0);
-                                                WideCharToMultiByte(CP_UTF8, 0, json_str, -1, &u8[0], len, NULL, NULL);
+                                                std::string u8(len > 0 ? len : 0, '\0');
+                                                if (len > 0) {
+                                                    int written = WideCharToMultiByte(CP_UTF8, 0, json_str, -1, &u8[0], len, NULL, NULL);
+                                                    if (written > 0) {
+                                                        u8.resize(static_cast<size_t>(written - 1));
+                                                    }
+                                                }
                                                 CoTaskMemFree(json_str);
 
                                                 auto extract_json_string = [](const std::string &str, const std::string &key) -> std::string {

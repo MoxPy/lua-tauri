@@ -1782,7 +1782,9 @@ function Tauri.new(config)
     config = config or {}
     self.config = config
     local app_name = (config.package and config.package.name) or config.productName or "tauri-lua-app"
-    pcall(function() clib.platform_set_app_name(app_name) end)
+    if not __IS_ISOLATE_WORKER__ then
+        pcall(function() clib.platform_set_app_name(app_name) end)
+    end
     if ffi.os == "Linux" then
         local linux_paths = {
             "/usr/share/" .. app_name .. "/rocks/share/lua/5.1/?.lua",

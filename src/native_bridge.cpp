@@ -1,5 +1,6 @@
 #include "native_bridge.h"
 #include "origin_check.hpp"
+#include "asset_resolver.hpp"
 
 #include <iostream>
 #include <string>
@@ -248,85 +249,8 @@ static HMENU g_tray_menu = NULL;
 static NSStatusItem *g_status_item = nil;
 #endif
 
-static std::string get_mime(const std::string &path) {
-    size_t dot = path.rfind('.');
-    if (dot == std::string::npos) return "application/octet-stream";
-    std::string ext = path.substr(dot);
-    for (char &c : ext) c = tolower((unsigned char)c);
-    if (ext == ".html" || ext == ".htm") return "text/html";
-    if (ext == ".js" || ext == ".mjs") return "application/javascript";
-    if (ext == ".css") return "text/css";
-    if (ext == ".json") return "application/json";
-    if (ext == ".png") return "image/png";
-    if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
-    if (ext == ".svg") return "image/svg+xml";
-    if (ext == ".wasm") return "application/wasm";
-    if (ext == ".ico") return "image/x-icon";
-    if (ext == ".txt") return "text/plain";
-    return "application/octet-stream";
-}
-
-static bool resolve_contained_asset(const std::string &assets_root, const std::string &raw_path, std::string &out_real_path) {
-    if (raw_path.empty()) return false;
-    // Decode percent-encoded characters
-    std::string path;
-    for (size_t i = 0; i < raw_path.size(); ++i) {
-        if (raw_path[i] == '%' && i + 2 < raw_path.size() && isxdigit((unsigned char)raw_path[i+1]) && isxdigit((unsigned char)raw_path[i+2])) {
-            char hex[3] = { raw_path[i+1], raw_path[i+2], '\0' };
-            int val = (int)strtol(hex, nullptr, 16);
-            if (val == 0) return false; // NUL byte injection rejected
-            path += (char)val;
-            i += 2;
-        } else {
-            path += raw_path[i];
-        }
-    }
-    if (path.find('\0') != std::string::npos) return false;
-    if (path.find('\\') != std::string::npos || path.find(':') != std::string::npos) return false;
-
-    // Default to /index.html if empty or root
-    if (path.empty() || path == "/") path = "/index.html";
-
-    // Split components and verify no traversal
-    std::vector<std::string> parts;
-    std::stringstream ss(path);
-    std::string part;
-    while (std::getline(ss, part, '/')) {
-        if (part.empty() || part == ".") continue;
-        if (part == "..") return false; // Traversal attempt rejected
-        parts.push_back(part);
-    }
-    if (parts.empty()) parts.push_back("index.html");
-
-    std::filesystem::path root_p(assets_root);
-    std::error_code ec;
-    std::filesystem::path canonical_root = std::filesystem::weakly_canonical(root_p, ec);
-    if (ec) return false;
-
-    std::filesystem::path target = canonical_root;
-    for (const auto &p : parts) {
-        target /= p;
-    }
-
-    std::filesystem::path canonical_target = std::filesystem::weakly_canonical(target, ec);
-    if (ec) return false;
-
-    // Verify canonical target is within canonical root
-    auto root_str = canonical_root.string();
-    auto target_str = canonical_target.string();
-    if (target_str.size() < root_str.size() || target_str.compare(0, root_str.size(), root_str) != 0) {
-        return false;
-    }
-    if (target_str.size() > root_str.size() && target_str[root_str.size()] != '/' && target_str[root_str.size()] != '\\') {
-        return false;
-    }
-
-    if (!std::filesystem::exists(canonical_target, ec) || std::filesystem::is_directory(canonical_target, ec)) {
-        return false;
-    }
-
-    out_real_path = canonical_target.string();
-    return true;
+static inline std::string get_mime(const std::string &path) {
+    return get_mime_type(path);
 }
 
 static bool read_file_bytes(const std::string &full_path, std::string &out_data) {
@@ -391,12 +315,7 @@ static bool read_file_bytes(const std::string &full_path, std::string &out_data)
     std::string csp = get_effective_csp();
 
     if (mime == "text/html") {
-        size_t head_pos = data.find("<head>");
-        if (head_pos == std::string::npos) head_pos = data.find("<HEAD>");
-        if (head_pos != std::string::npos && data.find("Content-Security-Policy") == std::string::npos) {
-            std::string meta_tag = "\n  <meta http-equiv=\"Content-Security-Policy\" content=\"" + csp + "\">";
-            data.insert(head_pos + 6, meta_tag);
-        }
+        inject_csp_meta(data, csp);
     }
 
     NSURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:url
@@ -427,13 +346,7 @@ static void platform_dispatch_file_drop(const char *label, const char *event_typ
     std::string json = "{\"paths\":[";
     for (size_t i = 0; i < paths.size(); ++i) {
         if (i > 0) json += ",";
-        json += "\"";
-        for (char c : paths[i]) {
-            if (c == '"') json += "\\\"";
-            else if (c == '\\') json += "\\\\";
-            else json += c;
-        }
-        json += "\"";
+        json += json_escape_string(paths[i]);
     }
     json += "],\"position\":{\"x\":" + std::to_string((int)x) + ",\"y\":" + std::to_string((int)y) + "}}";
 
@@ -533,12 +446,7 @@ static void gtk_uri_scheme_request_cb(WebKitURISchemeRequest *request, gpointer 
     std::string csp = get_effective_csp();
 
     if (mime == "text/html") {
-        size_t head_pos = data.find("<head>");
-        if (head_pos == std::string::npos) head_pos = data.find("<HEAD>");
-        if (head_pos != std::string::npos && data.find("Content-Security-Policy") == std::string::npos) {
-            std::string meta_tag = "\n  <meta http-equiv=\"Content-Security-Policy\" content=\"" + csp + "\">";
-            data.insert(head_pos + 6, meta_tag);
-        }
+        inject_csp_meta(data, csp);
     }
 
     GInputStream *stream = g_memory_input_stream_new_from_data(data.data(), data.size(), NULL);
@@ -563,11 +471,16 @@ static bool get_native_window_origin(webview_t w, std::string &out_origin) {
         if (SUCCEEDED(core->get_Source(&uri_w)) && uri_w) {
             int len = WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, NULL, 0, NULL, NULL);
             if (len > 0) {
-                std::string u8(len - 1, '\0');
-                WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, &u8[0], len, NULL, NULL);
-                out_origin = u8;
+                std::string u8(len, '\0');
+                int written = WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, &u8[0], len, NULL, NULL);
+                if (written > 0) {
+                    u8.resize(static_cast<size_t>(written - 1));
+                    out_origin = std::move(u8);
+                } else {
+                    out_origin.clear();
+                }
             } else {
-                out_origin = "";
+                out_origin.clear();
             }
             CoTaskMemFree(uri_w);
             core->Release();
