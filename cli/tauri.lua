@@ -1538,8 +1538,12 @@ local function cmd_build(args)
             p_dylibs:close()
         end
 
-        -- Sign main bundle with Hardened Runtime and entitlements (avoiding deprecated --deep)
-        local sign_opts = "--force --options runtime"
+        -- Sign main bundle (avoiding deprecated --deep)
+        local sign_opts = "--force"
+        if sign_identity ~= "-" then
+            -- Hardened Runtime is enabled for Developer ID signing (required for Apple Notarization)
+            sign_opts = sign_opts .. " --options runtime"
+        end
         if file_exists("src-tauri/entitlements.plist") then
             sign_opts = sign_opts .. " --entitlements " .. shell_quote("src-tauri/entitlements.plist")
         elseif file_exists(ENGINE_ROOT .. "/src-tauri/entitlements.plist") then
