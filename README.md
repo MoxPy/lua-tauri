@@ -1549,40 +1549,52 @@ On macOS, running `./lua-tauri build` produces two artifacts:
    * `Contents/Info.plist` (DPI-awareness, bundle identifiers, and window metadata)
 2. **Apple Disk Image (`.dmg`):** A compressed, read-only disk image ready for user distribution generated via `hdiutil`.
 
-#### Production Code Signing & Notarization (Apple Gatekeeper)
-To distribute outside the Mac App Store without triggering Gatekeeper warnings, sign your application using Apple Hardened Runtime with inside-out signing (avoiding the deprecated `--deep` flag):
+#### Automated Code Signing & Hardened Runtime
 
-```bash
-SIGN_ID="Developer ID Application: Your Name (TEAMID)"
-APP_PATH="target/bundle/macos/tauri-lua-app.app"
-DMG_PATH="target/bundle/dmg/tauri-lua-app.dmg"
+When you run `./lua-tauri build` on macOS, the CLI handles codesigning automatically using Apple's recommended inside-out approach (signing nested `.dylib` libraries first, then the root `.app` bundle, avoiding the deprecated `--deep` flag).
 
-# 1. Sign embedded libraries and frameworks from the inside out
-if [ -d "${APP_PATH}/Contents/Frameworks" ]; then
-  find "${APP_PATH}/Contents/Frameworks" -type f \( -name "*.dylib" -o -name "*.so" \) -exec \
-    codesign --force --options runtime --timestamp --sign "${SIGN_ID}" {} +
-fi
+##### 1. Ad-Hoc Signing (Default for Local Builds & Testing)
+If no Apple Developer certificate is specified, the CLI automatically signs the application **ad-hoc** (`codesign --sign -`):
+* **Entitlements:** Applies `src-tauri/entitlements.plist` (`com.apple.security.cs.allow-jit` for LuaJIT and `network.client`).
+* **Library Validation:** Omits `--options runtime`. Because ad-hoc binaries do not possess an Apple Team ID (`TeamIdentifier=not set`), omitting the runtime flag prevents macOS `dyld` from halting on launch with a `mapping process and mapped file have different Team IDs` error when loading `@rpath/libtaurilua.dylib`.
+* The resulting `.app` and `.dmg` run immediately on your local Mac without Gatekeeper team mismatches.
 
-# 2. Sign main executable and app bundle with Hardened Runtime entitlements
-codesign --force --options runtime --timestamp --entitlements entitlements.plist \
-  --sign "${SIGN_ID}" "${APP_PATH}/Contents/MacOS/tauri-lua-app"
+##### 2. Apple Developer ID Signing & Notarization (Production Release)
+To sign your application for distribution outside the Mac App Store and pass Apple Notarization, specify your Developer ID certificate in either of two ways:
 
-codesign --force --options runtime --timestamp --entitlements entitlements.plist \
-  --sign "${SIGN_ID}" "${APP_PATH}"
+* **Via Environment Variable:**
+  ```bash
+  export APPLE_SIGNING_IDENTITY="Developer ID Application: Your Company Name (TEAMID12345)"
+  ./lua-tauri build
+  ```
 
-# 3. Verify bundle signature and Gatekeeper policy
-codesign --verify --strict --verbose=4 "${APP_PATH}"
-spctl --assess --type execute --verbose "${APP_PATH}"
+* **Via `tauri.conf.json`:**
+  ```json
+  {
+    "bundle": {
+      "macOS": {
+        "signingIdentity": "Developer ID Application: Your Company Name (TEAMID12345)"
+      }
+    }
+  }
+  ```
 
-# 4. Package and sign Apple Disk Image (.dmg)
-hdiutil create -volname "tauri-lua-app" -srcfolder "${APP_PATH}" -ov -format UDZO "${DMG_PATH}"
-codesign --force --timestamp --sign "${SIGN_ID}" "${DMG_PATH}"
-codesign --verify --strict "${DMG_PATH}"
+When a Developer ID is detected (`signingIdentity ~= "-"`):
+1. **Hardened Runtime (`--options runtime`)** is automatically enabled on the bundle.
+2. The executable, `libtaurilua.dylib`, and any compiled LuaRocks C modules are signed with the same identity, stamping matching Apple Team IDs (`TeamIdentifier=TEAMID12345`).
+3. You can verify the bundle and notarize the disk image:
+   ```bash
+   # Verify signature & Gatekeeper acceptance
+   codesign --verify --strict --verbose=4 "target/bundle/macos/tauri-lua-app.app"
+   spctl --assess --type execute --verbose "target/bundle/macos/tauri-lua-app.app"
 
-# 5. Submit for Apple Notarization
-xcrun notarytool submit "${DMG_PATH}" --keychain-profile "AC_PASSWORD" --wait
-xcrun stapler staple "${DMG_PATH}"
-```
+   # Submit DMG to Apple Notary Service
+   xcrun notarytool submit "target/bundle/dmg/tauri-lua-app_1.0.0_x64.dmg" \
+     --keychain-profile "AC_PASSWORD" --wait
+
+   # Staple notarization ticket
+   xcrun stapler staple "target/bundle/dmg/tauri-lua-app_1.0.0_x64.dmg"
+   ```
 
 ---
 
