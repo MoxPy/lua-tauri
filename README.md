@@ -1603,63 +1603,88 @@ When a Developer ID is detected (`signingIdentity ~= "-"`):
 
 ### 3. Native Sidecars & External Binaries (`src-tauri/binaries/`)
 
-Tauri-Lua supports bundling standalone auxiliary binaries alongside your desktop application (such as local API servers written in Go, Rust, or Python/PyInstaller, or CLI utilities like `ffmpeg` or `sqlite`).
+Tauri-Lua supports bundling standalone auxiliary binaries alongside your desktop application (such as local API microservices written in Go, Rust, or Python/PyInstaller, or CLI utilities like `ffmpeg` or `sqlite`).
 
-#### Packaging Convention
-Place your compiled native binaries and associated configuration files inside `src-tauri/binaries/`:
+The entire sidecar workflow is **100% native, zero-boilerplate, and reproducible across any project**. No custom Lua helper scripts or hardcoded machine paths are required.
+
+#### 1. Directory Structure & Multi-Platform Naming
+Place your compiled native executables and optional configuration files directly inside `src-tauri/binaries/`:
+
 ```text
 src-tauri/
 ├── tauri.conf.json
 ├── binaries/
-│   ├── api-server          # Compiled native executable (Go, Rust, C++, etc.)
-│   └── .env                # Optional environment configuration
+│   ├── my-backend                  # Default / macOS executable
+│   ├── my-backend-linux-amd64      # Optional: Linux 64-bit ELF (x86_64)
+│   ├── my-backend-linux-arm64      # Optional: Linux ARM 64-bit ELF (aarch64 / Pi)
+│   ├── my-backend.exe              # Optional: Windows PE executable
+│   └── .env                        # Local environment secrets (kept out of git)
 └── src/
-    ├── main.lua
-    └── sidecar.lua
+    └── main.lua                    # Standard entrypoint (no extra files needed)
 ```
 
-When running `./lua-tauri build`:
-1. The CLI detects `src-tauri/binaries/` and packages the directory into `Contents/Resources/binaries/` inside the `.app` bundle.
-2. Any native executable files inside are signed during the macOS codesigning phase.
-3. The resulting `.dmg` and `.app` bundles are completely self-contained ("batteries-included") and operate independently of development directories.
+> [!TIP]
+> **Naming Flexibility:**
+> * If you only distribute for a single OS or compile natively on each machine, simply name the binary `my-backend` (or `my-backend.exe` on Windows).
+> * If you want to bundle precompiled binaries for multiple architectures simultaneously in the same repo, append the target architecture suffix (e.g. `-linux-amd64`, `-linux-arm64`, `-darwin-arm64`). Tauri-Lua automatically detects the host OS (`ffi.os`) and CPU architecture (`ffi.arch`) to execute the matching binary.
 
-#### Native Runtime Sidecar API (`app:spawn_sidecar`)
-`lua-tauri` provides native, zero-configuration sidecar process management built directly into the engine. The framework automatically discovers platform-specific binaries (`x86_64`, `arm64`, `.exe`), loads `.env` variables, passes CLI arguments, manages PID tracking, and guarantees automatic termination when the application window closes:
+#### 2. Automatic Packaging (Build Time)
+When you run `./lua-tauri build`:
+* **macOS:** Copies `src-tauri/binaries/` into `.app/Contents/Resources/binaries/` and signs all contained executables automatically during codesigning.
+* **Linux:** Copies `src-tauri/binaries/` into `/usr/share/<productName>/binaries/` inside the generated `.deb` package.
+* **Windows:** Packages binaries adjacent to the standalone distribution folder.
+
+#### 3. Native Runtime Lifecycle API (`app:spawn_sidecar`)
+In `src-tauri/src/main.lua`, launch your backend with a single line. The engine handles environment discovery, CLI arguments, port injection, PID tracking, and graceful termination when the user closes the window:
 
 ```lua
 local Tauri = require("tauri")
-local app = Tauri.init()
+local conf = {}
+if __EMBEDDED_CONFIG_JSON__ and __EMBEDDED_CONFIG_JSON__ ~= "" then
+    conf = Tauri.json.decode(__EMBEDDED_CONFIG_JSON__) or {}
+end
+local app = Tauri.init(conf)
 
--- Launch native sidecar on the main thread (worker isolates do not duplicate sidecars)
+-- Launch sidecar on the main UI thread (worker isolates do not duplicate sidecars)
 if not __IS_ISOLATE_WORKER__ then
-    local api = app:spawn_sidecar("api-server", {
-        port = 8060,
-        ipc_command = "api:get_endpoint" -- Automatically registers IPC command for frontend
+    local server = app:spawn_sidecar("my-backend", {
+        port = 8080,
+        ipc_command = "api:get_endpoint" -- Auto-exposes endpoint to web frontend
     })
     
-    print("[SIDECAR] Running at:", api.base_url, "PID:", api.pid)
+    print("[SIDECAR] Started on:", server.base_url, "PID:", server.pid)
+    app:create_main_window()
 end
-
-app:create_main_window()
 ```
 
-##### Supported Options
-| Option | Type | Description |
-|---|---|---|
-| `port` | `number` | Sets the listening port and injects `PORT=<port>` into the environment |
-| `host` | `string` | Bind host (default: `"127.0.0.1"`) |
-| `args` | `table` | Array of command-line flags and arguments |
-| `env` | `table` | Additional environment variables |
-| `env_file` | `string` | Custom path to `.env` file (auto-discovered if omitted) |
-| `ipc_command` | `string` | Command name to automatically register for web frontend access |
-| `auto_kill` | `boolean` | Automatically terminate sidecar when app exits (default: `true`) |
+#### 4. Accessing Sidecar from Frontend (JS / Svelte / React)
+Because `ipc_command = "api:get_endpoint"` was declared above, your frontend can query the sidecar endpoint out of the box:
 
-##### Sidecar Object Methods
-- `sidecar.pid`: The active process ID.
-- `sidecar.base_url`: Convenient URL string (e.g. `http://127.0.0.1:8060`).
-- `sidecar:is_running()`: Returns `true` if the process is currently active.
-- `sidecar:kill(sig)`: Terminates the process (default: SIGTERM followed by SIGKILL).
-- `sidecar:to_table()`: Serializes sidecar metadata for IPC response.
+```typescript
+import { invoke } from "@tauri-apps/api/core"; // or local tauri-bridge
+
+const endpoint = await invoke<{ base_url: string; port: number; running: boolean }>("api:get_endpoint");
+console.log("Connecting to backend at:", endpoint.base_url);
+```
+
+#### Options Reference
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `port` | `number` | `8060` | Sets listening port and injects `PORT=<port>` into the environment |
+| `host` | `string` | `"127.0.0.1"` | Bind host for `base_url` resolution |
+| `args` | `table` | `{}` | Command-line arguments passed to the executable |
+| `env` | `table` | `{}` | Extra environment variables table |
+| `env_file` | `string` | `nil` | Explicit path to `.env` file (auto-discovered if omitted) |
+| `ipc_command` | `string` | `nil` | Command name to automatically register for web frontend access |
+| `auto_kill` | `boolean` | `true` | Automatically sends SIGTERM + SIGKILL when the app window closes |
+
+#### Sidecar Object Methods
+- `sidecar.pid`: Active process ID (`number`).
+- `sidecar.base_url`: Resolved URL (e.g. `"http://127.0.0.1:8080"`).
+- `sidecar.binary_path`: Absolute or bundle path of the executed binary.
+- `sidecar:is_running()`: Returns `true` if the child process is active.
+- `sidecar:kill(sig)`: Terminates the process (defaults to SIGTERM followed by SIGKILL).
+- `sidecar:to_table()`: Serializes sidecar metadata for IPC responses.
 
 ---
 
