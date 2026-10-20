@@ -97,6 +97,53 @@ static bool g_has_main_window = false;
     return nil; // Block unexpected popup windows
 }
 
+- (void)webView:(WKWebView *)webView runJavaScriptAlertPanelWithMessage:(NSString *)message initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(void))completionHandler {
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:[[NSProcessInfo processInfo] processName]];
+    [alert setInformativeText:message ? message : @""];
+    [alert addButtonWithTitle:@"OK"];
+    [NSApp activateIgnoringOtherApps:YES];
+    [alert runModal];
+    completionHandler();
+}
+
+- (void)webView:(WKWebView *)webView runJavaScriptConfirmPanelWithMessage:(NSString *)message initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(BOOL result))completionHandler {
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:[[NSProcessInfo processInfo] processName]];
+    [alert setInformativeText:message ? message : @""];
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Annulla"];
+    if ([alert.buttons count] > 1) {
+        [[alert.buttons objectAtIndex:1] setKeyEquivalent:@"\033"];
+    }
+    [NSApp activateIgnoringOtherApps:YES];
+    NSModalResponse res = [alert runModal];
+    completionHandler(res == NSAlertFirstButtonReturn);
+}
+
+- (void)webView:(WKWebView *)webView runJavaScriptTextInputPanelWithPrompt:(NSString *)prompt defaultText:(NSString *)defaultText initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(NSString * _Nullable result))completionHandler {
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:[[NSProcessInfo processInfo] processName]];
+    [alert setInformativeText:prompt ? prompt : @""];
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Annulla"];
+    if ([alert.buttons count] > 1) {
+        [[alert.buttons objectAtIndex:1] setKeyEquivalent:@"\033"];
+    }
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    if (defaultText) [input setStringValue:defaultText];
+    [alert setAccessoryView:input];
+    [alert layout];
+    [alert.window setInitialFirstResponder:input];
+    [NSApp activateIgnoringOtherApps:YES];
+    NSModalResponse res = [alert runModal];
+    if (res == NSAlertFirstButtonReturn) {
+        completionHandler([input stringValue]);
+    } else {
+        completionHandler(nil);
+    }
+}
+
 - (BOOL)windowShouldClose:(NSWindow *)sender {
     if (self.impl) {
         if (self.impl->force_closing) {

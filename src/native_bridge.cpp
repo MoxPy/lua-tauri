@@ -388,6 +388,8 @@ static void platform_dispatch_file_drop(const char *label, const char *event_typ
     return config;
 }
 @end
+
+
 #endif
 
 #if !defined(_WIN32) && !defined(__APPLE__)
@@ -707,6 +709,7 @@ int platform_window_create(const char *label, const char *title, const char *url
             [nswin setOpaque:NO];
             [nswin setBackgroundColor:[NSColor clearColor]];
         }
+
     });
 #else
     GtkWindow *gtkwin = GTK_WINDOW(native_handle);
@@ -2100,6 +2103,7 @@ void platform_state_unlock() {
 }
 
 void platform_set_csp(const char *csp) {
+    std::lock_guard<std::mutex> lock(g_windows_mutex);
     if (csp && strlen(csp) > 0) {
         g_csp_policy_custom = csp;
     }

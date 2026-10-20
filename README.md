@@ -44,6 +44,7 @@ The table below documents the verification status and implementation state of ca
 | **System Theme & Events** | **Implemented** | **Implemented** | **Implemented** | System theme detection and window event dispatching across active windows. |
 | **System Tray & Menus** | **Implemented** | **Implemented** | **Implemented** | Native menu bars (Cocoa / GTK3 / Win32) and system tray icon support. |
 | **Process Spawning (`shell:execute`)** | **Implemented** | **Implemented** | **Implemented** | Mandatory `allowed_programs` allowlist, argument policy checks, dangerous flag filtering, and 1 MB output cap. |
+| **Sidecars & Native Binaries** | **Implemented** | **Implemented** | **Experimental** | Bundles external executables from `src-tauri/binaries/` into `.app` and package distributions with automated code signing and runtime path resolution. |
 | **C Embedding (`libtaurilua`)** | **Implemented** | **Implemented** | **Implemented** | C ABI defined in `include/taurilua.h`; validated by `tests/smoke_test.c` and `examples/host_c/`. |
 | **Application Updater** | **Not Implemented** | **Not Implemented** | **Not Implemented** | Disabled for security. Unauthenticated archive extraction removed; calls return a fail-closed error. |
 | **Companion Plugins (`sql`, `http`, etc.)** | **External** | **External** | **External** | Companion plugins are maintained in the separate [`lua-tauri-plugins`](https://github.com/MoxPy/lua-tauri-plugins) workspace. |
@@ -137,6 +138,7 @@ my-app/
 ├── src-tauri/                # Native application root
 │   ├── tauri.conf.json       # Central declarative configuration
 │   ├── icons/                # Multi-resolution icons (.icns, .ico, pngs)
+│   ├── binaries/             # Optional: Sidecar native executables (Go, Rust, CLI tools, .env)
 │   └── src/
 │       └── main.lua          # Backend entrypoint (equivalent to main.rs)
 ├── target/                   # Distribution artifacts
@@ -1503,6 +1505,7 @@ target/bundle/
 │   └── tauri-lua-app.app           # Self-contained macOS Application Bundle
 │       └── Contents/Resources/
 │           ├── dist/               # Webview frontend assets
+│           ├── binaries/           # Optional: Bundled sidecar native executables & configs
 │           └── rocks/              # Bundled hermetic LuaRocks & C modules
 ├── dmg/
 │   └── tauri-lua-app_1.0.0_universal.dmg # Mountable Apple Disk Image (or _arm64 / _x86_64)
@@ -1598,7 +1601,92 @@ When a Developer ID is detected (`signingIdentity ~= "-"`):
 
 ---
 
-### 3. Windows Distribution (Standalone & WebView2)
+### 3. Native Sidecars & External Binaries (`src-tauri/binaries/`)
+
+Tauri-Lua supports bundling standalone auxiliary binaries alongside your desktop application (such as local API servers written in Go, Rust, or Python/PyInstaller, or CLI utilities like `ffmpeg` or `sqlite`).
+
+#### Packaging Convention
+Place your compiled native binaries and associated configuration files inside `src-tauri/binaries/`:
+```text
+src-tauri/
+├── tauri.conf.json
+├── binaries/
+│   ├── api-server          # Compiled native executable (Go, Rust, C++, etc.)
+│   └── .env                # Optional environment configuration
+└── src/
+    ├── main.lua
+    └── sidecar.lua
+```
+
+When running `./lua-tauri build`:
+1. The CLI detects `src-tauri/binaries/` and packages the directory into `Contents/Resources/binaries/` inside the `.app` bundle.
+2. Any native executable files inside are signed during the macOS codesigning phase.
+3. The resulting `.dmg` and `.app` bundles are completely self-contained ("batteries-included") and operate independently of development directories.
+
+#### Resolving Binary Paths at Runtime in Lua
+Use `_NSGetExecutablePath` via LuaJIT FFI to resolve the path within the macOS application bundle, with a fallback for local `./lua-tauri dev`:
+
+```lua
+local sidecar = {}
+
+function sidecar.get_path()
+    local ffi = require("ffi")
+    if ffi.os == "OSX" then
+        ffi.cdef[[ int _NSGetExecutablePath(char* buf, uint32_t* bufsize); ]]
+        local buf = ffi.new("char[1024]")
+        local size = ffi.new("uint32_t[1]", 1024)
+        if ffi.C._NSGetExecutablePath(buf, size) == 0 then
+            local full = ffi.string(buf)
+            local macos_dir = full:match("^(.*)/Contents/MacOS/")
+            if macos_dir then
+                local res_bin = macos_dir .. "/Contents/Resources/binaries/api-server"
+                local f = io.open(res_bin, "r")
+                if f then f:close(); return res_bin end
+            end
+        end
+    end
+    -- Fallback for local development
+    return "src-tauri/binaries/api-server"
+end
+
+function sidecar.start(port)
+    local bin = sidecar.get_path()
+    local dir = bin:match("^(.*)/[^/]+$") or "."
+    local cmd = string.format("cd \"%s\" && \"%s\" --port %d > /tmp/sidecar.log 2>&1 & echo $!", dir, bin, port)
+    local handle = io.popen(cmd)
+    local pid = handle and tonumber(handle:read("*l"))
+    if handle then handle:close() end
+    return pid
+end
+
+return sidecar
+```
+
+#### Lifecycle Management
+Register lifecycle hooks in `main.lua` to ensure background sidecars terminate gracefully when the user closes the application:
+
+```lua
+local sidecar = require("sidecar")
+local pid = nil
+
+-- Launch sidecar on main isolate thread only
+if not __IS_ISOLATE_WORKER__ then
+    pid = sidecar.start(8060)
+
+    app:on_window_event(function(event)
+        if event.event == "close-requested" and pid then
+            os.execute("kill -15 " .. tostring(pid) .. " 2>/dev/null")
+            os.execute("kill -9 " .. tostring(pid) .. " 2>/dev/null")
+        end
+    end)
+
+    app:create_main_window()
+end
+```
+
+---
+
+### 4. Windows Distribution (Standalone & WebView2)
 
 On Windows, `./lua-tauri build` produces a standalone portable directory in `target/bundle/windows/` containing:
 * The native executable (`.exe`) compiled against the Microsoft C++ Runtime.
@@ -1609,7 +1697,7 @@ Tauri-Lua on Windows utilizes the official **Microsoft Edge WebView2** runtime. 
 
 ---
 
-### 4. Automated Multi-Platform CI/CD (GitHub Actions)
+### 5. Automated Multi-Platform CI/CD (GitHub Actions)
 
 You don't need three separate physical machines to build for macOS, Linux, and Windows. Commit the following workflow into `.github/workflows/release.yml` to build all platform artifacts simultaneously in the cloud whenever you push a version tag:
 

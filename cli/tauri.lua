@@ -1485,6 +1485,15 @@ local function cmd_build(args)
         end
         exec("cp -r " .. shell_quote(frontend_dist) .. " " .. shell_quote(res_dir .. "/"))
 
+        if file_exists("src-tauri/binaries") then
+            info("Packaging native sidecar binaries into macOS App bundle...")
+            exec("cp -r src-tauri/binaries " .. shell_quote(res_dir .. "/binaries"))
+        end
+
+        if file_exists("src-tauri/src") then
+            exec("cp src-tauri/src/*.lua " .. shell_quote(res_dir .. "/") .. " 2>/dev/null || true")
+        end
+
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
             info("Packaging LuaRocks dependencies into macOS App bundle...")
@@ -1554,10 +1563,16 @@ local function cmd_build(args)
 
         local dmg_file = dmg_dir .. "/" .. app_name .. "_" .. version .. "_x64.dmg"
         info("Creating DMG disk image: " .. dmg_file)
-        local diskutil_cmd = "diskutil image create from --volumeName " .. shell_quote(app_name) .. " --format UDZO " .. shell_quote(macos_bundle_dir) .. " " .. shell_quote(dmg_file) .. " > /dev/null 2>&1"
+        local dmg_stage = target_dir .. "/dmg_stage"
+        exec("rm -rf " .. shell_quote(dmg_stage) .. " && mkdir -p " .. shell_quote(dmg_stage))
+        exec("cp -R " .. shell_quote(macos_bundle_dir) .. " " .. shell_quote(dmg_stage .. "/"))
+        exec("ln -s /Applications " .. shell_quote(dmg_stage .. "/Applications"))
+
+        local diskutil_cmd = "diskutil image create from --volumeName " .. shell_quote(app_name) .. " --format UDZO " .. shell_quote(dmg_stage) .. " " .. shell_quote(dmg_file) .. " > /dev/null 2>&1"
         if os.execute(diskutil_cmd) ~= 0 then
-            exec("hdiutil create -volname " .. shell_quote(app_name) .. " -srcfolder " .. shell_quote(macos_bundle_dir) .. " -ov -format UDZO " .. shell_quote(dmg_file) .. " > /dev/null 2>&1")
+            exec("hdiutil create -volname " .. shell_quote(app_name) .. " -srcfolder " .. shell_quote(dmg_stage) .. " -ov -format UDZO " .. shell_quote(dmg_file) .. " > /dev/null 2>&1")
         end
+        exec("rm -rf " .. shell_quote(dmg_stage))
 
         success("Finished 2 bundles at:")
         io.stdout:write("        " .. colors.green .. macos_bundle_dir .. colors.reset .. "\n")
