@@ -1522,7 +1522,8 @@ local function cmd_build(args)
         end
         write_file(macos_bundle_dir .. "/Contents/Info.plist", plist)
 
-        local sign_identity = os.getenv("APPLE_SIGNING_IDENTITY") or "-"
+        local mac_conf = bundle_conf.macOS or bundle_conf.macos or {}
+        local sign_identity = os.getenv("APPLE_SIGNING_IDENTITY") or mac_conf.signingIdentity or "-"
         info("Signing macOS application bundle with identity: " .. sign_identity)
         -- Sign nested dynamic libraries first (without --deep)
         if file_exists(macos_dir .. "/libtaurilua.dylib") then
