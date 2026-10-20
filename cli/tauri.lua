@@ -1097,6 +1097,17 @@ local function cmd_build(args)
         end
         exec("cp -r " .. shell_quote(frontend_dist) .. " " .. shell_quote(res_dir .. "/"))
 
+        if file_exists("src-tauri/tauri.conf.json") then
+            exec("cp src-tauri/tauri.conf.json " .. shell_quote(res_dir .. "/tauri.conf.json"))
+        end
+
+        if file_exists("src-tauri/src") then
+            info("Packaging backend Lua sources into macOS App bundle...")
+            exec("mkdir -p " .. shell_quote(res_dir .. "/src-tauri/src"))
+            exec("cp -r src-tauri/src/* " .. shell_quote(res_dir .. "/src-tauri/src/"))
+            exec("cp -r src-tauri/src/* " .. shell_quote(res_dir .. "/"))
+        end
+
         local rocks_tree = get_rocks_tree_dir()
         if file_exists(rocks_tree) and (file_exists(rocks_tree .. "/share") or file_exists(rocks_tree .. "/lib")) then
             info("Packaging LuaRocks dependencies into macOS App bundle...")

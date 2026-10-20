@@ -160,8 +160,14 @@ local function setup_module_search_paths()
     -- -----------------------------------------------------------------------
     if exec_dir then
         if exec_dir:match("/Contents/MacOS$") then
-            -- macOS App Bundle (.app/Contents/Resources/rocks)
+            -- macOS App Bundle (.app/Contents/Resources)
             local res_dir = exec_dir:gsub("/MacOS$", "/Resources")
+            table.insert(extra_lua_paths, res_dir .. "/?.lua")
+            table.insert(extra_lua_paths, res_dir .. "/?/init.lua")
+            table.insert(extra_lua_paths, res_dir .. "/src/?.lua")
+            table.insert(extra_lua_paths, res_dir .. "/src/?/init.lua")
+            table.insert(extra_lua_paths, res_dir .. "/src-tauri/src/?.lua")
+            table.insert(extra_lua_paths, res_dir .. "/src-tauri/src/?/init.lua")
             table.insert(extra_lua_paths, res_dir .. "/rocks/share/lua/5.1/?.lua")
             table.insert(extra_lua_paths, res_dir .. "/rocks/share/lua/5.1/?/init.lua")
             table.insert(extra_c_paths,   res_dir .. "/rocks/lib/lua/5.1/?.so")
