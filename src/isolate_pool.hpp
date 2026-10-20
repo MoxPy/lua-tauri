@@ -147,7 +147,7 @@ private:
 
         std::string main_path = ResourceResolver::resolve_main_lua(dev_mode);
         int load_res = 0;
-        if (dev_mode && !main_path.empty()) {
+        if (!main_path.empty()) {
             load_res = luaL_loadfile(L, main_path.c_str());
         } else {
             load_res = luaL_loadbuffer(L, (const char *)luaJIT_BC_main, sizeof(luaJIT_BC_main), "main");

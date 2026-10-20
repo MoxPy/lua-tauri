@@ -336,7 +336,7 @@ int taurilua_run(taurilua_app_t *app) {
         load_res = luaL_loadfile(app->L, app->script_path.c_str());
     } else {
         std::string resolved = ResourceResolver::resolve_main_lua(app->dev_mode);
-        if (!resolved.empty() && app->dev_mode) {
+        if (!resolved.empty()) {
             load_res = luaL_loadfile(app->L, resolved.c_str());
         } else {
             load_res = luaL_loadbuffer(app->L, (const char *)luaJIT_BC_main, sizeof(luaJIT_BC_main), "main");

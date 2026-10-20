@@ -56,17 +56,24 @@ inline std::string get_executable_dir() {
 }
 
 inline bool is_packaged() {
+    const char *env = getenv("TAURILUA_DEV");
+    if (env && env[0] != '\0' && strcmp(env, "0") != 0) return false;
+
     std::string exe_dir = get_executable_dir();
-    if (exe_dir.find(".app/Contents/MacOS") != std::string::npos) return true;
+    if (exe_dir.find(".app/Contents/MacOS") != std::string::npos) {
+        if (exe_dir.find("/build/") != std::string::npos) return false;
+        return true;
+    }
     if (exe_dir.rfind("/usr/bin", 0) == 0 || exe_dir.rfind("/usr/local/bin", 0) == 0) return true;
     return false;
 }
 
 inline bool is_dev_mode(bool config_dev_mode = false) {
-    if (is_packaged()) return false;
-    if (config_dev_mode) return true;
     const char *env = getenv("TAURILUA_DEV");
-    return (env && env[0] != '\0' && strcmp(env, "0") != 0);
+    if (env && env[0] != '\0' && strcmp(env, "0") != 0) return true;
+    if (config_dev_mode) return true;
+    if (is_packaged()) return false;
+    return false;
 }
 
 inline bool file_exists(const std::string &path) {
@@ -103,10 +110,17 @@ inline std::string resolve_bundle_resource(const std::string &rel_path) {
 }
 
 inline std::string resolve_main_lua(bool dev_mode) {
-    if (!dev_mode) {
-        return "";
+    if (dev_mode) {
+        if (file_exists("src-tauri/src/main.lua")) return "src-tauri/src/main.lua";
+        if (file_exists("src/main.lua")) return "src/main.lua";
     }
+
+    std::string bundle_main = resolve_bundle_resource("main.lua");
+    if (!bundle_main.empty()) return bundle_main;
+
     if (file_exists("src-tauri/src/main.lua")) return "src-tauri/src/main.lua";
+    if (file_exists("src/main.lua")) return "src/main.lua";
+
     return "";
 }
 
