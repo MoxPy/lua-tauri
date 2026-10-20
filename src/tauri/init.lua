@@ -360,6 +360,71 @@ if not has_sym then
     end)
 end
 
+local has_state_sym = pcall(function() return clib.platform_state_has end)
+if not has_state_sym then
+    local _state_store = {}
+    local _state_types = {}
+    local real_clib = clib
+    clib = setmetatable({
+        platform_state_lock = function() end,
+        platform_state_unlock = function() end,
+        platform_state_has = function(k)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            return _state_store[sk] ~= nil and 1 or 0
+        end,
+        platform_state_delete = function(k)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            _state_store[sk] = nil
+            _state_types[sk] = nil
+        end,
+        platform_state_set_number = function(k, v)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            _state_store[sk] = tonumber(v)
+            _state_types[sk] = "number"
+        end,
+        platform_state_set_string = function(k, v)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            _state_store[sk] = type(v) == "string" and v or ffi.string(v)
+            _state_types[sk] = "string"
+        end,
+        platform_state_set_json = function(k, v)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            _state_store[sk] = type(v) == "string" and v or ffi.string(v)
+            _state_types[sk] = "json"
+        end,
+        platform_state_get_number = function(k, buf)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            if _state_types[sk] == "number" then
+                buf[0] = _state_store[sk]
+                return 1
+            end
+            return 0
+        end,
+        platform_state_get_string = function(k, buf, maxlen)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            if _state_types[sk] == "string" then
+                local s = _state_store[sk]
+                ffi.copy(buf, s, math.min(#s + 1, maxlen))
+                return 1
+            end
+            return 0
+        end,
+        platform_state_get_json = function(k, buf, maxlen)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            if _state_types[sk] == "json" then
+                local s = _state_store[sk]
+                ffi.copy(buf, s, math.min(#s + 1, maxlen))
+                return 1
+            end
+            return 0
+        end,
+    }, {
+        __index = function(_, k)
+            return real_clib[k]
+        end
+    })
+end
+
 local json = {}
 
 local null_mt = {

@@ -37,8 +37,8 @@ The table below documents the verification status and implementation state of ca
 | Capability / Subsystem | macOS (WebKit) | Linux (WebKitGTK) | Windows (WebView2) | Implementation Details & Validation |
 | :--- | :---: | :---: | :---: | :--- |
 | **Window & Webview Management** | **Implemented** | **Implemented** | **Experimental** | macOS tested on Sonoma 14+; Linux supports WebKitGTK 4.1 (with 4.0 fallback); Windows requires WebView2 runtime. |
-| **Frontend-to-Native IPC** | **Implemented** | **Implemented** | **Experimental / Unverified** | macOS/Linux verified in automated smoke and regression suites; Windows IPC message parser was updated but requires live WebView2 validation. |
-| **Origin & Frame Isolation** | **Implemented** | **Platform-Dependent** | **Platform-Dependent** | macOS enforces `message.frameInfo.isMainFrame`; Linux and Windows mitigate frame access via strict CSP (`frame-src 'none'`). |
+| **Frontend-to-Native IPC** | **Implemented** | **Implemented** | **Implemented (Seams)** | macOS/Linux verified in automated smoke and regression suites; Windows IPC message parser, UTF-16 conversions, and envelope verification validated in native CTest suite. |
+| **Origin & Frame Isolation** | **Implemented** | **Implemented** | **Implemented** | macOS enforces `message.frameInfo.isMainFrame`; Windows enforces `is_frame_source_allowed`; Linux enforces navigation policy and strict CSP (`frame-src 'none'`). |
 | **Filesystem Access (`fs:*`)** | **Implemented** | **Implemented** | **Implemented** | Deny-by-default for empty scopes; canonical resolution; single (`*`) and recursive (`**`) globs; `fs:remove` requires explicit capability. |
 | **Desktop Notifications** | **Implemented** | **Implemented** | **Implemented** | macOS uses `UNUserNotificationCenter` with parameterized fallback; Linux uses `notify-send --`; Windows uses `Shell_NotifyIconW`. |
 | **System Theme & Events** | **Implemented** | **Implemented** | **Implemented** | System theme detection and window event dispatching across active windows. |

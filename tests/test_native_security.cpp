@@ -12,6 +12,7 @@
 #include "src/resource_resolver.hpp"
 #include "src/asset_resolver.hpp"
 #include "src/security_policy.hpp"
+#include "src/ipc_envelope.hpp"
 
 // ---------------------------------------------------------------------------
 // 1. OriginValidator Tests (§4)
@@ -85,45 +86,8 @@ void test_resource_resolver() {
 
 // ---------------------------------------------------------------------------
 // 3. Token Envelope & Constant-Time Verification Tests (§9)
+// Tested directly against production functions in src/ipc_envelope.hpp
 // ---------------------------------------------------------------------------
-static bool constant_time_eq(const std::string &a, const std::string &b) {
-    if (a.length() != b.length()) return false;
-    unsigned char diff = 0;
-    for (size_t i = 0; i < a.length(); ++i) {
-        diff |= (static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]));
-    }
-    return diff == 0;
-}
-
-static bool verify_envelope_token(const std::string &req, const std::string &expected_token) {
-    if (expected_token.empty()) return false;
-    size_t rbracket = req.rfind(']');
-    if (rbracket == std::string::npos) return false;
-    size_t q_end = req.rfind('"', rbracket);
-    if (q_end == std::string::npos || q_end == 0) return false;
-    size_t q_start = q_end;
-    while (q_start > 0) {
-        q_start--;
-        if (req[q_start] == '"') {
-            size_t bsl = 0;
-            size_t b = q_start;
-            while (b > 0 && req[b - 1] == '\\') { bsl++; b--; }
-            if (bsl % 2 == 0) break;
-        }
-    }
-    if (q_start >= q_end) return false;
-    size_t comma = req.rfind(',', q_start);
-    if (comma == std::string::npos) return false;
-    for (size_t i = comma + 1; i < q_start; ++i) {
-        if (!isspace(static_cast<unsigned char>(req[i]))) return false;
-    }
-    for (size_t i = q_end + 1; i < rbracket; ++i) {
-        if (!isspace(static_cast<unsigned char>(req[i]))) return false;
-    }
-    std::string token_in_req = req.substr(q_start + 1, q_end - (q_start + 1));
-    return constant_time_eq(token_in_req, expected_token);
-}
-
 void test_token_verification() {
     std::cout << "[Test] Token Verification & Envelope Extraction (§9)..." << std::endl;
 
@@ -154,42 +118,8 @@ void test_token_verification() {
 
 // ---------------------------------------------------------------------------
 // 4. Windows extract_json_string Tests (§9)
+// Tested directly against production functions in src/ipc_envelope.hpp
 // ---------------------------------------------------------------------------
-static std::string extract_json_string(const std::string &json, const std::string &key) {
-    std::string needle = "\"" + key + "\"";
-    size_t kpos = json.find(needle);
-    if (kpos == std::string::npos) return "";
-    size_t colon = json.find(':', kpos + needle.size());
-    if (colon == std::string::npos) return "";
-    size_t q_start = json.find('"', colon + 1);
-    if (q_start == std::string::npos) return "";
-
-    std::string result;
-    size_t pos = q_start + 1;
-    while (pos < json.size()) {
-        char c = json[pos];
-        if (c == '\\') {
-            if (pos + 1 < json.size()) {
-                char next = json[pos + 1];
-                if (next == '"') { result += '"'; pos += 2; }
-                else if (next == '\\') { result += '\\'; pos += 2; }
-                else if (next == '/') { result += '/'; pos += 2; }
-                else if (next == 'n') { result += '\n'; pos += 2; }
-                else if (next == 'r') { result += '\r'; pos += 2; }
-                else if (next == 't') { result += '\t'; pos += 2; }
-                else { result += next; pos += 2; }
-            } else {
-                break;
-            }
-        } else if (c == '"') {
-            return result;
-        } else {
-            result += c;
-            pos++;
-        }
-    }
-    return result;
-}
 
 void test_windows_ipc_json_parsing() {
     std::cout << "[Test] Windows IPC extract_json_string (§9)..." << std::endl;

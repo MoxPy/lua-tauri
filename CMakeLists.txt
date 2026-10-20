@@ -177,6 +177,28 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_security.cpp)
     )
 endif()
 
+# 6. Origin Validator Unit Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_origin_validator.cpp)
+    add_executable(test_origin_validator
+        tests/test_origin_validator.cpp
+    )
+    target_include_directories(test_origin_validator PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+endif()
+
+# 7. Token & Envelope Standalone Unit Test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_token_standalone.cpp)
+    add_executable(test_token_standalone
+        tests/test_token_standalone.cpp
+    )
+    target_include_directories(test_token_standalone PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+endif()
+
 # Automated CTest Registration
 enable_testing()
 
@@ -186,6 +208,14 @@ endif()
 
 if(TARGET test_native_security)
     add_test(NAME test_native_security COMMAND test_native_security)
+endif()
+
+if(TARGET test_origin_validator)
+    add_test(NAME test_origin_validator COMMAND test_origin_validator)
+endif()
+
+if(TARGET test_token_standalone)
+    add_test(NAME test_token_standalone COMMAND test_token_standalone)
 endif()
 
 add_test(NAME test_security_set1 COMMAND ${LUAJIT_BIN} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_security_set1.lua)

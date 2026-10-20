@@ -6,6 +6,7 @@
 #include <functional>
 #include <cstring>
 #include "security_policy.hpp"
+#include "ipc_envelope.hpp"
 
 extern int g_dev_mode;
 extern std::string g_dev_url;
@@ -635,36 +636,6 @@ static inline webview_t webview_create(int debug, void *window) {
                                                 }
                                                 CoTaskMemFree(json_str);
 
-                                                auto extract_json_string = [](const std::string &str, const std::string &key) -> std::string {
-                                                    std::string needle = "\"" + key + "\"";
-                                                    size_t pos = str.find(needle);
-                                                    if (pos == std::string::npos) return "";
-                                                    pos += needle.length();
-                                                    while (pos < str.size() && (str[pos] == ' ' || str[pos] == ':')) pos++;
-                                                    if (pos >= str.size() || str[pos] != '"') return "";
-                                                    pos++; // skip opening quote
-                                                    std::string val;
-                                                    while (pos < str.size()) {
-                                                        char c = str[pos];
-                                                        if (c == '"') {
-                                                            return val;
-                                                        } else if (c == '\\' && pos + 1 < str.size()) {
-                                                            pos++;
-                                                            char esc = str[pos];
-                                                            if (esc == '"') val += '"';
-                                                            else if (esc == '\\') val += '\\';
-                                                            else if (esc == '/') val += '/';
-                                                            else if (esc == 'n') val += '\n';
-                                                            else if (esc == 'r') val += '\r';
-                                                            else if (esc == 't') val += '\t';
-                                                            else val += esc;
-                                                        } else {
-                                                            val += c;
-                                                        }
-                                                        pos++;
-                                                    }
-                                                    return "";
-                                                };
                                                 std::string name = extract_json_string(u8, "name");
                                                 std::string seq = extract_json_string(u8, "seq");
                                                 std::string req = extract_json_string(u8, "req");
