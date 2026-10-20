@@ -3395,6 +3395,8 @@ Tauri.is_db_allowed = is_db_allowed
 return {
     Tauri = Tauri,
     init = Tauri.new,
+    get_instance = function() return g_tauri_instance end,
+    get_app = function() return g_tauri_instance end,
     new = Tauri.new,
     sleep = Tauri.sleep,
     json = json,
