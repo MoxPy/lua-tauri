@@ -265,6 +265,9 @@ void platform_set_client_script(const char *js);
 void platform_window_init_script(const char *label, const char *js);
 void platform_window_eval(const char *label, const char *js);
 void platform_window_return_async(const char *label, const char *seq, int status, const char *result);
+void platform_register_child_pid(long pid);
+void platform_unregister_child_pid(long pid);
+void platform_kill_child_processes();
 
 int platform_tray_create(const char *tooltip, const char *icon_path);
 void platform_tray_set_menu(const char *json_menu);
@@ -2172,6 +2175,9 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
             local pid_str = handle:read('*l')
             handle:close()
             sc.pid = tonumber(pid_str)
+            if sc.pid and sc.pid > 0 and clib and clib.platform_register_child_pid then
+                pcall(clib.platform_register_child_pid, sc.pid)
+            end
         end
     end
 
@@ -2198,12 +2204,18 @@ end
 
 function Sidecar:kill(sig)
     if self.pid and self.pid > 0 then
+        if clib and clib.platform_unregister_child_pid then
+            pcall(clib.platform_unregister_child_pid, self.pid)
+        end
         local s = sig or 15
         pcall(os.execute, string.format('kill -%d %d 2>/dev/null', s, self.pid))
         if not sig then
             pcall(os.execute, string.format('(sleep 0.1 && kill -9 %d 2>/dev/null) &', self.pid))
         end
         self.pid = nil
+    end
+    if self.port and ffi.os ~= 'Windows' then
+        pcall(os.execute, string.format('lsof -ti :%d 2>/dev/null | xargs kill -9 2>/dev/null', self.port))
     end
     return true
 end

@@ -164,8 +164,42 @@ static bool g_has_main_window = false;
 
 - (void)windowWillClose:(NSNotification *)notification {
     if (self.impl && self.impl->is_main) {
+        platform_kill_child_processes();
         exit(0);
     }
+}
+@end
+
+@interface TauriAppDelegate : NSObject <NSApplicationDelegate>
++ (TauriAppDelegate *)sharedInstance;
+- (void)terminateApp:(id)sender;
+@end
+
+@implementation TauriAppDelegate
++ (TauriAppDelegate *)sharedInstance {
+    static TauriAppDelegate *inst = nil;
+    if (!inst) {
+        inst = [[TauriAppDelegate alloc] init];
+    }
+    return inst;
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
+    return YES;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    platform_kill_child_processes();
+    return NSTerminateNow;
+}
+
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    platform_kill_child_processes();
+}
+
+- (void)terminateApp:(id)sender {
+    platform_kill_child_processes();
+    exit(0);
 }
 @end
 
@@ -260,7 +294,8 @@ static inline void setup_macos_default_menu(bool debug) {
     [appMenu addItem:[NSMenuItem separatorItem]];
 
     NSString *quitTitle = [NSString stringWithFormat:@"Quit %@", appName];
-    [appMenu addItemWithTitle:quitTitle action:@selector(terminate:) keyEquivalent:@"q"];
+    NSMenuItem *quitItem = [appMenu addItemWithTitle:quitTitle action:@selector(terminateApp:) keyEquivalent:@"q"];
+    [quitItem setTarget:[TauriAppDelegate sharedInstance]];
 
     // 2. Edit Menu (Crucial for standard clipboard shortcuts in webview!)
     NSMenuItem *editMenuItem = [[NSMenuItem alloc] init];
@@ -311,6 +346,7 @@ static inline webview_t webview_create(int debug, void *window) {
     run_on_main_sync(^{
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp setDelegate:[TauriAppDelegate sharedInstance]];
         setup_macos_default_menu(debug != 0);
 
         impl = new WebviewImpl();

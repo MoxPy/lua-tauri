@@ -89,6 +89,9 @@ void platform_state_lock();
 void platform_state_unlock();
 
 void platform_set_csp(const char *csp);
+void platform_register_child_pid(long pid);
+void platform_unregister_child_pid(long pid);
+void platform_kill_child_processes();
 void *platform_process_spawn(const char *program, const char **args, int arg_count);
 int platform_process_read_line(void *handle, char *out_buf, int max_len);
 int platform_process_wait(void *handle);

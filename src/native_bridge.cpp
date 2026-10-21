@@ -546,7 +546,48 @@ int platform_list_dir(const char *dir_path, char *out_buf, int max_len) {
     }
 }
 
+static std::vector<long> g_child_pids;
+static std::mutex g_child_pids_mutex;
+
+void platform_register_child_pid(long pid) {
+    if (pid <= 0) return;
+    std::lock_guard<std::mutex> lock(g_child_pids_mutex);
+    g_child_pids.push_back(pid);
+}
+
+void platform_unregister_child_pid(long pid) {
+    if (pid <= 0) return;
+    std::lock_guard<std::mutex> lock(g_child_pids_mutex);
+    g_child_pids.erase(std::remove(g_child_pids.begin(), g_child_pids.end(), pid), g_child_pids.end());
+}
+
+void platform_kill_child_processes() {
+    std::lock_guard<std::mutex> lock(g_child_pids_mutex);
+    for (long pid : g_child_pids) {
+        if (pid > 0) {
+#if !defined(_WIN32)
+            ::kill((pid_t)pid, SIGTERM);
+            ::kill((pid_t)pid, SIGKILL);
+#else
+            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+            if (h) {
+                TerminateProcess(h, 0);
+                CloseHandle(h);
+            }
+#endif
+        }
+    }
+    g_child_pids.clear();
+#if !defined(_WIN32)
+    ::system("lsof -ti :8060 2>/dev/null | xargs kill -9 2>/dev/null");
+    ::system("pkill -9 -f 'api-server' 2>/dev/null");
+#else
+    ::system("taskkill /F /IM api-server.exe /T >NUL 2>&1");
+#endif
+}
+
 void bridge_init(ipc_callback_fn on_ipc, tray_callback_fn on_tray, shortcut_callback_fn on_shortcut, deeplink_callback_fn on_deeplink) {
+    atexit(platform_kill_child_processes);
     g_ipc_cb = on_ipc;
     g_tray_cb = on_tray;
     g_shortcut_cb = on_shortcut;
@@ -2673,6 +2714,9 @@ static void build_nsmenu_items(NSMenu *menu, const std::vector<JsonVal> &items) 
             NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:nsTitle action:action keyEquivalent:keyEq];
             if (modFlags != 0) {
                 [mi setKeyEquivalentModifierMask:modFlags];
+            }
+            if (role == "quit") {
+                [mi setTarget:NSApp];
             }
             [menu addItem:mi];
         } else {

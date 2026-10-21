@@ -8,6 +8,13 @@
 
 #if !defined(_WIN32)
 #include <unistd.h>
+#include <signal.h>
+
+static void handle_exit_signal(int sig) {
+    (void)sig;
+    platform_kill_child_processes();
+    _exit(0);
+}
 #endif
 
 
@@ -117,6 +124,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     char **argv = __argv;
 #else
 int main(int argc, char **argv) {
+#endif
+#if !defined(_WIN32)
+    signal(SIGINT, handle_exit_signal);
+    signal(SIGTERM, handle_exit_signal);
+    signal(SIGHUP, handle_exit_signal);
 #endif
     bool dev_mode = ResourceResolver::is_dev_mode();
     std::string config_content = ResourceResolver::resolve_config_json(dev_mode, tauri_conf_json, tauri_conf_json_len);
