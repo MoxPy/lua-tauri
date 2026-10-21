@@ -982,6 +982,7 @@ static gboolean on_gtk_window_delete_event(GtkWidget *widget, GdkEvent *event, g
             }
         }
         if (impl->is_main) {
+            platform_kill_child_processes();
             gtk_main_quit();
         }
     }
