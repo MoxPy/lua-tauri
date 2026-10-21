@@ -42,6 +42,8 @@ static std::string webview_js_escape(const std::string &s) {
     return out;
 }
 
+static std::string g_app_name = "";
+
 #if defined(__APPLE__)
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
@@ -178,8 +180,6 @@ static inline void run_on_main_sync(void (^block)(void)) {
 static inline void run_on_main_async(void (^block)(void)) {
     dispatch_async(dispatch_get_main_queue(), block);
 }
-
-static std::string g_app_name = "";
 
 static inline void platform_apply_app_name_macos(const char *name) {
     if (!name || name[0] == '\0') return;
@@ -901,7 +901,7 @@ static inline void webview_terminate(webview_t w) {
 struct WebviewImpl {
     GtkWidget *window;
     GtkWidget *wk;
-    WebKitUserContentController *ucc;
+    WebKitUserContentManager *ucc;
     bool is_main;
     std::map<std::string, WebviewBinding> bindings;
     webview_close_cb_fn close_cb = nullptr;
@@ -911,7 +911,7 @@ struct WebviewImpl {
 
 static bool g_has_main_window = false;
 
-static void on_gtk_script_message(WebKitUserContentController *ucc, WebKitJavascriptResult *res, gpointer user_data) {
+static void on_gtk_script_message(WebKitUserContentManager *ucc, WebKitJavascriptResult *res, gpointer user_data) {
     WebviewImpl *impl = static_cast<WebviewImpl *>(user_data);
     if (!impl) return;
 
@@ -965,7 +965,7 @@ static inline webview_t webview_create(int debug, void *window) {
     gtk_window_set_default_size(GTK_WINDOW(impl->window), 800, 600);
 
     WebKitWebContext *context = webkit_web_context_get_default();
-    impl->ucc = webkit_user_content_controller_new();
+    impl->ucc = webkit_user_content_manager_new();
 
     WebKitSettings *settings = webkit_settings_new();
     if (debug) {
@@ -973,10 +973,10 @@ static inline webview_t webview_create(int debug, void *window) {
     }
     webkit_settings_set_enable_javascript(settings, TRUE);
 
-    impl->wk = webkit_web_view_new_with_user_content_controller(impl->ucc);
+    impl->wk = webkit_web_view_new_with_user_content_manager(impl->ucc);
     webkit_web_view_set_settings(WEBKIT_WEB_VIEW(impl->wk), settings);
 
-    webkit_user_content_controller_register_script_message_handler(impl->ucc, "__tauri_bridge__");
+    webkit_user_content_manager_register_script_message_handler(impl->ucc, "__tauri_bridge__");
     g_signal_connect(impl->ucc, "script-message-received::__tauri_bridge__", G_CALLBACK(on_gtk_script_message), impl);
     g_signal_connect(impl->window, "delete-event", G_CALLBACK(on_gtk_window_delete_event), impl);
 
@@ -1027,7 +1027,7 @@ static inline webview_t webview_create(int debug, void *window) {
     WebKitUserScript *script = webkit_user_script_new(
         bridge_js, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
         WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
-    webkit_user_content_controller_add_user_script(impl->ucc, script);
+    webkit_user_content_manager_add_script(impl->ucc, script);
     webkit_user_script_unref(script);
 
     return static_cast<webview_t>(impl);
@@ -1091,7 +1091,7 @@ static inline void webview_init(webview_t w, const char *js) {
     WebKitUserScript *script = webkit_user_script_new(
         js, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
         WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
-    webkit_user_content_controller_add_user_script(impl->ucc, script);
+    webkit_user_content_manager_add_script(impl->ucc, script);
     webkit_user_script_unref(script);
 }
 

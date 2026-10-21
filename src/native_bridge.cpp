@@ -2915,7 +2915,7 @@ static void build_gtk_menu_items(GtkWidget *parent_shell, const std::vector<Json
         }
 
         std::string action = (!role.empty()) ? ("role:" + role) : id;
-        g_signal_connect_data(item_widget, "activate", G_CALLBACK(on_gtk_menu_item_activate), strdup(action.c_str()), (GClosureNotify)free, (GConnectFlags)0);
+        g_signal_connect_data(item_widget, "activate", G_CALLBACK(on_gtk_menu_item_activate), strdup(action.c_str()), +[](gpointer d, GClosure *) { free(d); }, (GConnectFlags)0);
 
         if (!accel.empty() && accel_group) {
             guint key = 0;
