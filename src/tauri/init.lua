@@ -26,8 +26,15 @@ end
 -- Relative cwd paths (./  ../) are restricted to DEV mode only, activated
 -- by setting the TAURILUA_DEV=1 environment variable (set by `lua-tauri dev`).
 -- ============================================================================
-local function get_executable_dir()
+local function slugify_package_name(str)
+    if not str or type(str) ~= "string" or str == "" then return "" end
+    local res = str:gsub("%s+", "-"):gsub("[^%w%+%-%._]", ""):lower():gsub("^%-+", ""):gsub("%-+$", "")
+    return res
+end
+
+local function get_executable_info()
     local dir = nil
+    local exe_name = nil
     pcall(function()
         if ffi.os == "OSX" then
             ffi.cdef[[
@@ -38,6 +45,7 @@ local function get_executable_dir()
             if ffi.C._NSGetExecutablePath(buf, size) == 0 then
                 local full_path = ffi.string(buf)
                 dir = full_path:match("^(.*)/[^/]+$")
+                exe_name = full_path:match("^.*/([^/]+)$")
             end
         elseif ffi.os == "Linux" then
             ffi.cdef[[
@@ -48,6 +56,7 @@ local function get_executable_dir()
             if len > 0 then
                 local full_path = ffi.string(buf, len)
                 dir = full_path:match("^(.*)/[^/]+$")
+                exe_name = full_path:match("^.*/([^/]+)$")
             end
         elseif ffi.os == "Windows" then
             ffi.cdef[[
@@ -65,20 +74,19 @@ local function get_executable_dir()
                 if ulen > 0 then
                     local ubuf = ffi.new("char[?]", ulen)
                     wctomb(65001, 0, wbuf, wlen, ubuf, ulen, nil, nil)
-                    local full_path = ffi.string(ubuf, ulen):gsub("\\", "/")
+                    local full_path = ffi.string(ubuf, ulen):gsub(string.char(92), "/")
                     dir = full_path:match("^(.*)/[^/]+$")
+                    exe_name = full_path:match("^.*/([^/]+)$")
+                    if exe_name then exe_name = exe_name:gsub("%.exe$", "") end
                 end
             end
         end
     end)
-    return dir
+    return dir, exe_name
 end
 
-local function setup_module_search_paths()
-    -- Detect dev mode via env variable (set before Lua state is created).
-    -- __TAURI_DEV__ is injected later by the C host, so we cannot use it here.
+local function setup_module_search_paths(extra_conf)
     local function is_dev_mode()
-        -- Check env via os.getenv (available before ffi.cdef redeclaration)
         local ok, val = pcall(os.getenv, "TAURILUA_DEV")
         if ok and val and val ~= "" and val ~= "0" then
             return true
@@ -87,12 +95,50 @@ local function setup_module_search_paths()
     end
 
     local dev_mode = is_dev_mode()
+    local exec_dir, exe_name = get_executable_info()
 
-    local exec_dir = get_executable_dir()
-
-    -- Paths that are safe in both dev and release (absolute, exec-relative)
     local extra_lua_paths = {}
     local extra_c_paths = {}
+
+    -- Candidate names for system share directories (e.g. /usr/share/<name>/...)
+    local candidate_set = {}
+    local candidates = {}
+    local function add_candidate(val)
+        if type(val) == "string" and val ~= "" then
+            if not candidate_set[val] then
+                candidate_set[val] = true
+                table.insert(candidates, val)
+            end
+            local slug = slugify_package_name(val)
+            if slug ~= "" and not candidate_set[slug] then
+                candidate_set[slug] = true
+                table.insert(candidates, slug)
+            end
+        end
+    end
+
+    if exe_name then add_candidate(exe_name) end
+
+    local embedded_json = rawget(_G, "__EMBEDDED_CONFIG_JSON__")
+    if type(embedded_json) == "string" and embedded_json ~= "" then
+        add_candidate(embedded_json:match('"productName"%s*:%s*"([^"]+)"'))
+        add_candidate(embedded_json:match('"product_name"%s*:%s*"([^"]+)"'))
+        add_candidate(embedded_json:match('"package"%s*:%s*{.-"name"%s*:%s*"([^"]+)"'))
+        add_candidate(embedded_json:match('"name"%s*:%s*"([^"]+)"'))
+    end
+
+    if type(extra_conf) == "table" then
+        add_candidate(extra_conf.productName)
+        add_candidate(extra_conf.product_name)
+        if type(extra_conf.package) == "table" then
+            add_candidate(extra_conf.package.productName)
+            add_candidate(extra_conf.package.name)
+        end
+        add_candidate(extra_conf.name)
+    end
+
+    add_candidate("app")
+    add_candidate("tauri-app")
 
     -- -----------------------------------------------------------------------
     -- DEV-ONLY relative paths (cwd-relative, sibling repos, node_modules).
@@ -182,14 +228,16 @@ local function setup_module_search_paths()
             table.insert(extra_c_paths,   res_dir .. "/rocks/lib/lua/5.1/?.dylib")
         else
             -- Linux / Windows standalone or installed packages
+            -- 1. Exec-relative standalone paths
             table.insert(extra_lua_paths, exec_dir .. "/plugins/?.lua")
             table.insert(extra_lua_paths, exec_dir .. "/plugins/?/init.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/plugins/?/src/?.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/src/?.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/src/?/init.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/?.lua")
+            table.insert(extra_lua_paths, exec_dir .. "/?/init.lua")
             table.insert(extra_lua_paths, exec_dir .. "/../share/plugins/?.lua")
             table.insert(extra_lua_paths, exec_dir .. "/../share/plugins/?/init.lua")
-            local raw_name = (type(conf) == "table" and conf.package and conf.package.productName) or "app"
-            local pkg_name = raw_name:gsub("%s+", "-"):gsub("[^%w%+%-%._]", ""):lower():gsub("^%-+", ""):gsub("%-+$", "")
-            table.insert(extra_lua_paths, "/usr/share/" .. pkg_name .. "/plugins/?.lua")
-            table.insert(extra_lua_paths, "/usr/share/" .. pkg_name .. "/plugins/?/init.lua")
             table.insert(extra_lua_paths, exec_dir .. "/rocks/share/lua/5.1/?.lua")
             table.insert(extra_lua_paths, exec_dir .. "/rocks/share/lua/5.1/?/init.lua")
             table.insert(extra_lua_paths, exec_dir .. "/../Resources/rocks/share/lua/5.1/?.lua")
@@ -202,6 +250,44 @@ local function setup_module_search_paths()
             table.insert(extra_c_paths,   exec_dir .. "/../Resources/rocks/lib/lua/5.1/?.so")
             table.insert(extra_c_paths,   exec_dir .. "/../Resources/rocks/lib/lua/5.1/?.dylib")
             table.insert(extra_c_paths,   exec_dir .. "/../share/rocks/lib/lua/5.1/?.so")
+
+            -- 2. Linux system packages (/usr/share/<name> and /usr/local/share/<name>)
+            for _, c in ipairs(candidates) do
+                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/plugins/?.lua")
+                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/plugins/?/init.lua")
+                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/plugins/?/src/?.lua")
+                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/src/?.lua")
+                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/src/?/init.lua")
+                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/?.lua")
+                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/?/init.lua")
+                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/rocks/share/lua/5.1/?.lua")
+                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/rocks/share/lua/5.1/?/init.lua")
+
+                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/plugins/?.lua")
+                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/plugins/?/init.lua")
+                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/plugins/?/src/?.lua")
+                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/src/?.lua")
+                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/src/?/init.lua")
+                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/?.lua")
+                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/?/init.lua")
+                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/rocks/share/lua/5.1/?.lua")
+                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/rocks/share/lua/5.1/?/init.lua")
+
+                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/plugins/?.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/plugins/?/init.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/plugins/?/src/?.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/src/?.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/src/?/init.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/?.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/?/init.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/rocks/share/lua/5.1/?.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/rocks/share/lua/5.1/?/init.lua")
+
+                table.insert(extra_c_paths, "/usr/share/" .. c .. "/rocks/lib/lua/5.1/?.so")
+                table.insert(extra_c_paths, "/usr/local/share/" .. c .. "/rocks/lib/lua/5.1/?.so")
+                table.insert(extra_c_paths, exec_dir .. "/../share/" .. c .. "/rocks/lib/lua/5.1/?.so")
+                table.insert(extra_c_paths, "/usr/lib/" .. c .. "/?.so")
+            end
         end
     end
 
@@ -2253,31 +2339,10 @@ function Tauri.new(config)
     end
     config = config or {}
     self.config = config
+    setup_module_search_paths(self.config)
     local app_name = (config.package and config.package.name) or config.productName or "tauri-lua-app"
     if not __IS_ISOLATE_WORKER__ then
         pcall(function() clib.platform_set_app_name(app_name) end)
-    end
-    if ffi.os == "Linux" then
-        local linux_paths = {
-            "/usr/share/" .. app_name .. "/rocks/share/lua/5.1/?.lua",
-            "/usr/share/" .. app_name .. "/rocks/share/lua/5.1/?/init.lua",
-            "/usr/local/share/" .. app_name .. "/rocks/share/lua/5.1/?.lua",
-            "/usr/local/share/" .. app_name .. "/rocks/share/lua/5.1/?/init.lua"
-        }
-        local linux_cpaths = {
-            "/usr/share/" .. app_name .. "/rocks/lib/lua/5.1/?.so",
-            "/usr/local/share/" .. app_name .. "/rocks/lib/lua/5.1/?.so"
-        }
-        for _, p in ipairs(linux_paths) do
-            if not package.path:find(p, 1, true) then
-                package.path = package.path .. ";" .. p
-            end
-        end
-        for _, cp in ipairs(linux_cpaths) do
-            if not package.cpath:find(cp, 1, true) then
-                package.cpath = package.cpath .. ";" .. cp
-            end
-        end
     end
     self.security = Security.new(config)
     self.commands = {}

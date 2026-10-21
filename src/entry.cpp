@@ -129,6 +129,10 @@ int main(int argc, char **argv) {
     signal(SIGINT, handle_exit_signal);
     signal(SIGTERM, handle_exit_signal);
     signal(SIGHUP, handle_exit_signal);
+#if !defined(__APPLE__)
+    // Prevent harmless GTK accessibility bus warning when AT-SPI DBus daemon is not running (e.g. ChromeOS Crostini, Docker, minimal Linux)
+    setenv("NO_AT_BRIDGE", "1", 0);
+#endif
 #endif
     bool dev_mode = ResourceResolver::is_dev_mode();
     std::string config_content = ResourceResolver::resolve_config_json(dev_mode, tauri_conf_json, tauri_conf_json_len);

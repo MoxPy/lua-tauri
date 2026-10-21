@@ -1637,12 +1637,40 @@ local function cmd_build(args)
             copy_dir_recursive(rocks_tree, rocks_dest)
         end
 
+        local icon_src = nil
+        if file_exists("src-tauri/icons/128x128.png") then
+            icon_src = "src-tauri/icons/128x128.png"
+        elseif file_exists("src-tauri/icons/icon.png") then
+            icon_src = "src-tauri/icons/icon.png"
+        elseif file_exists("icons/icon.png") then
+            icon_src = "icons/icon.png"
+        end
+        if icon_src then
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/pixmaps"))
+            exec("cp " .. shell_quote(icon_src) .. " " .. shell_quote(deb_dir .. "/usr/share/pixmaps/" .. deb_pkg_name .. ".png") .. " 2>/dev/null || true")
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/icons/hicolor/128x128/apps"))
+            exec("cp " .. shell_quote(icon_src) .. " " .. shell_quote(deb_dir .. "/usr/share/icons/hicolor/128x128/apps/" .. deb_pkg_name .. ".png") .. " 2>/dev/null || true")
+        end
+
+        exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/applications"))
+        local desktop_file = string.format([[Desktop Entry]
+Type=Application
+Name=%s
+Exec=/usr/bin/%s
+Icon=%s
+Terminal=false
+Categories=Utility;Network;
+]], app_name, deb_pkg_name, deb_pkg_name)
+        desktop_file = "[" .. desktop_file
+        write_file(deb_dir .. "/usr/share/applications/" .. deb_pkg_name .. ".desktop", desktop_file)
+
         local control = string.format([[Package: %s
 Version: %s
 Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: Developer <dev@example.com>
+Depends: libgtk-3-0, libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37, libluajit-5.1-2, libcurl4 | libcurl3-gnutls
 Description: %s built with Tauri-Lua
 ]], deb_pkg_name, version, app_name)
 

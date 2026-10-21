@@ -990,6 +990,9 @@ static gboolean on_gtk_window_delete_event(GtkWidget *widget, GdkEvent *event, g
 }
 
 static inline webview_t webview_create(int debug, void *window) {
+#if defined(__linux__) || (!defined(_WIN32) && !defined(__APPLE__))
+    setenv("NO_AT_BRIDGE", "1", 0);
+#endif
     if (!gtk_init_check(NULL, NULL)) {
         return nullptr;
     }
