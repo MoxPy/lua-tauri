@@ -2107,8 +2107,13 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
 
     local port = opts.port or tonumber(env_vars['PORT']) or 8060
     env_vars['PORT'] = tostring(port)
-    if not env_vars['FRONTEND_URL'] then
+    if not env_vars['FRONTEND_URL'] or env_vars['FRONTEND_URL'] == '' or env_vars['FRONTEND_URL'] == 'http://localhost:5173' then
         env_vars['FRONTEND_URL'] = '*'
+    end
+
+    if port and ffi.os ~= 'Windows' then
+        -- Free any stale orphaned instance holding our port
+        os.execute(string.format('lsof -ti :%d 2>/dev/null | xargs kill -9 2>/dev/null', port))
     end
 
     local host = opts.host or '127.0.0.1'
