@@ -231,6 +231,24 @@ static bool read_file_bytes(const std::string &full_path, std::string &out_data)
     return true;
 }
 
+static file_drop_callback_fn g_file_drop_cb = nullptr;
+void platform_file_drop_set_callback(file_drop_callback_fn cb) {
+    g_file_drop_cb = cb;
+}
+
+static void platform_dispatch_file_drop(const char *label, const char *event_type, const std::vector<std::string> &paths, double x, double y) {
+    std::string json = "{\"paths\":[";
+    for (size_t i = 0; i < paths.size(); ++i) {
+        if (i > 0) json += ",";
+        json += json_escape_string(paths[i]);
+    }
+    json += "],\"position\":{\"x\":" + std::to_string((int)x) + ",\"y\":" + std::to_string((int)y) + "}}";
+
+    if (g_file_drop_cb) {
+        g_file_drop_cb(label ? label : "main", event_type ? event_type : "drop", json.c_str());
+    }
+}
+
 #if defined(__APPLE__)
 @interface TauriURLSchemeHandler : NSObject <WKURLSchemeHandler>
 @end
@@ -306,23 +324,7 @@ static bool read_file_bytes(const std::string &full_path, std::string &out_data)
 }
 @end
 
-static file_drop_callback_fn g_file_drop_cb = nullptr;
-void platform_file_drop_set_callback(file_drop_callback_fn cb) {
-    g_file_drop_cb = cb;
-}
 
-static void platform_dispatch_file_drop(const char *label, const char *event_type, const std::vector<std::string> &paths, double x, double y) {
-    std::string json = "{\"paths\":[";
-    for (size_t i = 0; i < paths.size(); ++i) {
-        if (i > 0) json += ",";
-        json += json_escape_string(paths[i]);
-    }
-    json += "],\"position\":{\"x\":" + std::to_string((int)x) + ",\"y\":" + std::to_string((int)y) + "}}";
-
-    if (g_file_drop_cb) {
-        g_file_drop_cb(label ? label : "main", event_type ? event_type : "drop", json.c_str());
-    }
-}
 
 @interface WKWebView (TauriDragDrop)
 @end
