@@ -1612,6 +1612,9 @@ local function cmd_build(args)
             info("Packaging native sidecar binaries into Debian package...")
             exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries"))
             exec("cp -r src-tauri/binaries/* " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/") .. " 2>/dev/null || true")
+            if file_exists("src-tauri/binaries/.env") then
+                exec("cp src-tauri/binaries/.env " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/.env") .. " 2>/dev/null || true")
+            end
             exec("chmod +x " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/*") .. " 2>/dev/null || true")
         end
 

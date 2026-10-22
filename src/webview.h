@@ -976,6 +976,7 @@ static void on_gtk_window_destroy(GtkWidget *widget, gpointer data) {
     (void)widget; (void)data;
     platform_kill_child_processes();
     gtk_main_quit();
+    _exit(0);
 }
 
 static gboolean on_gtk_window_delete_event(GtkWidget *widget, GdkEvent *event, gpointer data) {
@@ -988,8 +989,11 @@ static gboolean on_gtk_window_delete_event(GtkWidget *widget, GdkEvent *event, g
             }
         }
         platform_kill_child_processes();
+        gtk_widget_destroy(widget);
         gtk_main_quit();
+        _exit(0);
     }
+    _exit(0);
     return FALSE;
 }
 

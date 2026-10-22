@@ -621,7 +621,6 @@ void platform_kill_child_processes() {
     }
     g_child_pids.clear();
 #if !defined(_WIN32)
-    ::system("lsof -ti :8060 2>/dev/null | xargs kill -9 2>/dev/null");
     ::system("pkill -9 -f 'api-server' 2>/dev/null");
 #else
     ::system("taskkill /F /IM api-server.exe /T >NUL 2>&1");
