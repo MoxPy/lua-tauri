@@ -1476,6 +1476,7 @@ local function cmd_build(args)
         local macos_dir = macos_bundle_dir .. "/Contents/MacOS"
         local res_dir = macos_bundle_dir .. "/Contents/Resources"
 
+        exec("rm -rf " .. shell_quote(macos_bundle_dir))
         info("Bundling macOS App...")
         exec("mkdir -p " .. shell_quote(macos_dir))
         exec("mkdir -p " .. shell_quote(res_dir))
@@ -1594,6 +1595,7 @@ local function cmd_build(args)
         local deb_pkg_name = app_name:gsub("%s+", "-"):gsub("[^%w%+%-%._]", ""):lower():gsub("^%-+", ""):gsub("%-+$", "")
         if deb_pkg_name == "" then deb_pkg_name = "tauri-app" end
         local deb_dir = target_dir .. "/deb/" .. deb_pkg_name .. "_" .. version .. "_amd64"
+        exec("rm -rf " .. shell_quote(deb_dir))
         info("Bundling Debian (.deb) package `" .. deb_pkg_name .. "`...")
         exec("mkdir -p " .. shell_quote(deb_dir .. "/DEBIAN"))
         exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/bin"))
