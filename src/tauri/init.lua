@@ -85,6 +85,11 @@ local function get_executable_info()
     return dir, exe_name
 end
 
+local function get_executable_dir()
+    local dir = get_executable_info()
+    return dir
+end
+
 local function setup_module_search_paths(extra_conf)
     local function is_dev_mode()
         local ok, val = pcall(os.getenv, "TAURILUA_DEV")
@@ -2046,10 +2051,13 @@ function Sidecar.resolve_path(name, app_name)
         table.insert(candidates, name)
     elseif os_name == 'Linux' then
         table.insert(candidates, name .. '-linux-' .. norm_arch)
-        if norm_arch == 'arm64' then
+        if norm_arch == 'arm64' or norm_arch == 'aarch64' then
+            table.insert(candidates, name .. '-linux-arm64')
             table.insert(candidates, name .. '-linux-aarch64')
         else
+            table.insert(candidates, name .. '-linux-amd64')
             table.insert(candidates, name .. '-linux-x86_64')
+            table.insert(candidates, name .. '-linux-x64')
         end
         table.insert(candidates, name)
     else -- OSX / macOS
@@ -2082,6 +2090,10 @@ function Sidecar.resolve_path(name, app_name)
         if appdir and appdir ~= '' then
             table.insert(search_dirs, appdir .. '/usr/share/' .. clean_name .. '/binaries')
             table.insert(search_dirs, appdir .. '/usr/share/' .. slug_name .. '/binaries')
+        end
+        if exec_dir then
+            table.insert(search_dirs, exec_dir .. '/../share/' .. clean_name .. '/binaries')
+            table.insert(search_dirs, exec_dir .. '/../share/' .. slug_name .. '/binaries')
         end
     end
 
@@ -2143,9 +2155,15 @@ function Sidecar.find_env_file(bin_path, app_name, custom_env_file)
     end
 
     if app_name and ffi.os == 'Linux' then
-        local slug_name = app_name:lower():gsub('%s+', '-')
-        table.insert(search_paths, '/usr/share/' .. app_name .. '/binaries/.env')
+        local clean_name = app_name:gsub('[^%w_%- ]', '')
+        local slug_name = clean_name:lower():gsub('%s+', '-')
+        table.insert(search_paths, '/usr/share/' .. clean_name .. '/binaries/.env')
+        table.insert(search_paths, '/usr/share/' .. slug_name .. '/binaries/.env')
         table.insert(search_paths, '/etc/' .. slug_name .. '/.env')
+        if exec_dir then
+            table.insert(search_paths, exec_dir .. '/../share/' .. clean_name .. '/binaries/.env')
+            table.insert(search_paths, exec_dir .. '/../share/' .. slug_name .. '/binaries/.env')
+        end
     end
 
     table.insert(search_paths, 'src-tauri/binaries/.env')
