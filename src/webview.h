@@ -972,6 +972,12 @@ static void on_gtk_script_message(WebKitUserContentManager *ucc, WebKitJavascrip
     }
 }
 
+static void on_gtk_window_destroy(GtkWidget *widget, gpointer data) {
+    (void)widget; (void)data;
+    platform_kill_child_processes();
+    gtk_main_quit();
+}
+
 static gboolean on_gtk_window_delete_event(GtkWidget *widget, GdkEvent *event, gpointer data) {
     WebviewImpl *impl = static_cast<WebviewImpl *>(data);
     if (impl) {
@@ -981,10 +987,8 @@ static gboolean on_gtk_window_delete_event(GtkWidget *widget, GdkEvent *event, g
                 return TRUE; // PREVENT DEFAULT in GTK!
             }
         }
-        if (impl->is_main) {
-            platform_kill_child_processes();
-            gtk_main_quit();
-        }
+        platform_kill_child_processes();
+        gtk_main_quit();
     }
     return FALSE;
 }
@@ -1019,6 +1023,7 @@ static inline webview_t webview_create(int debug, void *window) {
     webkit_user_content_manager_register_script_message_handler(impl->ucc, "__tauri_bridge__");
     g_signal_connect(impl->ucc, "script-message-received::__tauri_bridge__", G_CALLBACK(on_gtk_script_message), impl);
     g_signal_connect(impl->window, "delete-event", G_CALLBACK(on_gtk_window_delete_event), impl);
+    g_signal_connect(impl->window, "destroy", G_CALLBACK(on_gtk_window_destroy), impl);
 
     g_signal_connect(impl->wk, "decide-policy", G_CALLBACK(+[](WebKitWebView *web_view, WebKitPolicyDecision *decision, WebKitPolicyDecisionType type, gpointer user_data) -> gboolean {
         (void)web_view; (void)user_data;

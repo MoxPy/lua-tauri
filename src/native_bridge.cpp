@@ -400,7 +400,49 @@ static void gtk_uri_scheme_request_cb(WebKitURISchemeRequest *request, gpointer 
     std::string req_path = (path_str && strlen(path_str) > 0) ? path_str : "/index.html";
 
     std::string full_path;
-    if (!resolve_contained_asset(g_assets_root, req_path, full_path)) {
+    bool found = resolve_contained_asset(g_assets_root, req_path, full_path);
+    if (!found) {
+        std::vector<std::string> search_roots;
+        char exe_buf[1024];
+        ssize_t elen = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
+        if (elen > 0) {
+            exe_buf[elen] = ' ';
+            std::string ep(exe_buf);
+            size_t slash = ep.rfind('/');
+            if (slash != std::string::npos) {
+                std::string exe_name = ep.substr(slash + 1);
+                std::string exe_dir = ep.substr(0, slash);
+                search_roots.push_back("/usr/share/" + exe_name + "/" + g_assets_root);
+                search_roots.push_back("/usr/share/" + exe_name);
+                search_roots.push_back("/usr/local/share/" + exe_name + "/" + g_assets_root);
+                search_roots.push_back("/usr/local/share/" + exe_name);
+                search_roots.push_back(exe_dir + "/../share/" + exe_name + "/" + g_assets_root);
+                search_roots.push_back(exe_dir + "/../share/" + exe_name);
+                search_roots.push_back(exe_dir + "/" + g_assets_root);
+                search_roots.push_back(exe_dir);
+            }
+        }
+        if (!g_app_name.empty()) {
+            std::string slug = g_app_name;
+            for (char &c : slug) c = tolower(c);
+            for (char &c : slug) if (c == ' ' || c == '_') c = '-';
+            search_roots.push_back("/usr/share/" + slug + "/" + g_assets_root);
+            search_roots.push_back("/usr/share/" + slug);
+            search_roots.push_back("/usr/share/" + g_app_name + "/" + g_assets_root);
+            search_roots.push_back("/usr/share/" + g_app_name);
+            search_roots.push_back("/usr/local/share/" + slug + "/" + g_assets_root);
+            search_roots.push_back("/usr/local/share/" + slug);
+        }
+
+        for (const auto &root : search_roots) {
+            if (resolve_contained_asset(root, req_path, full_path)) {
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
         GError *error = g_error_new_literal(G_FILE_ERROR, G_FILE_ERROR_NOENT, "404 Not Found");
         webkit_uri_scheme_request_finish_error(request, error);
         g_error_free(error);

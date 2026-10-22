@@ -165,5 +165,9 @@ int main(int argc, char **argv) {
 
     int ret = taurilua_run(app);
     taurilua_destroy(app);
+#if !defined(_WIN32)
+    platform_kill_child_processes();
+    _exit(ret);
+#endif
     return ret;
 }

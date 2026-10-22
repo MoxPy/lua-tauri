@@ -2576,7 +2576,43 @@ function Tauri:_setup_asset_scheme()
     if dist_dir:sub(1, 3) == "../" then
         dist_dir = dist_dir:sub(4)
     end
-    pcall(function() clib.platform_set_assets_path(dist_dir) end)
+
+    local exec_dir, exe_name = get_executable_info()
+    local app_name = (self.config.package and self.config.package.name) or self.config.productName or "app"
+    local slug_name = slugify_package_name(app_name)
+    local candidates = {
+        dist_dir,
+        "/usr/share/" .. slug_name .. "/" .. dist_dir,
+        "/usr/share/" .. slug_name,
+        "/usr/local/share/" .. slug_name .. "/" .. dist_dir,
+        "/usr/local/share/" .. slug_name
+    }
+    if exe_name then
+        table.insert(candidates, "/usr/share/" .. exe_name .. "/" .. dist_dir)
+        table.insert(candidates, "/usr/share/" .. exe_name)
+        table.insert(candidates, "/usr/local/share/" .. exe_name .. "/" .. dist_dir)
+        table.insert(candidates, "/usr/local/share/" .. exe_name)
+    end
+    if exec_dir then
+        table.insert(candidates, exec_dir .. "/../share/" .. slug_name .. "/" .. dist_dir)
+        table.insert(candidates, exec_dir .. "/../share/" .. slug_name)
+        if exe_name then
+            table.insert(candidates, exec_dir .. "/../share/" .. exe_name .. "/" .. dist_dir)
+            table.insert(candidates, exec_dir .. "/../share/" .. exe_name)
+        end
+        table.insert(candidates, exec_dir .. "/" .. dist_dir)
+        table.insert(candidates, exec_dir)
+    end
+    local chosen_dist = dist_dir
+    for _, c in ipairs(candidates) do
+        local f = io.open(c .. "/index.html", "r")
+        if f then
+            f:close()
+            chosen_dist = c
+            break
+        end
+    end
+    pcall(function() clib.platform_set_assets_path(chosen_dist) end)
 
     local dev_url = build_conf.devUrl or build_conf.devPath
     if dev_url and dev_url ~= "" then
