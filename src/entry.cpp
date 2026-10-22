@@ -132,6 +132,8 @@ int main(int argc, char **argv) {
 #if !defined(__APPLE__)
     // Prevent harmless GTK accessibility bus warning when AT-SPI DBus daemon is not running (e.g. ChromeOS Crostini, Docker, minimal Linux)
     setenv("NO_AT_BRIDGE", "1", 0);
+    // Eliminate severe WebKitGTK lag/stuttering in virtualized containers (ChromeOS Crostini, WSL2)
+    setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", 0);
 #endif
 #endif
     bool dev_mode = ResourceResolver::is_dev_mode();
