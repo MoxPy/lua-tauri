@@ -2287,25 +2287,59 @@ function Sidecar.find_env_file(bin_path, app_name, custom_env_file)
         return custom_env_file
     end
 
-    local is_dev = (os.getenv("TAURILUA_DEV") == "1") or (rawget(_G, "__TAURI_DEV__") == true)
-    if not is_dev then
-        return nil
-    end
+    local clean_name = (app_name or "tauri-app"):gsub("[^%w_%- ]", "")
+    local slug_name = clean_name:lower():gsub("%s+", "-")
+    local home = os.getenv("HOME")
 
     local search_paths = {}
+
+    -- 1. Adjacent to binary (.env in sidecar directory or parent)
     if bin_path then
         local bin_dir = bin_path:match('^(.*)/[^/]+$')
         if bin_dir then
-            table.insert(search_paths, bin_dir .. '/.env')
+            table.insert(search_paths, bin_dir .. "/.env")
+            local parent_dir = bin_dir:match('^(.*)/[^/]+$')
+            if parent_dir then
+                table.insert(search_paths, parent_dir .. "/.env")
+            end
         end
     end
 
-    table.insert(search_paths, 'src-tauri/binaries/.env')
-    table.insert(search_paths, 'src-tauri/.env')
-    table.insert(search_paths, './src-tauri/binaries/.env')
-    table.insert(search_paths, './src-tauri/.env')
-    table.insert(search_paths, '.env')
-    table.insert(search_paths, './.env')
+    -- 2. User Configuration Directory (~/.config/<slug>/.env and Application Support)
+    if home and home ~= "" then
+        table.insert(search_paths, home .. "/.config/" .. slug_name .. "/.env")
+        table.insert(search_paths, home .. "/.config/" .. clean_name .. "/.env")
+        table.insert(search_paths, home .. "/." .. slug_name .. ".env")
+        if ffi.os == "OSX" then
+            table.insert(search_paths, home .. "/Library/Application Support/" .. (app_name or "tauri-app") .. "/.env")
+            table.insert(search_paths, home .. "/Library/Application Support/" .. slug_name .. "/.env")
+        end
+    end
+
+    -- 3. System Configuration Directories (Linux)
+    if ffi.os == "Linux" then
+        table.insert(search_paths, "/usr/share/" .. clean_name .. "/binaries/.env")
+        table.insert(search_paths, "/usr/share/" .. slug_name .. "/binaries/.env")
+        table.insert(search_paths, "/etc/" .. slug_name .. "/.env")
+        table.insert(search_paths, "/etc/" .. clean_name .. "/.env")
+    end
+
+    -- 4. macOS Bundle Resources (.app/Contents/Resources/binaries/.env)
+    local exec_dir = get_executable_dir()
+    if exec_dir and exec_dir:match("/Contents/MacOS$") then
+        local res_dir = exec_dir:gsub("/MacOS$", "/Resources")
+        table.insert(search_paths, res_dir .. "/binaries/.env")
+        table.insert(search_paths, res_dir .. "/.env")
+    end
+
+    -- 5. Development & Project root relative paths
+    table.insert(search_paths, "src-tauri/binaries/.env")
+    table.insert(search_paths, "src-tauri/.env")
+    table.insert(search_paths, "./src-tauri/binaries/.env")
+    table.insert(search_paths, "./src-tauri/.env")
+    table.insert(search_paths, ".env")
+    table.insert(search_paths, "./.env")
+    table.insert(search_paths, "../.env")
 
     for _, p in ipairs(search_paths) do
         if file_readable(p) then
@@ -2355,7 +2389,7 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
     local bin_dir = opts.cwd or bin_path:match('^(.*)/[^/]+$') or '.'
     local log_file = opts.log_file
     if not log_file or log_file == '' then
-        log_file = (ffi.os == 'Windows') and 'NUL' or '/dev/null'
+        log_file = (ffi.os == 'Windows') and 'NUL' or string.format('/tmp/%s_%s.log', app_name:lower():gsub('[^%w_]', '_'), tostring(name):lower():gsub('[^%w_]', '_'))
     end
 
     local sc = setmetatable({

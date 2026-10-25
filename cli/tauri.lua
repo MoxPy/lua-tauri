@@ -1549,7 +1549,9 @@ local function cmd_build(args)
             exec("cp -r src-tauri/binaries " .. shell_quote(res_dir .. "/binaries"))
             exec("rm -f " .. shell_quote(res_dir .. "/binaries") .. "/*-linux-* 2>/dev/null || true")
             exec("rm -f " .. shell_quote(res_dir .. "/binaries") .. "/*.exe 2>/dev/null || true")
-            exec("rm -f " .. shell_quote(res_dir .. "/binaries/.env") .. " " .. shell_quote(res_dir .. "/binaries/.env.*") .. " 2>/dev/null || true")
+            if file_exists("src-tauri/binaries/.env") then
+                exec("cp " .. shell_quote("src-tauri/binaries/.env") .. " " .. shell_quote(res_dir .. "/binaries/.env") .. " 2>/dev/null || true")
+            end
         end
 
         if file_exists("src-tauri/plugins") then
