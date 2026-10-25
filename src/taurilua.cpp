@@ -416,12 +416,6 @@ void taurilua_emit(taurilua_app_t *app, const char *event_name, const char *payl
         }
     } else {
         lua_pop(app->L, 1);
-        // Fallback: evaluate window.__TAURI__.event.emit across windows safely quoted
-        std::string safe_event = json_escape_string(event_name);
-        std::string safe_payload = (payload_json && payload_json[0] != '\0') ? payload_json : "{}";
-        std::string js = std::string("if(window.__TAURI__&&window.__TAURI__.event){window.__TAURI__.event.emit(") +
-                         safe_event + "," + safe_payload + ");}";
-        platform_window_eval("main", js.c_str());
     }
 }
 

@@ -30,6 +30,16 @@
 #include <sys/ucred.h>
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define TAURILUA_INTERNAL __attribute__((visibility("hidden")))
+#else
+#define TAURILUA_INTERNAL
+#endif
+
+TAURILUA_INTERNAL std::atomic<bool> g_dev_mode{false};
+TAURILUA_INTERNAL std::string g_dev_url = "";
+TAURILUA_INTERNAL std::mutex g_config_mutex;
+
 #define WEBVIEW_STATIC
 #define WEBVIEW_IMPLEMENTATION
 #include "webview.h"
@@ -71,12 +81,15 @@ extern char **environ;
 #include <sys/random.h>
 #endif
 
-int g_dev_mode = 0;
-std::string g_dev_url = "";
 static std::string g_csp_policy_custom = "";
 
 static std::string get_effective_csp() {
-    return SecurityPolicy::build_default_csp(g_dev_mode != 0, g_csp_policy_custom);
+    std::string csp_copy;
+    {
+        std::lock_guard<std::mutex> lock(g_config_mutex);
+        csp_copy = g_csp_policy_custom;
+    }
+    return SecurityPolicy::build_default_csp(g_dev_mode.load(), csp_copy);
 }
 
 static std::string generate_session_token() {
@@ -326,25 +339,11 @@ static void platform_dispatch_file_drop(const char *label, const char *event_typ
 
 
 
-@interface WKWebView (TauriDragDrop)
+@interface TauriWKWebView : WKWebView
 @end
 
-@implementation WKWebView (TauriDragDrop)
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class cls = [WKWebView class];
-        SEL origSel = @selector(performDragOperation:);
-        SEL swizSel = @selector(tauri_performDragOperation:);
-        Method origMethod = class_getInstanceMethod(cls, origSel);
-        Method swizMethod = class_getInstanceMethod(cls, swizSel);
-        if (origMethod && swizMethod) {
-            method_exchangeImplementations(origMethod, swizMethod);
-        }
-    });
-}
-
-- (BOOL)tauri_performDragOperation:(id<NSDraggingInfo>)sender {
+@implementation TauriWKWebView
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
     NSPasteboard *pboard = [sender draggingPasteboard];
     NSArray *urls = [pboard readObjectsForClasses:@[[NSURL class]] options:nil];
     if (urls && [urls count] > 0) {
@@ -362,32 +361,7 @@ static void platform_dispatch_file_drop(const char *label, const char *event_typ
             return YES;
         }
     }
-    return [self tauri_performDragOperation:sender];
-}
-@end
-
-@interface WKWebViewConfiguration (TauriSwizzle)
-@end
-
-@implementation WKWebViewConfiguration (TauriSwizzle)
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class cls = [self class];
-        SEL origSel = @selector(init);
-        SEL swizSel = @selector(tauri_init);
-        Method origMethod = class_getInstanceMethod(cls, origSel);
-        Method swizMethod = class_getInstanceMethod(cls, swizSel);
-        method_exchangeImplementations(origMethod, swizMethod);
-    });
-}
-
-- (instancetype)tauri_init {
-    WKWebViewConfiguration *config = [self tauri_init];
-    TauriURLSchemeHandler *handler = [[TauriURLSchemeHandler alloc] init];
-    [config setURLSchemeHandler:handler forURLScheme:@"tauri"];
-    [config setURLSchemeHandler:handler forURLScheme:@"asset"];
-    return config;
+    return [super performDragOperation:sender];
 }
 @end
 
@@ -406,7 +380,7 @@ static void gtk_uri_scheme_request_cb(WebKitURISchemeRequest *request, gpointer 
         char exe_buf[1024];
         ssize_t elen = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
         if (elen > 0) {
-            exe_buf[elen] = ' ';
+            exe_buf[elen] = '\0';
             std::string ep(exe_buf);
             size_t slash = ep.rfind('/');
             if (slash != std::string::npos) {
@@ -552,10 +526,11 @@ void platform_set_assets_path(const char *path) {
 }
 
 void bridge_set_dev_mode(int dev) {
-    g_dev_mode = dev;
+    g_dev_mode.store(dev != 0);
 }
 
 void bridge_set_dev_url(const char *url) {
+    std::lock_guard<std::mutex> lock(g_config_mutex);
     g_dev_url = url ? url : "";
 }
 
@@ -588,43 +563,43 @@ int platform_list_dir(const char *dir_path, char *out_buf, int max_len) {
     }
 }
 
-static std::vector<long> g_child_pids;
-static std::mutex g_child_pids_mutex;
+static constexpr size_t MAX_TRACKED_PIDS = 64;
+static std::atomic<long> g_tracked_pids[MAX_TRACKED_PIDS] = {};
 
-void platform_register_child_pid(long pid) {
+extern "C" void platform_register_child_pid(long pid) {
     if (pid <= 0) return;
-    std::lock_guard<std::mutex> lock(g_child_pids_mutex);
-    g_child_pids.push_back(pid);
+    for (size_t i = 0; i < MAX_TRACKED_PIDS; ++i) {
+        long expected = 0;
+        if (g_tracked_pids[i].compare_exchange_strong(expected, pid, std::memory_order_relaxed)) {
+            break;
+        }
+    }
 }
 
-void platform_unregister_child_pid(long pid) {
+extern "C" void platform_unregister_child_pid(long pid) {
     if (pid <= 0) return;
-    std::lock_guard<std::mutex> lock(g_child_pids_mutex);
-    g_child_pids.erase(std::remove(g_child_pids.begin(), g_child_pids.end(), pid), g_child_pids.end());
+    for (size_t i = 0; i < MAX_TRACKED_PIDS; ++i) {
+        long expected = pid;
+        g_tracked_pids[i].compare_exchange_strong(expected, 0, std::memory_order_relaxed);
+    }
 }
 
-void platform_kill_child_processes() {
-    std::lock_guard<std::mutex> lock(g_child_pids_mutex);
-    for (long pid : g_child_pids) {
+extern "C" void platform_kill_child_processes() {
+    for (size_t i = 0; i < MAX_TRACKED_PIDS; ++i) {
+        long pid = g_tracked_pids[i].exchange(0, std::memory_order_relaxed);
         if (pid > 0) {
-#if !defined(_WIN32)
-            ::kill((pid_t)pid, SIGTERM);
-            ::kill((pid_t)pid, SIGKILL);
-#else
+#if defined(_WIN32)
             HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
             if (h) {
-                TerminateProcess(h, 0);
+                TerminateProcess(h, 1);
                 CloseHandle(h);
             }
+#else
+            ::kill((pid_t)pid, SIGTERM);
+            ::kill((pid_t)pid, SIGKILL);
 #endif
         }
     }
-    g_child_pids.clear();
-#if !defined(_WIN32)
-    ::system("pkill -9 -f 'api-server' 2>/dev/null");
-#else
-    ::system("taskkill /F /IM api-server.exe /T >NUL 2>&1");
-#endif
 }
 
 void bridge_init(ipc_callback_fn on_ipc, tray_callback_fn on_tray, shortcut_callback_fn on_shortcut, deeplink_callback_fn on_deeplink) {
@@ -655,12 +630,13 @@ static void dispatch_return_cb(webview_t w, void *arg) {
 }
 
 void platform_window_return_async(const char *label, const char *seq, int status, const char *result) {
+    if (!seq || !is_valid_seq_id(seq)) return;
     std::lock_guard<std::mutex> lock(g_windows_mutex);
     auto it = g_windows.find(label);
     if (it != g_windows.end()) {
         ReturnPayload *p = new ReturnPayload();
         p->w = it->second.w;
-        p->seq = seq ? seq : "";
+        p->seq = seq;
         p->status = status;
         p->result = result ? result : "null";
         webview_dispatch(it->second.w, dispatch_return_cb, p);
@@ -671,6 +647,9 @@ static void common_bind_handler(const char *seq, const char *req, void *arg) {
     const char *label_ptr = static_cast<const char *>(arg);
     std::string label = label_ptr ? label_ptr : "main";
     std::string s_seq = seq ? seq : "";
+    if (!is_valid_seq_id(s_seq)) {
+        return;
+    }
     std::string s_req = req ? req : "";
 
     webview_t target_w = nullptr;
@@ -687,7 +666,12 @@ static void common_bind_handler(const char *seq, const char *req, void *arg) {
     }
 
     std::string current_origin;
-    if (!get_native_window_origin(target_w, current_origin) || !OriginValidator::is_allowed(current_origin, g_dev_mode != 0, g_dev_url)) {
+    std::string dev_url_copy;
+    {
+        std::lock_guard<std::mutex> lock(g_config_mutex);
+        dev_url_copy = g_dev_url;
+    }
+    if (!get_native_window_origin(target_w, current_origin) || !OriginValidator::is_allowed(current_origin, g_dev_mode.load(), dev_url_copy)) {
         std::string err_payload = "{\"error\":\"Accesso negato: Origin non autorizzato (" + current_origin + ")\"}";
         platform_window_return_async(label.c_str(), s_seq.c_str(), 1, err_payload.c_str());
         return;
@@ -733,11 +717,11 @@ int platform_window_create(const char *label, const char *title, const char *url
     std::lock_guard<std::mutex> lock(g_windows_mutex);
     std::string s_label = label ? label : "main";
     if (g_windows.find(s_label) != g_windows.end()) {
-        return 0;
+        return -1;
     }
 
-    webview_t w = webview_create(g_dev_mode, nullptr);
-    if (!w) return 0;
+    webview_t w = webview_create(g_dev_mode.load() ? 1 : 0, nullptr);
+    if (!w) return -1;
 
     webview_set_close_handler(w, on_internal_webview_close, strdup(s_label.c_str()));
 
@@ -829,7 +813,7 @@ int platform_window_create(const char *label, const char *title, const char *url
     gtk_widget_show_all(GTK_WIDGET(native_handle));
 #endif
 
-    return 1;
+    return 0;
 }
 
 void platform_window_close(const char *label) {
@@ -1018,7 +1002,12 @@ static void dispatch_eval_cb(webview_t w, void *arg) {
     if (!p) return;
     if (p->check_origin) {
         std::string current_origin;
-        if (get_native_window_origin(p->w, current_origin) && OriginValidator::is_allowed(current_origin, g_dev_mode != 0, g_dev_url)) {
+        std::string dev_url_copy;
+        {
+            std::lock_guard<std::mutex> lock(g_config_mutex);
+            dev_url_copy = g_dev_url;
+        }
+        if (get_native_window_origin(p->w, current_origin) && OriginValidator::is_allowed(current_origin, g_dev_mode.load(), dev_url_copy)) {
             webview_eval(p->w, p->js.c_str());
         }
     } else {
@@ -1648,7 +1637,7 @@ void platform_clipboard_clear() {
 #endif
 }
 
-static theme_change_callback_fn g_theme_cb = nullptr;
+static theme_callback_fn g_theme_cb = nullptr;
 static bool g_theme_observer_installed = false;
 
 const char *platform_get_theme() {
@@ -1689,7 +1678,7 @@ const char *platform_get_theme() {
 #endif
 }
 
-void platform_theme_set_callback(theme_change_callback_fn cb) {
+void platform_theme_set_callback(theme_callback_fn cb) {
     g_theme_cb = cb;
 #if defined(__APPLE__)
     if (!g_theme_observer_installed) {
@@ -1946,10 +1935,10 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
         return -1;
     }
 
-    // Restrict socket to owner only (0600) — prevents other users from sending
-    // activation messages even if directory is shared.
-    if (chmod(sock_path.c_str(), 0600) < 0) {
-        ::perror("[tauri-lua] warning: chmod 0600 on single-instance socket failed");
+    if (chmod(sock_path.c_str(), 0600) != 0) {
+        close(server_fd);
+        unlink(sock_path.c_str());
+        return 0;
     }
 
     if (listen(server_fd, 5) < 0) {
@@ -1964,7 +1953,7 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     g_single_instance_initialized = true;
 
     g_single_instance_thread = std::thread([server_fd]() {
-        const uid_t owner_uid = getuid();
+        const uid_t owner_uid = geteuid();
         while (g_single_instance_running) {
             struct sockaddr_un client_addr;
             socklen_t client_len = sizeof(client_addr);
@@ -1977,17 +1966,12 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
             fcntl(client_fd, F_SETFD, FD_CLOEXEC);
 #endif
 
-            // Verify peer UID: reject connections from other users.
-#if defined(__APPLE__) && defined(LOCAL_PEERCRED)
-            struct xucred peer_cred;
-            socklen_t cred_len = sizeof(peer_cred);
-            memset(&peer_cred, 0, sizeof(peer_cred));
-            peer_cred.cr_version = XUCRED_VERSION;
-            if (getsockopt(client_fd, SOL_LOCAL, LOCAL_PEERCRED, &peer_cred, &cred_len) == 0) {
-                if (peer_cred.cr_uid != owner_uid) {
-                    close(client_fd);
-                    continue; // Drop — different user
-                }
+#if defined(__APPLE__)
+            uid_t peer_uid;
+            gid_t peer_gid;
+            if (getpeereid(client_fd, &peer_uid, &peer_gid) != 0 || peer_uid != owner_uid) {
+                close(client_fd);
+                continue;
             }
 #elif defined(SO_PEERCRED)
             struct ucred peer_cred;
@@ -1995,7 +1979,7 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
             if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer_cred, &cred_len) == 0) {
                 if (peer_cred.uid != owner_uid) {
                     close(client_fd);
-                    continue; // Drop — different user
+                    continue;
                 }
             }
 #endif
@@ -2115,15 +2099,21 @@ void platform_state_set_string(const char *key, const char *val) {
 }
 
 int platform_state_get_string(const char *key, char *out_val, int max_len) {
-    if (!key || !out_val || max_len <= 0) return 0;
+    if (!key) return 0;
     std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     auto it = g_shared_state.find(key);
-    if (it != g_shared_state.end() && it->second.type == StateType::String) {
-        strncpy(out_val, it->second.str_data.c_str(), max_len - 1);
+    if (it == g_shared_state.end() || it->second.type != StateType::String) return 0;
+    const std::string &s = it->second.str_data;
+    int len = static_cast<int>(s.size());
+    if (!out_val || max_len <= 0) return len + 1;
+    if (len >= max_len) {
+        std::memcpy(out_val, s.data(), static_cast<size_t>(max_len - 1));
         out_val[max_len - 1] = '\0';
-        return 1;
+        return len + 1;
     }
-    return 0;
+    std::memcpy(out_val, s.data(), static_cast<size_t>(len));
+    out_val[len] = '\0';
+    return 1;
 }
 
 void platform_state_set_number(const char *key, double val) {
@@ -2150,15 +2140,21 @@ void platform_state_set_json(const char *key, const char *json_val) {
 }
 
 int platform_state_get_json(const char *key, char *out_val, int max_len) {
-    if (!key || !out_val || max_len <= 0) return 0;
+    if (!key) return 0;
     std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     auto it = g_shared_state.find(key);
-    if (it != g_shared_state.end() && it->second.type == StateType::Json) {
-        strncpy(out_val, it->second.str_data.c_str(), max_len - 1);
+    if (it == g_shared_state.end() || it->second.type != StateType::Json) return 0;
+    const std::string &s = it->second.str_data;
+    int len = static_cast<int>(s.size());
+    if (!out_val || max_len <= 0) return len + 1;
+    if (len >= max_len) {
+        std::memcpy(out_val, s.data(), static_cast<size_t>(max_len - 1));
         out_val[max_len - 1] = '\0';
-        return 1;
+        return len + 1;
     }
-    return 0;
+    std::memcpy(out_val, s.data(), static_cast<size_t>(len));
+    out_val[len] = '\0';
+    return 1;
 }
 
 int platform_state_has(const char *key) {
@@ -2178,6 +2174,18 @@ void platform_state_clear() {
     g_shared_state.clear();
 }
 
+int platform_state_get_length(const char *key) {
+    if (!key) return 0;
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
+    auto it = g_shared_state.find(key);
+    if (it != g_shared_state.end()) {
+        if (it->second.type == StateType::String || it->second.type == StateType::Json) {
+            return static_cast<int>(it->second.str_data.size());
+        }
+    }
+    return 0;
+}
+
 void platform_state_lock() {
     g_state_mutex.lock();
 }
@@ -2187,8 +2195,8 @@ void platform_state_unlock() {
 }
 
 void platform_set_csp(const char *csp) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
     if (csp && strlen(csp) > 0) {
+        std::lock_guard<std::mutex> lock(g_config_mutex);
         g_csp_policy_custom = csp;
     }
 }
@@ -2365,7 +2373,13 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
     argv.push_back(nullptr);
 
     pid_t pid = -1;
-    int status = posix_spawnp(&pid, program, &actions, nullptr, argv.data(), environ);
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+#if defined(__APPLE__) && defined(POSIX_SPAWN_CLOEXEC_DEFAULT)
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#endif
+    int status = posix_spawnp(&pid, program, &actions, &attr, argv.data(), environ);
+    posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
 
     close(pipe_fds[1]);
@@ -3188,7 +3202,12 @@ const char *platform_get_app_name() {
 
 int platform_is_origin_allowed(const char *url) {
     if (!url || url[0] == '\0') return 0;
-    return OriginValidator::is_allowed(url, g_dev_mode != 0, g_dev_url) ? 1 : 0;
+    std::string dev_url_copy;
+    {
+        std::lock_guard<std::mutex> lock(g_config_mutex);
+        dev_url_copy = g_dev_url;
+    }
+    return OriginValidator::is_allowed(url, g_dev_mode.load(), dev_url_copy) ? 1 : 0;
 }
 
 int platform_resolve_path(const char *in_path, char *out_path, int max_len) {

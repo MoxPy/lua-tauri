@@ -480,6 +480,15 @@ local function shell_quote(str)
     end
 end
 
+local function xml_escape(s)
+    return tostring(s or "")
+        :gsub("&", "&amp;")
+        :gsub("<", "&lt;")
+        :gsub(">", "&gt;")
+        :gsub('"', "&quot;")
+        :gsub("'", "&apos;")
+end
+
 local function make_dir(path)
     if ffi.os == "Windows" then
         local win_path = path:gsub("/", "\\")
@@ -775,23 +784,36 @@ local function get_installed_rock_files(rocks_dir, rock_name, ver)
         table.insert(files, manifest_file)
         local content = read_file(manifest_file)
         if content then
+            if content:byte(1) == 27 then
+                error("Security error: binary bytecode is forbidden in rock_manifest")
+            end
             local env = {}
-            local fn = loadstring(content)
+            local fn = loadstring(content, "=rock_manifest")
             if fn then
                 setfenv(fn, env)
+                if debug and debug.sethook then
+                    debug.sethook(function() error("rock_manifest execution timeout") end, "", 100000)
+                end
                 pcall(fn)
+                if debug and debug.sethook then
+                    debug.sethook()
+                end
                 local mf = env.rock_manifest
                 if type(mf) == "table" then
                     if type(mf.lua) == "table" then
                         for rel, _ in pairs(mf.lua) do
-                            local p = rocks_dir .. "/share/lua/5.1/" .. rel
-                            if file_exists(p) then table.insert(files, p) end
+                            if type(rel) == "string" and not rel:find("%.%.") and not rel:match("^[/\\]") then
+                                local p = rocks_dir .. "/share/lua/5.1/" .. rel
+                                if file_exists(p) then table.insert(files, p) end
+                            end
                         end
                     end
                     if type(mf.lib) == "table" then
                         for rel, _ in pairs(mf.lib) do
-                            local p = rocks_dir .. "/lib/lua/5.1/" .. rel
-                            if file_exists(p) then table.insert(files, p) end
+                            if type(rel) == "string" and not rel:find("%.%.") and not rel:match("^[/\\]") then
+                                local p = rocks_dir .. "/lib/lua/5.1/" .. rel
+                                if file_exists(p) then table.insert(files, p) end
+                            end
                         end
                     end
                 end
@@ -823,11 +845,8 @@ local function compute_composite_checksum(file_list)
             table.insert(hashes, compute_file_checksum(f))
         end
         local combined = table.concat(hashes, "\n")
-        local h = 5381
-        for i = 1, #combined do
-            h = (h * 33 + string.byte(combined, i)) % 4294967296
-        end
-        return string.format("hash:%08x", h)
+        local escaped = combined:gsub("'", "''")
+        cmd = 'powershell -NoProfile -Command "[Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes(\'' .. escaped .. '\')) | ForEach-Object { $_.ToString(\'x2\') } | Join-String" 2>NUL'
     end
     local p = io.popen(cmd)
     if p then
@@ -1352,13 +1371,22 @@ local function cmd_dev(args)
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
-</plist>]], app_name, identifier, app_name, app_name, version)
+</plist>]], xml_escape(app_name), xml_escape(identifier), xml_escape(app_name), xml_escape(app_name), xml_escape(version))
         if file_exists("src-tauri/icons/icon.icns") then
             exec("mkdir -p " .. shell_quote(app_bundle_dir .. "/Contents/Resources"))
             exec("cp src-tauri/icons/icon.icns " .. shell_quote(app_bundle_dir .. "/Contents/Resources/icon.icns"))
         end
         write_file(app_bundle_dir .. "/Contents/Info.plist", plist)
-        exec("codesign --force --deep --sign - " .. shell_quote(app_bundle_dir) .. " 2>/dev/null || true")
+        local dev_sign_opts = "--force"
+        if file_exists("src-tauri/entitlements.plist") then
+            dev_sign_opts = dev_sign_opts .. " --entitlements " .. shell_quote("src-tauri/entitlements.plist")
+        elseif file_exists(ENGINE_ROOT .. "/src-tauri/entitlements.plist") then
+            dev_sign_opts = dev_sign_opts .. " --entitlements " .. shell_quote(ENGINE_ROOT .. "/src-tauri/entitlements.plist")
+        end
+        if file_exists(frameworks_dir .. "/libtaurilua.dylib") then
+            exec("codesign --force --sign - " .. shell_quote(frameworks_dir .. "/libtaurilua.dylib") .. " 2>/dev/null || true")
+        end
+        exec("codesign " .. dev_sign_opts .. " --sign - " .. shell_quote(app_bundle_dir) .. " 2>/dev/null || true")
         bin_path = app_bin
     end
 
@@ -1390,10 +1418,23 @@ local function cmd_dev(args)
         io.stdout:write("\n")
         info("Shutting down development processes...")
         if app_pid and ffi.C.kill(app_pid, 0) == 0 then
-            ffi.C.kill(app_pid, 9)
+            ffi.C.kill(app_pid, 15)
+            ffi.C.usleep(50000)
+            if ffi.C.kill(app_pid, 0) == 0 then
+                ffi.C.kill(app_pid, 9)
+            end
         end
-        if dev_server_pid and ffi.C.kill(dev_server_pid, 0) == 0 then
-            ffi.C.kill(dev_server_pid, 9)
+        if dev_server_pid then
+            if ffi.os ~= "Windows" then
+                pcall(function() ffi.C.kill(-dev_server_pid, 15) end)
+            end
+            if ffi.C.kill(dev_server_pid, 0) == 0 then
+                ffi.C.kill(dev_server_pid, 15)
+                ffi.C.usleep(50000)
+                if ffi.C.kill(dev_server_pid, 0) == 0 then
+                    ffi.C.kill(dev_server_pid, 9)
+                end
+            end
         end
         pcall(function() os.remove(".dev_server.log") end)
         os.exit(0)
@@ -1426,13 +1467,25 @@ local function cmd_dev(args)
 
         if changed_file then
             log_tag("Reload", colors.magenta, "Detected change in " .. changed_file .. ", reloading backend...")
-            if app_pid then
-                ffi.C.kill(app_pid, 9)
+            if app_pid and ffi.C.kill(app_pid, 0) == 0 then
+                ffi.C.kill(app_pid, 15)
+                ffi.C.usleep(50000)
+                if ffi.C.kill(app_pid, 0) == 0 then
+                    ffi.C.kill(app_pid, 9)
+                end
             end
             ffi.C.usleep(50000) -- 50ms pause
             app_pid = spawn_app()
         end
     end
+end
+
+local function detect_arch()
+    local arch = ffi.arch
+    if arch == "arm64" or arch == "aarch64" then return "arm64", "arm64" end
+    if arch == "x64" then return "x64", "amd64" end
+    if arch == "x86" then return "x86", "i386" end
+    return arch, arch
 end
 
 -- ==========================================================
@@ -1456,15 +1509,15 @@ local function cmd_build(args)
     end
 
     local frontend_dist = build_conf.frontendDist or build_conf.distDir or bundle_conf.distDir or "dist"
-    if frontend_dist:sub(1, 3) == "../" then
-        frontend_dist = frontend_dist:sub(4)
+    frontend_dist = frontend_dist:gsub("^(%.%./)+", ""):gsub("^/+", "")
+    if frontend_dist == "" or frontend_dist:find("%.%.") then
+        error("Invalid frontendDist path: " .. tostring(frontend_dist))
     end
 
     if not file_exists(frontend_dist) then
         error("frontendDist non trovata: " .. frontend_dist)
     end
 
-    -- Build runtime in release mode
     local bin_path = ensure_runtime_built(true)
 
     local target_dir = "target/bundle"
@@ -1493,10 +1546,7 @@ local function cmd_build(args)
             exec("cp -r src-tauri/binaries " .. shell_quote(res_dir .. "/binaries"))
             exec("rm -f " .. shell_quote(res_dir .. "/binaries") .. "/*-linux-* 2>/dev/null || true")
             exec("rm -f " .. shell_quote(res_dir .. "/binaries") .. "/*.exe 2>/dev/null || true")
-        end
-
-        if file_exists("src-tauri/src") then
-            exec("cp src-tauri/src/*.lua " .. shell_quote(res_dir .. "/") .. " 2>/dev/null || true")
+            exec("rm -f " .. shell_quote(res_dir .. "/binaries/.env") .. " " .. shell_quote(res_dir .. "/binaries/.env.*") .. " 2>/dev/null || true")
         end
 
         if file_exists("src-tauri/plugins") then
@@ -1513,7 +1563,6 @@ local function cmd_build(args)
             copy_dir_recursive(rocks_tree, res_dir .. "/rocks")
         end
 
-        -- Info.plist
         local plist = string.format([[<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1537,7 +1586,7 @@ local function cmd_build(args)
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
-</plist>]], app_name, identifier, app_name, app_name, version, version)
+</plist>]], xml_escape(app_name), xml_escape(identifier), xml_escape(app_name), xml_escape(app_name), xml_escape(version), xml_escape(version))
 
         if file_exists("src-tauri/icons/icon.icns") then
             exec("cp src-tauri/icons/icon.icns " .. shell_quote(res_dir .. "/icon.icns"))
@@ -1547,7 +1596,31 @@ local function cmd_build(args)
         local mac_conf = bundle_conf.macOS or bundle_conf.macos or {}
         local sign_identity = os.getenv("APPLE_SIGNING_IDENTITY") or mac_conf.signingIdentity or "-"
         info("Signing macOS application bundle with identity: " .. sign_identity)
-        -- Sign nested dynamic libraries first (without --deep)
+        local function bundle_macos_luajit(m_dir, d_path)
+            local p = io.popen("otool -L " .. shell_quote(d_path) .. " 2>/dev/null")
+            if not p then return end
+            local out = p:read("*a") or ""
+            p:close()
+            local luajit_src = out:match("%s+(/[^%s]*libluajit[^%s]*%.dylib)%s+")
+            if luajit_src and not luajit_src:match("^@") then
+                local dst_name = "libluajit-5.1.dylib"
+                local dst_path = m_dir .. "/" .. dst_name
+                os.execute("cp -L " .. shell_quote(luajit_src) .. " " .. shell_quote(dst_path) .. " && chmod 755 " .. shell_quote(dst_path))
+                os.execute("install_name_tool -id " .. shell_quote("@rpath/" .. dst_name) .. " " .. shell_quote(dst_path) .. " 2>/dev/null")
+                os.execute("install_name_tool -change " .. shell_quote(luajit_src) .. " " .. shell_quote("@rpath/" .. dst_name) .. " " .. shell_quote(d_path) .. " 2>/dev/null")
+                local app_bin = m_dir .. "/" .. app_name
+                if file_exists(app_bin) then
+                    os.execute("install_name_tool -change " .. shell_quote(luajit_src) .. " " .. shell_quote("@rpath/" .. dst_name) .. " " .. shell_quote(app_bin) .. " 2>/dev/null")
+                end
+            end
+        end
+
+        if file_exists(macos_dir .. "/libtaurilua.dylib") then
+            bundle_macos_luajit(macos_dir, macos_dir .. "/libtaurilua.dylib")
+        end
+        if file_exists(macos_dir .. "/libluajit-5.1.dylib") then
+            exec("codesign --force --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_dir .. "/libluajit-5.1.dylib") .. " 2>/dev/null || true")
+        end
         if file_exists(macos_dir .. "/libtaurilua.dylib") then
             exec("codesign --force --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_dir .. "/libtaurilua.dylib") .. " 2>/dev/null || true")
         end
@@ -1561,10 +1634,8 @@ local function cmd_build(args)
             p_dylibs:close()
         end
 
-        -- Sign main bundle (avoiding deprecated --deep)
         local sign_opts = "--force"
         if sign_identity ~= "-" then
-            -- Hardened Runtime is enabled for Developer ID signing (required for Apple Notarization)
             sign_opts = sign_opts .. " --options runtime"
         end
         if file_exists("src-tauri/entitlements.plist") then
@@ -1574,7 +1645,8 @@ local function cmd_build(args)
         end
         exec("codesign " .. sign_opts .. " --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_bundle_dir) .. " 2>/dev/null || codesign --force --sign - " .. shell_quote(macos_bundle_dir) .. " 2>/dev/null || true")
 
-        local dmg_file = dmg_dir .. "/" .. app_name .. "_" .. version .. "_x64.dmg"
+        local raw_arch, deb_arch = detect_arch()
+        local dmg_file = dmg_dir .. "/" .. app_name .. "_" .. version .. "_" .. raw_arch .. ".dmg"
         info("Creating DMG disk image: " .. dmg_file)
         local dmg_stage = target_dir .. "/dmg_stage"
         exec("rm -rf " .. shell_quote(dmg_stage) .. " && mkdir -p " .. shell_quote(dmg_stage))
@@ -1592,9 +1664,10 @@ local function cmd_build(args)
         io.stdout:write("        " .. colors.green .. dmg_file .. colors.reset .. "\n")
 
     elseif os_name == "Linux" then
+        local raw_arch, deb_arch = detect_arch()
         local deb_pkg_name = app_name:gsub("%s+", "-"):gsub("[^%w%+%-%._]", ""):lower():gsub("^%-+", ""):gsub("%-+$", "")
         if deb_pkg_name == "" then deb_pkg_name = "tauri-app" end
-        local deb_dir = target_dir .. "/deb/" .. deb_pkg_name .. "_" .. version .. "_amd64"
+        local deb_dir = target_dir .. "/deb/" .. deb_pkg_name .. "_" .. version .. "_" .. deb_arch
         exec("rm -rf " .. shell_quote(deb_dir))
         info("Bundling Debian (.deb) package `" .. deb_pkg_name .. "`...")
         exec("mkdir -p " .. shell_quote(deb_dir .. "/DEBIAN"))
@@ -1619,15 +1692,8 @@ local function cmd_build(args)
             exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/*-darwin-* 2>/dev/null || true")
             exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/*-macos-* 2>/dev/null || true")
             exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/*.exe 2>/dev/null || true")
-            if file_exists("src-tauri/binaries/.env") then
-                exec("cp src-tauri/binaries/.env " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/.env") .. " 2>/dev/null || true")
-            end
-            exec("chmod +x " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/*") .. " 2>/dev/null || true")
-        end
-
-        if file_exists("src-tauri/src") then
-            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/src"))
-            exec("cp src-tauri/src/*.lua " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/src/") .. " 2>/dev/null || true")
+            exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/.env") .. " " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/.env.*") .. " 2>/dev/null || true")
+            exec("chmod +x " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/* 2>/dev/null || true")
         end
 
         if file_exists("src-tauri/plugins") then
@@ -1678,11 +1744,11 @@ Categories=Utility;Network;
 Version: %s
 Section: utils
 Priority: optional
-Architecture: amd64
+Architecture: %s
 Maintainer: Developer <dev@example.com>
 Depends: libgtk-3-0, libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37, libluajit-5.1-2, libcurl4 | libcurl3-gnutls
 Description: %s built with Tauri-Lua
-]], deb_pkg_name, version, app_name)
+]], deb_pkg_name, version, deb_arch, app_name)
 
         write_file(deb_dir .. "/DEBIAN/control", control)
         exec("dpkg-deb --build " .. shell_quote(deb_dir) .. " " .. shell_quote(target_dir .. "/deb"))
@@ -1701,6 +1767,14 @@ Description: %s built with Tauri-Lua
             exec('copy "' .. luajit_env .. '\\bin\\lua51.dll" "' .. win_dir .. '\\" 2>NUL || copy "' .. luajit_env .. '\\lua51.dll" "' .. win_dir .. '\\" 2>NUL || rem')
         end
         exec('xcopy /E /I "' .. frontend_dist .. '" "' .. win_dir .. '\\' .. frontend_dist .. '"')
+
+        if file_exists("src-tauri\\binaries") or file_exists("src-tauri/binaries") then
+            local bsrc = file_exists("src-tauri\\binaries") and "src-tauri\\binaries" or "src-tauri/binaries"
+            info("Packaging native sidecar binaries into Windows standalone bundle...")
+            copy_dir_recursive(bsrc, win_dir .. "\\binaries")
+            exec('del /Q "' .. win_dir .. '\\binaries\\.env" 2>NUL || rem')
+            exec('del /Q "' .. win_dir .. '\\binaries\\.env.*" 2>NUL || rem')
+        end
 
         if file_exists("src-tauri\\plugins") or file_exists("src-tauri/plugins") then
             local psrc = file_exists("src-tauri\\plugins") and "src-tauri\\plugins" or "src-tauri/plugins"
@@ -1927,6 +2001,9 @@ app:create_main_window()
                     "fs:write-text-file",
                     "dialog:open",
                     "dialog:message"
+                },
+                scope = {
+                    "$APPDATA/**"
                 }
             }
         }
@@ -2924,8 +3001,12 @@ local function cmd_init(args)
                 capabilities = {
                     "core:default",
                     "fs:read-text-file",
+                    "fs:write-text-file",
                     "dialog:open",
                     "dialog:message"
+                },
+                scope = {
+                    "$APPDATA/**"
                 }
             }
         }

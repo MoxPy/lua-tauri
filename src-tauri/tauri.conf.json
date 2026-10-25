@@ -24,6 +24,7 @@
     "security": {
       "capabilities": [
         "core:default",
+        "state:set",
         "fs:read-text-file",
         "fs:write-text-file",
         "fs:read-dir",

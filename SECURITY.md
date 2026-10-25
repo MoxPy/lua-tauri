@@ -20,7 +20,7 @@ The primary and authoritative security boundary in Tauri-Lua is enforced at the 
   - **Windows:** `BCryptGenRandom(NULL, buf, sizeof(buf), BCRYPT_USE_SYSTEM_PREFERRED_RNG)`
   - **Linux / POSIX:** `getrandom(buf, sizeof(buf), 0)` with fallback to `/dev/urandom`
   - *Fail-Closed:* If the operating system RNG fails or cannot provide entropy, the process immediately logs a critical error and terminates (`std::abort()`).
-* **Enforcement:** The session token is verified on every native IPC envelope using constant-time string comparison (`constant_time_eq`), protecting against timing side-channel attacks.
+* **Enforcement:** The session token is verified on every native IPC envelope using constant-time string comparison (`constant_time_eq`), strict whitespace boundary validation, and depth-aware RFC 8259 string parsing (`extract_json_string`), protecting against timing side-channel and injection attacks.
 * **Scope & Limitation:** This token acts as a defense-in-depth barrier against unauthorized child `<iframe>` elements and cross-origin subframes attempting to access native host APIs.
 * **Important:** The session token is **not** a same-origin sandbox boundary. Any script executing within the top-level document context (such as via an XSS flaw in frontend dependencies) can access `window.__TAURI_TOKEN__`. Same-origin isolation must always be protected with strict Content Security Policy headers (`script-src 'self'`).
 
@@ -42,7 +42,8 @@ Tauri-Lua adheres to a **Deny-by-Default** capability model:
 
 | Capability | Scope & Permissions Granted | Explicitly NOT Granted |
 | :--- | :--- | :--- |
-| **`core:default`** | Basic window manipulation (`window:show`, `window:hide`, `window:close`, `window:minimize`, `window:maximize`, `window:center`, `window:set_title`), theme querying, standard event emission/listening, and key-value state access. | Does **NOT** grant `window:create:external`, `updater:*`, `fs:*`, or `shell:*`. |
+| **`core:default`** | Basic window manipulation (`window:show`, `window:hide`, `window:close`, `window:minimize`, `window:maximize`, `window:center`, `window:set_title`), theme querying, standard event emission/listening, and read-only shared state access (`state:get`). | Does **NOT** grant `state:set`, `window:create:external`, `updater:*`, `fs:*`, or `shell:*`. |
+| **`state:set`** | Modifying backend shared state from the frontend webview (`window.__TAURI__.core.invoke('state:set', ...)`). | Decoupled from `core:default` to enforce least-privilege security. |
 | **`fs:default`** | Read-only filesystem operations: `fs:read-text-file`, `fs:read-file`, `fs:read-dir`, `fs:exists`, `fs:stat`. | Does **NOT** grant `fs:write-text-file`, `fs:write-file`, or `fs:remove`. |
 | **`fs:remove`** | Explicit capability required to delete files or directories (`tauri:fs:remove`). | Cannot be exercised without matching filesystem scope. |
 | **`window:create`** | Creating new webview windows pointing to internal application routes (`tauri://localhost/*` or dev URL). | Does **NOT** grant loading external HTTP/HTTPS domains. |
@@ -54,9 +55,9 @@ Tauri-Lua adheres to a **Deny-by-Default** capability model:
 
 ### 1. Filesystem Scopes & Symlink Containment
 * **Deny-by-Default:** If `security.scope` is empty or omitted, all filesystem operations are rejected.
-* **Path Resolution & Canonicalization:** Both native C++ asset serving (`resolve_contained_asset`, `real_filesystem_path`) and Lua runtime operations (`platform_resolve_path`) canonicalize paths before evaluation.
+* **Path Resolution & Canonicalization:** Both native C++ asset serving (`resolve_contained_asset` with automatic query and fragment stripping, `real_filesystem_path`) and Lua runtime operations (`platform_resolve_path`) canonicalize paths before evaluation.
 * **Symlink & Traversal Containment:** Symbolic links and relative directory traversal components (`../`, `/./`, `%2e%2e`) are dereferenced and verified against the canonical scope root. A target path is allowed only if it is strictly prefixed by the allowed directory path with a directory separator boundary (`/`), preventing sibling directory escapes (e.g., `/safe-dir` vs `/safe-dir-secret/`).
-* **Path Sanitization:** Paths containing embedded NUL bytes (`\0`) or malformed path separators are rejected immediately.
+* **Path Sanitization:** Paths containing embedded NUL bytes (`\0`), backslashes, colons, or malformed path separators are rejected immediately. Static asset queries (`?`) and fragments (`#`) are stripped prior to percent-decoding.
 * **Glob Semantics:**
   - Single asterisk (`*`) matches characters within a single directory segment.
   - Double asterisk (`**`) matches recursively across nested subdirectories.
@@ -84,6 +85,21 @@ Tauri-Lua adheres to a **Deny-by-Default** capability model:
   - `src-tauri/entitlements.plist` strictly enables only `com.apple.security.cs.allow-jit` (required for LuaJIT JIT compiler pages) and `com.apple.security.network.client`. Insecure entitlements (`com.apple.security.cs.allow-unsigned-executable-memory` and `com.apple.security.cs.disable-library-validation`) are removed.
   - Release packaging signs all bundled dynamic libraries (`.dylib`, `.so`) individually before signing the application bundle with `--options runtime` and `--entitlements src-tauri/entitlements.plist`, avoiding deprecated `--deep`.
 * **Development Mode (`TAURILUA_DEV=1`):** Resolves local workspace scripts and assets for hot-reloading, allows connection to local development HTTP/WebSocket servers, and relaxes CSP `script-src` to include `'unsafe-inline'`.
+
+### 5. URL Parsing & SSRF Mitigations
+* **Strict Authority Parsing:** Userinfo components (`@`) inside URL authorities are explicitly rejected to prevent authority-confusion attacks.
+* **IPv6 & Bracketed Host Handling:** URLs with bracketed IPv6 hosts (e.g. `[::1]`) are parsed and lowercased cleanly.
+* **SSRF Deny-by-Default Filter:** Outbound HTTP client requests strictly deny all loopback addresses (`127.0.0.0/8`, `::1`, `::`), unspecified addresses (`0.0.0.0/8`), private networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`), link-local/cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`), IPv6 link-local and unique local addresses (`fe80::/10`, `fc00::/7`, `fd00::/8`), trailing DNS dots, and hex/octal/integer formatted IP representations.
+* **SQLite Scope Containment:** Database URIs under `sqlite:*` are verified against relative directory traversal (`..`, `\`), root paths (`/`), and Windows drive letters to avoid arbitrary file database creation outside designated app scopes.
+
+### 6. Shared State & Persistent Store Hardening
+* **Dynamic Buffer Allocation:** The native shared state bridge dynamically scales buffers for payloads exceeding 64 KB, preventing JSON truncation or data loss.
+* **Thread-Safe & Atomic Store:** File persistence for `app:store()` synchronizes mutations across native worker threads with `platform_state_lock()` and utilizes atomic temporary-file-and-rename writes (`.tmp` -> replace target) to ensure zero corruption across unexpected shutdowns.
+
+### 7. Native Webview Sandboxing & Objective-C Isolation
+* **No Global Swizzling:** Runtime Objective-C method swizzling on `WKWebView` and `WKWebViewConfiguration` has been replaced with scoped subclassing (`TauriWKWebView`) and explicit scheme handler attachment.
+* **Open Panel Gating:** The native webview delegate implements `runOpenPanelWithParameters` to fail closed (`completionHandler(nil)`), ensuring `<input type="file">` cannot bypass capability checks.
+* **CSP Comment Strip & Attribute Escaping:** Dynamic CSP meta injection strips HTML comments prior to evaluating existing meta tags, and escapes XML/HTML attribute characters to prevent injection attacks.
 
 ---
 

@@ -242,6 +242,7 @@ test("Lockfile serialization produces deterministic JSON structure", function()
     assert(loaded and loaded.version == 1, "Lockfile version must be 1")
     assert(loaded.rocks and loaded.rocks.inspect, "Inspect rock must be present in lockfile")
     assert(loaded.rocks.inspect.version == "3.1.3-1", "Exact pinned version recorded")
+    os.remove(temp_lock)
 end)
 
 -- ----------------------------------------------------------------------------
@@ -450,6 +451,85 @@ test("Vanilla scaffolder template avoids innerHTML on IPC responses", function()
     -- Look for vanilla index.html / main.js template
     assert(not content:find("greetOutput%.innerHTML%s*="), "Must not assign IPC response to innerHTML")
     assert(content:find("greetOutput%.replaceChildren"), "Uses safe replaceChildren/textContent DOM manipulation")
+end)
+
+print("\n14. Enterprise Audit Remediation Regressions:")
+
+test("Blocks path spoofing (/tmp/git) when only bare 'git' is in allowed_programs", function()
+    local app = tauri.new({
+        security = {
+            capabilities = { "shell:execute" },
+            allowed_programs = { "git" }
+        }
+    })
+    local ok1 = pcall(function() app.security:assert_program("git") end)
+    local ok2 = pcall(function() app.security:assert_program("/tmp/git") end)
+    local ok3 = pcall(function() app.security:assert_program("./git") end)
+    assert(ok1 == true, "Bare 'git' must be allowed")
+    assert(ok2 == false, "'/tmp/git' must be rejected")
+    assert(ok3 == false, "'./git' must be rejected")
+end)
+
+test("Sidecar.resolve_path ignores relative CWD paths in release mode", function()
+    local old_dev = os.getenv("TAURILUA_DEV")
+    _G.__TAURI_DEV__ = false
+    local res = tauri.Sidecar.resolve_path("./some_local_script", "TestApp")
+    assert(res == nil, "Relative CWD path must not resolve in release mode")
+    _G.__TAURI_DEV__ = nil
+end)
+
+test("SharedState handles payloads larger than 64 KB without truncation", function()
+    local app = tauri.new({ security = { capabilities = { "core:default" } } })
+    local large_str = string.rep("X", 100000)
+    app.state:set("large_payload", { data = large_str })
+    local read_back = app.state:get("large_payload")
+    assert(type(read_back) == "table" and #read_back.data == 100000, "100 KB state payload must not be truncated")
+end)
+
+test("core:default denies tauri:state:set unless explicitly granted", function()
+    local app = tauri.new({ security = { capabilities = { "core:default" } } })
+    local ok = pcall(function() app.security:assert_capability("state:set") end)
+    assert(ok == false, "core:default must not grant state:set capability")
+    local app_with_set = tauri.new({ security = { capabilities = { "core:default", "state:set" } } })
+    local ok2 = pcall(function() app_with_set.security:assert_capability("state:set") end)
+    assert(ok2 == true, "Explicit state:set capability must be allowed")
+end)
+
+test("SSRF blocks 127.0.0.2, 0.0.0.0, IPv6 [::1], and host:port combinations", function()
+    assert(tauri.is_ssrf_forbidden("127.0.0.2"), "Blocks 127.0.0.2")
+    assert(tauri.is_ssrf_forbidden("0.0.0.0"), "Blocks 0.0.0.0")
+    assert(tauri.is_ssrf_forbidden("[::1]"), "Blocks [::1]")
+    assert(tauri.is_ssrf_forbidden("localhost:8080"), "Blocks localhost:8080")
+    assert(tauri.is_ssrf_forbidden("169.254.169.254:80"), "Blocks 169.254.169.254:80")
+end)
+
+test("URL parser rejects @ userinfo confusion and extracts port cleanly", function()
+    local ok_at = pcall(tauri.parse_and_normalize_url, "https://api.myapp.com@evil.com/v1")
+    assert(not ok_at, "Must reject userinfo @ in URL authority")
+    local parsed = tauri.parse_and_normalize_url("https://api.myapp.com:8443/v1/../status")
+    assert(parsed.host == "api.myapp.com")
+    assert(parsed.port == 8443)
+    assert(parsed.path == "/status")
+end)
+
+test("SQLite scope check rejects path traversal and absolute paths under sqlite:*", function()
+    local scopes = { "sqlite:*" }
+    assert(tauri.is_db_allowed("sqlite:app.db", scopes))
+    assert(not tauri.is_db_allowed("sqlite:../../etc/passwd", scopes))
+    assert(not tauri.is_db_allowed("sqlite:/etc/passwd", scopes))
+end)
+
+test("Shell assert_program blocks path-prefixed binary when only bare name is whitelisted", function()
+    local app = tauri.new({
+        security = {
+            capabilities = { "shell:execute" },
+            allowed_programs = { "git" }
+        }
+    })
+    local ok_bare = pcall(function() app.security:assert_program("git") end)
+    assert(ok_bare, "Allows bare program name git")
+    local ok_path = pcall(function() app.security:assert_program("/tmp/evil/git") end)
+    assert(not ok_path, "Blocks /tmp/evil/git when only bare 'git' is in allowed_programs")
 end)
 
 print("\n=======================================================")

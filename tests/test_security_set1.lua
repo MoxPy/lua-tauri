@@ -133,7 +133,8 @@ do
 
     -- N2: Symlink escape containment test
     do
-        local temp_root = "/tmp/tauri_test_symlink_" .. tostring(os.time())
+        local cwd = io.popen("pwd"):read("*l") or "."
+        local temp_root = cwd .. "/build/tauri_test_symlink_" .. tostring(os.time())
         os.execute("mkdir -p " .. temp_root .. "/scope " .. temp_root .. "/secret")
         local f = io.open(temp_root .. "/secret/topsecret.txt", "w")
         if f then

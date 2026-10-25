@@ -43,8 +43,8 @@ The table below documents the verification status and implementation state of ca
 | **Desktop Notifications** | **Implemented** | **Implemented** | **Implemented** | macOS uses `UNUserNotificationCenter` with parameterized fallback; Linux uses `notify-send --`; Windows uses `Shell_NotifyIconW`. |
 | **System Theme & Events** | **Implemented** | **Implemented** | **Implemented** | System theme detection and window event dispatching across active windows. |
 | **System Tray & Menus** | **Implemented** | **Implemented** | **Implemented** | Native menu bars (Cocoa / GTK3 / Win32) and system tray icon support. |
-| **Process Spawning (`shell:execute`)** | **Implemented** | **Implemented** | **Implemented** | Mandatory `allowed_programs` allowlist, argument policy checks, dangerous flag filtering, and 1 MB output cap. |
-| **Sidecars & Native Binaries** | **Implemented** | **Implemented** | **Experimental** | Bundles external executables from `src-tauri/binaries/` into `.app` and package distributions with automated code signing and runtime path resolution. |
+| **Process Spawning (`shell:execute`)** | **Implemented** | **Implemented** | **Implemented** | Mandatory `allowed_programs` allowlist, strict path matching (blocks path spoofing like `/tmp/cmd`), dangerous argument filtering (`git -c`, `--config-env`, etc.), sanitized environment, and 1 MB output cap. |
+| **Sidecars & Native Binaries** | **Implemented** | **Implemented** | **Experimental** | Bundles external executables from `src-tauri/binaries/` into `.app` and package distributions with automated code signing, release bundle isolation, `.env` exclusion, dynamic architecture detection, and signal-safe process tracking. |
 | **C Embedding (`libtaurilua`)** | **Implemented** | **Implemented** | **Implemented** | C ABI defined in `include/taurilua.h`; validated by `tests/smoke_test.c` and `examples/host_c/`. |
 | **Application Updater** | **Not Implemented** | **Not Implemented** | **Not Implemented** | Disabled for security. Unauthenticated archive extraction removed; calls return a fail-closed error. |
 | **Companion Plugins (`sql`, `http`, etc.)** | **External** | **External** | **External** | Companion plugins are maintained in the separate [`lua-tauri-plugins`](https://github.com/MoxPy/lua-tauri-plugins) workspace. |
@@ -322,6 +322,7 @@ The runtime configuration uses a Tauri-inspired declarative schema ([schemas/tau
     "security": {
       "capabilities": [
         "core:default",
+        "state:set",
         "fs:read-text-file",
         "fs:write-text-file",
         "dialog:open",
@@ -553,8 +554,13 @@ console.log("Exit code:", result.code);
 console.log("Output:\n", result.stdout);
 ```
 
-> **Security note:** `shell:execute` requires the `"shell:execute"` capability in `tauri.conf.json`.
-> Use the `allowed_programs` scope to restrict which executables (and optionally which arguments) are permitted.
+> [!IMPORTANT]
+> **Security Policies for `shell:execute`:**
+> - `shell:execute` requires the explicit `"shell:execute"` capability in `tauri.conf.json`.
+> - Use the `allowed_programs` scope to restrict which executables (and permitted arguments) can be run.
+> - **Strict Path Identity:** The shell engine strictly blocks path spoofing. If a program is whitelisted as `"git"`, executing `/tmp/git` or `./git` is denied. Absolute path entries only match identical absolute binaries.
+> - **Dangerous Flag Filtering:** Built-in heuristics filter out dangerous sub-arguments (such as `git -c`, `git --config-env`, `--receive-pack`, `--upload-pack`, `--pager`, `--exec-path`, and `ext::` protocols).
+> - **Environment Sanitization:** Child process environments strip injection variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `NODE_OPTIONS`, `PYTHONPATH`) and output streams are strictly capped at 1 MB.
 
 ### 7. Custom Native Menu Bar API
 
@@ -1427,12 +1433,15 @@ Tauri-Lua implements a multi-layered **Defense-in-Depth** security model:
    - Automatically injected as an HTTP response header (`Content-Security-Policy`) on custom scheme requests (`tauri://localhost`, `asset://`) and as a dynamic DOM `<meta http-equiv="Content-Security-Policy">` tag in all served HTML documents.
    - Default policy enforces strict script origin restrictions without `'unsafe-inline'` in `script-src` (`default-src 'self' tauri: asset:; script-src 'self' tauri: asset:; style-src 'self' 'unsafe-inline'; ...`), neutralizing Cross-Site Scripting (XSS) vectors.
    - Configurable declaratively in `tauri.conf.json` (`security.csp`) or dynamically via `app:set_csp("...")`.
-3. **Session Verification Tokens & Frame Isolation:**
+3. **Session Verification Tokens & IPC Envelope Integrity:**
    - A cryptographically random 256-bit session token (64 hex characters) is generated via OS CSPRNG (`SecRandomCopyBytes` on macOS, `/dev/urandom` on Linux, `BCryptGenRandom` on Windows) and attached to `window.__TAURI_TOKEN__` at initialization.
+   - **Constant-Time Envelope Verification:** The session token in each native IPC array is compared using constant-time equality (`constant_time_eq`), with strict verification that all characters before `[` and after `]` are pure whitespace.
+   - **Hardened JSON Extraction:** IPC message string extraction (`extract_json_string`) tracks object nesting depth and string literal boundaries, decoding RFC 8259 escape sequences (`\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX` including UTF-8 surrogate pairs).
    - **Threat Model Scope:** This token acts as a defense-in-depth barrier against unauthorized child iframes and cross-origin subframes. It is **not** a same-origin security boundary (any malicious script executing within the same-origin document context can access JS window variables).
    - **Frame Isolation:** macOS WebKit verifies `message.frameInfo.isMainFrame`. On platforms where webview frame metadata is unavailable, strict CSP (`frame-src 'none'`) prevents framing attacks.
-4. **Native Origin Gating (Authoritative Security Boundary):**
+4. **Native Origin Gating & Scheme Normalization (Authoritative Security Boundary):**
    - The authoritative security boundary is enforced at the native C++ level on every IPC message (`get_native_window_origin` & `OriginValidator::is_allowed`). Requests originating from unapproved origins or external untrusted domains are unconditionally rejected before reaching Lua handlers. Strict Content Security Policy (CSP) reinforces same-origin isolation.
+   - **Bidirectional Normalization:** Origin validation (`normalize_origin_url`) normalizes both the evaluated request URL and the target dev server URL (`devUrl`) by lowercasing scheme and host components and handling loopback aliases (`localhost` and `127.0.0.1`), eliminating case-mismatch bypasses or false denials.
 5. **Capability & Program Whitelisting (Deny-by-Default):**
    - Tauri-Lua implements an integrated, declarative capability and scope validation engine directly in `tauri.conf.json` (`security.capabilities`). Sensitive native APIs (filesystem, dialogs, clipboard, shell, notifications) are rejected at the native boundary unless explicitly enabled in configuration.
    - The shell engine enforces a mandatory `allowed_programs` list to restrict command execution exclusively to approved executables and permitted arguments.
@@ -1443,8 +1452,9 @@ Tauri-Lua implements a strict **Deny-by-Default** security model for frontend IP
 
 | Capability Identifier | Description | Default Policy |
 | :--- | :--- | :--- |
-| `core:default` | Basic window control (`close`, `minimize`, `maximize`, `show`, `hide`, `set_title`, `set_size`, `set_focus`), tray icon, shortcuts, and menus | **Denied** (Requires explicit grant) |
-| `fs:read-text-file` | Reading file contents via `tauri:fs:read_text_file` (constrained by `security.scope`) | **Denied** |
+| `core:default` | Basic window control (`close`, `minimize`, `maximize`, `show`, `hide`, `set_title`, `set_size`, `set_focus`), tray icon, shortcuts, menus, and read-only shared state (`state:get`) | **Denied** (Requires explicit grant) |
+| `state:set` | Writing and modifying shared backend state from the webview (`window.__TAURI__.core.invoke('state:set', ...)`) | **Denied** (Requires explicit grant; decoupled from `core:default`) |
+| `fs:read-text-file` | Reading file contents via `tauri:fs:read_text_file` (constrained by `security.scope` and capped at 50 MB) | **Denied** |
 | `fs:write-text-file`| Writing file contents via `tauri:fs:write_text_file` | **Denied** |
 | `fs:remove` | Deleting files via `tauri:fs:remove` (requires explicit `fs:remove` or `fs:*`) | **Denied** |
 | `fs:read-dir` | Directory listing traversal via `tauri:fs:read_dir` | **Denied** |
@@ -1467,10 +1477,16 @@ Tauri-Lua implements a strict **Deny-by-Default** security model for frontend IP
 > **Deny-by-Default Enforcement:**
 > Any IPC request originating from frontend JavaScript that requests an ungranted capability is immediately rejected at the native boundary with an authorization error (`Capability non autorizzata: <permission>`). Backend code in `main.lua` runs with full native privileges.
 
-6. **Path Scope Constraint Enforcement:**
-   - Filesystem operations enforce deny-by-default on empty scopes, resolve path aliases (`$APPDATA`, `$DESKTOP`, `$HOME`) canonically to prevent directory traversal (`../`) attacks, evaluate single (`*`) and recursive (`**`) globs, and strictly reject paths containing NUL bytes (`\0`).
+6. **Path Scope Constraint Enforcement & Contained Asset Resolution:**
+   - Filesystem operations enforce deny-by-default on empty scopes, resolve path aliases (`$APPDATA`, `$DESKTOP`, `$HOME`) canonically to prevent directory traversal (`../`) attacks, evaluate single (`*`) and recursive (`**`) globs, strictly reject paths containing NUL bytes (`\0`), and fail closed without falling back to unverified lexical paths.
+   - **Contained Asset Resolution:** Static asset serving (`resolve_contained_asset`) strips URL query parameters (`?`) and hash fragments (`#`) prior to percent-decoding, and rejects path traversal sequences, ensuring assets cannot escape the document root.
+   - Reading text files via `tauri:fs:read_text_file` enforces a 50 MB read size cap to protect host memory against denial-of-service exhaustion.
 7. **Transactional Atomic State Management (`app.state:update`):**
    - In-memory shared state mutations are guarded by an optimistic CAS loop, ensuring user callbacks never hold the native mutex and preventing deadlocks.
+8. **Scaffolding Defaults & Distribution Hardening:**
+   - **Default Sandbox Scope:** Newly scaffolded projects (`lua-tauri create` and `lua-tauri init`) automatically configure a default sandbox scope (`$APPDATA/**`), guaranteeing least-privilege containment out-of-the-box.
+   - **XML Entity Escaping:** The macOS packaging generator (`cli/bundle.lua`) strictly escapes XML characters (`&`, `<`, `>`, `"`, `'`) when formatting `Info.plist`.
+   - **Application Identifier Sanitization:** The native runtime (`src/entry.cpp`) sanitizes the application identifier to safe alphanumeric characters and dots/hyphens/underscores (`[a-zA-Z0-9._-]`), and safely flushes standard I/O streams before process termination.
 
 ---
 
@@ -1556,10 +1572,17 @@ On macOS, running `./lua-tauri build` produces two artifacts:
 
 When you run `./lua-tauri build` on macOS, the CLI handles codesigning automatically using Apple's recommended inside-out approach (signing nested `.dylib` libraries first, then the root `.app` bundle, avoiding the deprecated `--deep` flag).
 
+##### How the CLI Distinguishes Apple Developer ID vs. Ad-Hoc Signing
+The build engine detects whether an Apple Developer ID is provided by inspecting:
+1. The `APPLE_SIGNING_IDENTITY` environment variable, or
+2. The `bundle.macOS.signingIdentity` field in `tauri.conf.json`.
+
+If neither is provided (or if set to `"-"`), the CLI recognizes this as an **Ad-Hoc** build (`sign_identity == "-"`). If a valid signing identity string is present (e.g. `"Developer ID Application: ..."`), the CLI recognizes this as an authenticated Apple ID signature (`sign_identity ~= "-"`).
+
 ##### 1. Ad-Hoc Signing (Default for Local Builds & Testing)
-If no Apple Developer certificate is specified, the CLI automatically signs the application **ad-hoc** (`codesign --sign -`):
+If no Apple Developer certificate is specified (`sign_identity == "-"`):
 * **Entitlements:** Applies `src-tauri/entitlements.plist` (`com.apple.security.cs.allow-jit` for LuaJIT and `network.client`).
-* **Library Validation:** Omits `--options runtime`. Because ad-hoc binaries do not possess an Apple Team ID (`TeamIdentifier=not set`), omitting the runtime flag prevents macOS `dyld` from halting on launch with a `mapping process and mapped file have different Team IDs` error when loading `@rpath/libtaurilua.dylib`.
+* **Library Validation & Runtime Flag:** Omits `--options runtime`. Because ad-hoc binaries do not possess an Apple Team ID (`TeamIdentifier=not set`), omitting the runtime flag prevents macOS `dyld` from halting on launch with a `mapping process and mapped file have different Team IDs` crash when loading `@rpath/libtaurilua.dylib`.
 * The resulting `.app` and `.dmg` run immediately on your local Mac without Gatekeeper team mismatches.
 
 ##### 2. Apple Developer ID Signing & Notarization (Production Release)
@@ -1618,21 +1641,23 @@ src-tauri/
 │   ├── my-backend-linux-amd64      # Optional: Linux 64-bit ELF (x86_64)
 │   ├── my-backend-linux-arm64      # Optional: Linux ARM 64-bit ELF (aarch64 / Pi)
 │   ├── my-backend.exe              # Optional: Windows PE executable
-│   └── .env                        # Local environment secrets (kept out of git)
+│   └── .env                        # Local development secrets ONLY (strictly excluded from release packages)
 └── src/
     └── main.lua                    # Standard entrypoint (no extra files needed)
 ```
 
 > [!TIP]
-> **Naming Flexibility:**
+> **Naming Flexibility & Architecture Detection:**
 > * If you only distribute for a single OS or compile natively on each machine, simply name the binary `my-backend` (or `my-backend.exe` on Windows).
 > * If you want to bundle precompiled binaries for multiple architectures simultaneously in the same repo, append the target architecture suffix (e.g. `-linux-amd64`, `-linux-arm64`, `-darwin-arm64`). Tauri-Lua automatically detects the host OS (`ffi.os`) and CPU architecture (`ffi.arch`) to execute the matching binary.
+> * During `./lua-tauri build`, the packaging tool automatically detects system architecture (`arm64`, `x64`, `deb_arch`) to name `.dmg` and `.deb` distribution packages accurately.
 
 #### 2. Automatic Packaging (Build Time)
 When you run `./lua-tauri build`:
-* **macOS:** Copies `src-tauri/binaries/` into `.app/Contents/Resources/binaries/` and signs all contained executables automatically during codesigning.
-* **Linux:** Copies `src-tauri/binaries/` into `/usr/share/<productName>/binaries/` inside the generated `.deb` package.
+* **macOS:** Copies `src-tauri/binaries/` into `.app/Contents/Resources/binaries/` (excluding `.env`), codesigning all contained executables automatically.
+* **Linux:** Copies `src-tauri/binaries/` into `/usr/share/<productName>/binaries/` (excluding `.env`) inside the generated `.deb` package.
 * **Windows:** Packages binaries adjacent to the standalone distribution folder.
+* **Production Secret Protection:** `.env` files are strictly stripped and excluded from release packages to prevent accidental exposure of local environment credentials.
 
 #### 3. Native Runtime Lifecycle API (`app:spawn_sidecar`)
 In `src-tauri/src/main.lua`, launch your backend with a single line. The engine handles environment discovery, CLI arguments, port injection, PID tracking, and graceful termination when the user closes the window:
@@ -1667,14 +1692,19 @@ const endpoint = await invoke<{ base_url: string; port: number; running: boolean
 console.log("Connecting to backend at:", endpoint.base_url);
 ```
 
+#### Sidecar Security & Lifecycle Guarantees
+* **Release Bundle Isolation:** In production release mode (`_G.__TAURI_DEV__ == false`), `Sidecar.resolve_path` and `Sidecar.find_env_file` strictly load executables from application bundle resources (`Contents/Resources/binaries/` or `/usr/share/<app-name>/binaries/`). Loose binaries from the current working directory (`CWD`) are ignored to prevent local binary substitution.
+* **Environment Sanitization:** Child process environment injection strictly filters out dynamic linker and runtime injection variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `NODE_OPTIONS`, `PYTHONPATH`).
+* **Lock-Free Atomic PID Tracking:** All spawned sidecars are registered in an async-signal-safe, lock-free C++ atomic process table (`g_tracked_pids`) in `libtaurilua`. On exit, processes are cleanly terminated via native POSIX signals (SIGTERM followed by SIGKILL) without invoking external shell utilities like `pkill` or `lsof`.
+
 #### Options Reference
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `port` | `number` | `8060` | Sets listening port and injects `PORT=<port>` into the environment |
 | `host` | `string` | `"127.0.0.1"` | Bind host for `base_url` resolution |
 | `args` | `table` | `{}` | Command-line arguments passed to the executable |
-| `env` | `table` | `{}` | Extra environment variables table |
-| `env_file` | `string` | `nil` | Explicit path to `.env` file (auto-discovered if omitted) |
+| `env` | `table` | `{}` | Extra environment variables table (filtered for safety) |
+| `env_file` | `string` | `nil` | Explicit path to `.env` file (auto-discovered in dev; excluded in release) |
 | `ipc_command` | `string` | `nil` | Command name to automatically register for web frontend access |
 | `auto_kill` | `boolean` | `true` | Automatically sends SIGTERM + SIGKILL when the app window closes |
 

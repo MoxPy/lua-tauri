@@ -19,6 +19,15 @@ local function shell_quote(str)
     end
 end
 
+local function xml_escape(s)
+    return tostring(s or "")
+        :gsub("&", "&amp;")
+        :gsub("<", "&lt;")
+        :gsub(">", "&gt;")
+        :gsub('"', "&quot;")
+        :gsub("'", "&apos;")
+end
+
 local function exec(cmd)
     local ret = os.execute(cmd)
     if ret ~= 0 and ret ~= true then
@@ -80,7 +89,7 @@ if os_name == "OSX" then
     <key>CFBundlePackageType</key>
     <string>APPL</string>
 </dict>
-</plist>]], app_name, app_name, app_name, version)
+</plist>]], xml_escape(app_name), xml_escape(app_name), xml_escape(app_name), xml_escape(version))
     
     local f = io.open(bundle_dir .. "/Contents/Info.plist", "w")
     if f then
@@ -133,7 +142,6 @@ elseif os_name == "Windows" then
     elseif file_exists("build\\taurilua.dll") then
         exec('copy build\\taurilua.dll "' .. out_dir .. '\\"')
     end
-    -- Include LuaJIT DLL (lua51.dll / luajit.dll) for execution on machines without toolchains
     exec('copy build\\Release\\lua51.dll "' .. out_dir .. '\\" 2>NUL || copy build\\lua51.dll "' .. out_dir .. '\\" 2>NUL || copy build\\Release\\luajit.dll "' .. out_dir .. '\\" 2>NUL || copy build\\luajit.dll "' .. out_dir .. '\\" 2>NUL || rem')
     local luajit_env = os.getenv("LUAJIT_ROOT")
     if luajit_env then

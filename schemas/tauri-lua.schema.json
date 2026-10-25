@@ -119,12 +119,13 @@
                     "type": "object",
                     "properties": {
                       "name": { "type": "string" },
+                      "program": { "type": "string" },
+                      "any_args": { "type": "boolean" },
                       "args": {
                         "type": "array",
                         "items": { "type": "string" }
                       }
-                    },
-                    "required": ["name"]
+                    }
                   }
                 ]
               }
@@ -136,6 +137,10 @@
           }
         }
       }
+    },
+    "plugins": {
+      "type": "object",
+      "description": "Plugin-specific configuration."
     },
     "package": {
       "type": "object",
@@ -153,6 +158,13 @@
         "icon": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "macOS": {
+          "type": "object",
+          "properties": {
+            "signingIdentity": { "type": "string" },
+            "entitlements": { "type": "string" }
+          }
         }
       }
     }

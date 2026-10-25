@@ -1,7 +1,18 @@
-#include "src/ipc_envelope.hpp"
+#include <string>
 #include <iostream>
 #include <cassert>
-#include <string>
+
+#if defined(__has_include)
+  #if __has_include("ipc_envelope.hpp")
+    #include "ipc_envelope.hpp"
+  #elif __has_include("src/ipc_envelope.hpp")
+    #include "src/ipc_envelope.hpp"
+  #elif __has_include("../src/ipc_envelope.hpp")
+    #include "../src/ipc_envelope.hpp"
+  #endif
+#else
+  #include "ipc_envelope.hpp"
+#endif
 
 int main() {
     std::string tok = "secret123";
@@ -29,6 +40,14 @@ int main() {
     assert(extract_json_string(json, "seq") == "42");
     assert(extract_json_string(json, "req") == "{\"hello\":\"world\"}");
     assert(extract_json_string(json, "unknown") == "");
+
+    assert(is_valid_seq_id("1"));
+    assert(is_valid_seq_id("42"));
+    assert(is_valid_seq_id("abc_123-xyz"));
+    assert(!is_valid_seq_id("\"); alert(1); //"));
+    assert(!is_valid_seq_id("<script>"));
+    assert(!is_valid_seq_id(""));
+    assert(!is_valid_seq_id(std::string(65, 'a')));
 
     std::cout << "All standalone token & envelope tests PASSED!\n";
     return 0;

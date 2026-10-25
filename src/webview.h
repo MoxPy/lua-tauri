@@ -2,14 +2,20 @@
 #define WEBVIEW_H
 
 #include <string>
-#include <map>
-#include <functional>
 #include <cstring>
-#include "security_policy.hpp"
-#include "ipc_envelope.hpp"
+#include <atomic>
+#include <mutex>
 
-extern int g_dev_mode;
-extern std::string g_dev_url;
+#if defined(__GNUC__) || defined(__clang__)
+#define TAURILUA_INTERNAL __attribute__((visibility("hidden")))
+#else
+#define TAURILUA_INTERNAL
+#endif
+
+TAURILUA_INTERNAL extern std::atomic<bool> g_dev_mode;
+TAURILUA_INTERNAL extern std::string g_dev_url;
+TAURILUA_INTERNAL extern std::mutex g_config_mutex;
+extern "C" void platform_kill_child_processes();
 
 typedef void *webview_t;
 
@@ -26,7 +32,7 @@ struct WebviewBinding {
     void *arg;
 };
 
-static std::string webview_js_escape(const std::string &s) {
+static inline std::string webview_js_escape(const std::string &s) {
     std::string out;
     out.reserve(s.size() + 16);
     for (char c : s) {
@@ -45,9 +51,31 @@ static std::string webview_js_escape(const std::string &s) {
 static std::string g_app_name = "";
 
 #if defined(__APPLE__)
+#if !defined(__OBJC__)
+struct WebviewImpl;
+static inline webview_t webview_create(int, void *) { return nullptr; }
+static inline void webview_destroy(webview_t) {}
+static inline void webview_set_close_handler(webview_t, webview_close_cb_fn, void *) {}
+static inline void webview_force_close(webview_t) {}
+static inline void webview_set_title(webview_t, const char *) {}
+static inline void webview_set_size(webview_t, int, int, int) {}
+static inline void *webview_get_window(webview_t) { return nullptr; }
+static inline void *webview_get_native_handle(webview_t, int) { return nullptr; }
+static inline void webview_init(webview_t, const char *) { (void)webview_js_escape(""); }
+static inline void webview_eval(webview_t, const char *) {}
+static inline void webview_bind(webview_t, const char *, webview_bind_fn, void *) {}
+static inline void webview_return(webview_t, const char *, int, const char *) {}
+static inline void webview_dispatch(webview_t, webview_dispatch_fn, void *) {}
+static inline void webview_navigate(webview_t, const char *) {}
+static inline void webview_run(webview_t) {}
+static inline void webview_terminate(webview_t) {}
+#else
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #import <dispatch/dispatch.h>
+#include <map>
+#include "security_policy.hpp"
+#include "ipc_envelope.hpp"
 
 struct WebviewImpl {
     NSWindow *window;
@@ -78,6 +106,7 @@ static bool g_has_main_window = false;
     NSString *seq = dict[@"seq"];
     NSString *req = dict[@"req"];
     if (!name || !seq || !req) return;
+    if (!is_valid_seq_id([seq UTF8String])) return;
 
     auto it = self.impl->bindings.find([name UTF8String]);
     if (it != self.impl->bindings.end() && it->second.fn) {
@@ -88,7 +117,12 @@ static bool g_has_main_window = false;
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     NSURL *url = navigationAction.request.URL;
     std::string s_url = url ? [[url absoluteString] UTF8String] : "";
-    if (SecurityPolicy::is_navigation_allowed(s_url, g_dev_mode != 0, g_dev_url)) {
+    std::string d_url;
+    {
+        std::lock_guard<std::mutex> lk(g_config_mutex);
+        d_url = g_dev_url;
+    }
+    if (SecurityPolicy::is_navigation_allowed(s_url, g_dev_mode.load(), d_url)) {
         decisionHandler(WKNavigationActionPolicyAllow);
     } else {
         decisionHandler(WKNavigationActionPolicyCancel);
@@ -144,6 +178,10 @@ static bool g_has_main_window = false;
     } else {
         completionHandler(nil);
     }
+}
+
+- (void)webView:(WKWebView *)webView runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler {
+    completionHandler(nil);
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
@@ -354,6 +392,12 @@ static inline webview_t webview_create(int debug, void *window) {
         g_has_main_window = true;
 
         WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+        Class schemeHandlerClass = NSClassFromString(@"TauriURLSchemeHandler");
+        if (schemeHandlerClass) {
+            id handler = [[schemeHandlerClass alloc] init];
+            [config setURLSchemeHandler:(id<WKURLSchemeHandler>)handler forURLScheme:@"tauri"];
+            [config setURLSchemeHandler:(id<WKURLSchemeHandler>)handler forURLScheme:@"asset"];
+        }
         if (debug) {
             [config.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
         }
@@ -400,7 +444,9 @@ static inline webview_t webview_create(int debug, void *window) {
                                                        defer:NO];
         [impl->window setReleasedWhenClosed:NO];
         [impl->window setDelegate:handler];
-        impl->wk = [[WKWebView alloc] initWithFrame:frame configuration:config];
+        Class wkClass = NSClassFromString(@"TauriWKWebView");
+        if (!wkClass) wkClass = [WKWebView class];
+        impl->wk = [[wkClass alloc] initWithFrame:frame configuration:config];
         [impl->wk setNavigationDelegate:handler];
         [impl->wk setUIDelegate:handler];
         if (debug) {
@@ -558,12 +604,15 @@ static inline void webview_terminate(webview_t w) {
         [NSApp postEvent:ev atStart:YES];
     });
 }
+#endif
 #elif defined(_WIN32)
 #include <windows.h>
 #include <wrl.h>
 #include <WebView2.h>
 #include <map>
 #include <string>
+#include "security_policy.hpp"
+#include "ipc_envelope.hpp"
 
 using namespace Microsoft::WRL;
 
@@ -703,7 +752,12 @@ static inline webview_t webview_create(int debug, void *window) {
                                                         }
                                                         CoTaskMemFree(top_w);
                                                     }
-                                                    if (!SecurityPolicy::is_frame_source_allowed(source_u8, top_u8, g_dev_mode != 0, g_dev_url)) {
+                                                    std::string d_url;
+                                                    {
+                                                        std::lock_guard<std::mutex> lk(g_config_mutex);
+                                                        d_url = g_dev_url;
+                                                    }
+                                                    if (!SecurityPolicy::is_frame_source_allowed(source_u8, top_u8, g_dev_mode.load(), d_url)) {
                                                         CoTaskMemFree(json_str);
                                                         return S_OK; // Reject cross-origin or untrusted subframe message
                                                     }
@@ -722,6 +776,7 @@ static inline webview_t webview_create(int debug, void *window) {
                                                 std::string name = extract_json_string(u8, "name");
                                                 std::string seq = extract_json_string(u8, "seq");
                                                 std::string req = extract_json_string(u8, "req");
+                                                if (!is_valid_seq_id(seq)) return S_OK;
 
                                                 auto it = impl->bindings.find(name);
                                                 if (it != impl->bindings.end() && it->second.fn) {
@@ -746,7 +801,12 @@ static inline webview_t webview_create(int debug, void *window) {
                                                     if (written > 0) u8.resize(static_cast<size_t>(written - 1));
                                                 }
                                                 CoTaskMemFree(uri_w);
-                                                if (!SecurityPolicy::is_navigation_allowed(u8, g_dev_mode != 0, g_dev_url)) {
+                                                std::string d_url;
+                                                {
+                                                    std::lock_guard<std::mutex> lk(g_config_mutex);
+                                                    d_url = g_dev_url;
+                                                }
+                                                if (!SecurityPolicy::is_navigation_allowed(u8, g_dev_mode.load(), d_url)) {
                                                     args->put_Cancel(TRUE);
                                                 }
                                             }
@@ -933,6 +993,8 @@ static inline void webview_terminate(webview_t w) {
 #include <webkit2/webkit2.h>
 #include <map>
 #include <string>
+#include "security_policy.hpp"
+#include "ipc_envelope.hpp"
 
 struct WebviewImpl {
     GtkWidget *window;
@@ -962,6 +1024,11 @@ static void on_gtk_script_message(WebKitUserContentManager *ucc, WebKitJavascrip
         char *req = jsc_value_to_string(req_v);
 
         if (name && seq && req) {
+            if (!is_valid_seq_id(seq)) {
+                g_free(name); g_free(seq); g_free(req);
+                g_object_unref(name_v); g_object_unref(seq_v); g_object_unref(req_v);
+                return;
+            }
             auto it = impl->bindings.find(name);
             if (it != impl->bindings.end() && it->second.fn) {
                 it->second.fn(seq, req, it->second.arg);
@@ -1037,7 +1104,12 @@ static inline webview_t webview_create(int debug, void *window) {
             WebKitNavigationAction *action = webkit_navigation_policy_decision_get_navigation_action(nav_decision);
             WebKitURIRequest *req = webkit_navigation_action_get_request(action);
             const gchar *uri = webkit_uri_request_get_uri(req);
-            if (uri && !SecurityPolicy::is_navigation_allowed(uri, g_dev_mode != 0, g_dev_url)) {
+            std::string d_url;
+            {
+                std::lock_guard<std::mutex> lk(g_config_mutex);
+                d_url = g_dev_url;
+            }
+            if (uri && !SecurityPolicy::is_navigation_allowed(uri, g_dev_mode.load(), d_url)) {
                 webkit_policy_decision_ignore(decision);
                 return TRUE;
             }

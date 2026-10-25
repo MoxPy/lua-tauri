@@ -1,8 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
 project(tauri_lua LANGUAGES C CXX)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(APPLE)
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum OS X deployment version" FORCE)
+    endif()
+endif()
 
 find_program(LUAJIT_BIN luajit REQUIRED)
 
@@ -32,17 +39,19 @@ find_library(LUAJIT_LIB
     ${LUAJIT_ROOT}/lib
 )
 
-# Compiler warnings and security hardening flags
 if(MSVC)
     add_compile_options(/W4 /wd4100 /GS /guard:cf)
-    add_link_options(/guard:cf /DYNAMICBASE /NXCOMPAT)
+    add_link_options(/guard:cf /DYNAMICBASE /NXCOMPAT /CETCOMPAT)
 else()
     add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wformat -Wformat-security -fstack-protector-strong)
     if(APPLE)
         add_compile_options(-Wno-nullability-completeness)
     else()
-        add_compile_definitions(_FORTIFY_SOURCE=2)
-        add_link_options(-Wl,-z,relro -Wl,-z,now)
+        add_compile_options(
+            $<$<NOT:$<CONFIG:Debug>>:-U_FORTIFY_SOURCE>
+            $<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=2>
+        )
+        add_link_options(-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack)
     endif()
 endif()
 
@@ -125,6 +134,12 @@ set(TAURILUA_SOURCES
 # 1. Embeddable Shared Library (libtaurilua.so / libtaurilua.dylib / taurilua.dll)
 add_library(taurilua SHARED
     ${TAURILUA_SOURCES}
+)
+
+set_target_properties(taurilua PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    C_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
 )
 
 target_include_directories(taurilua PUBLIC
@@ -235,6 +250,9 @@ set_tests_properties(test_json_rfc8259 PROPERTIES WORKING_DIRECTORY ${CMAKE_CURR
 
 add_test(NAME test_audit COMMAND ${LUAJIT_BIN} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_audit.lua)
 set_tests_properties(test_audit PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_test(NAME test_sidecar COMMAND ${LUAJIT_BIN} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sidecar.lua)
+set_tests_properties(test_sidecar PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(APPLE)
     target_compile_definitions(taurilua PRIVATE WEBVIEW_COCOA)

@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <cstdio>
 
 #include "taurilua.h"
 #include "native_bridge.h"
@@ -64,6 +65,7 @@ static bool is_single_instance_enabled(const std::string &conf) {
 }
 
 static std::string extract_app_identifier(const std::string &conf) {
+    std::string raw_id = "com.tauri.lua";
     size_t pos = conf.find("\"identifier\"");
     if (pos != std::string::npos) {
         size_t colon = conf.find(':', pos);
@@ -72,12 +74,20 @@ static std::string extract_app_identifier(const std::string &conf) {
             if (q1 != std::string::npos) {
                 size_t q2 = conf.find('"', q1 + 1);
                 if (q2 != std::string::npos) {
-                    return conf.substr(q1 + 1, q2 - q1 - 1);
+                    raw_id = conf.substr(q1 + 1, q2 - q1 - 1);
                 }
             }
         }
     }
-    return "com.tauri.lua";
+    std::string safe_id;
+    for (unsigned char c : raw_id) {
+        if (std::isalnum(c) || c == '.' || c == '_' || c == '-') {
+            safe_id.push_back(static_cast<char>(c));
+        } else {
+            safe_id.push_back('_');
+        }
+    }
+    return safe_id.empty() ? "com.tauri.lua" : safe_id;
 }
 
 static std::string extract_product_name(const std::string &conf) {
@@ -130,9 +140,7 @@ int main(int argc, char **argv) {
     signal(SIGTERM, handle_exit_signal);
     signal(SIGHUP, handle_exit_signal);
 #if !defined(__APPLE__)
-    // Prevent harmless GTK accessibility bus warning when AT-SPI DBus daemon is not running (e.g. ChromeOS Crostini, Docker, minimal Linux)
     setenv("NO_AT_BRIDGE", "1", 0);
-    // Eliminate severe WebKitGTK lag/stuttering in virtualized containers (ChromeOS Crostini, WSL2)
     setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", 0);
 #endif
 #endif
@@ -150,7 +158,6 @@ int main(int argc, char **argv) {
         std::string app_id = extract_app_identifier(config_content);
         int res = platform_single_instance_init(app_id.c_str(), instance_payload.c_str());
         if (res == 0) {
-            // Secondary instance: payload sent to primary instance. Exit cleanly.
             return 0;
         }
     }
@@ -169,6 +176,7 @@ int main(int argc, char **argv) {
     taurilua_destroy(app);
 #if !defined(_WIN32)
     platform_kill_child_processes();
+    std::fflush(nullptr);
     _exit(ret);
 #endif
     return ret;

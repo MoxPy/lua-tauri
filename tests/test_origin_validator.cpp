@@ -1,4 +1,14 @@
-#include "src/origin_check.hpp"
+#if defined(__has_include)
+  #if __has_include("origin_check.hpp")
+    #include "origin_check.hpp"
+  #elif __has_include("../src/origin_check.hpp")
+    #include "../src/origin_check.hpp"
+  #else
+    #include "src/origin_check.hpp"
+  #endif
+#else
+  #include "origin_check.hpp"
+#endif
 #include <iostream>
 #include <cassert>
 

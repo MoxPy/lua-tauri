@@ -216,12 +216,14 @@ local function setup_module_search_paths(extra_conf)
         if exec_dir:match("/Contents/MacOS$") then
             -- macOS App Bundle (.app/Contents/Resources)
             local res_dir = exec_dir:gsub("/MacOS$", "/Resources")
-            table.insert(extra_lua_paths, res_dir .. "/?.lua")
-            table.insert(extra_lua_paths, res_dir .. "/?/init.lua")
-            table.insert(extra_lua_paths, res_dir .. "/src/?.lua")
-            table.insert(extra_lua_paths, res_dir .. "/src/?/init.lua")
-            table.insert(extra_lua_paths, res_dir .. "/src-tauri/src/?.lua")
-            table.insert(extra_lua_paths, res_dir .. "/src-tauri/src/?/init.lua")
+            if dev_mode then
+                table.insert(extra_lua_paths, res_dir .. "/?.lua")
+                table.insert(extra_lua_paths, res_dir .. "/?/init.lua")
+                table.insert(extra_lua_paths, res_dir .. "/src/?.lua")
+                table.insert(extra_lua_paths, res_dir .. "/src/?/init.lua")
+                table.insert(extra_lua_paths, res_dir .. "/src-tauri/src/?.lua")
+                table.insert(extra_lua_paths, res_dir .. "/src-tauri/src/?/init.lua")
+            end
             table.insert(extra_lua_paths, res_dir .. "/plugins/?.lua")
             table.insert(extra_lua_paths, res_dir .. "/plugins/?/init.lua")
             table.insert(extra_lua_paths, res_dir .. "/plugins/?/src/?.lua")
@@ -237,10 +239,12 @@ local function setup_module_search_paths(extra_conf)
             table.insert(extra_lua_paths, exec_dir .. "/plugins/?.lua")
             table.insert(extra_lua_paths, exec_dir .. "/plugins/?/init.lua")
             table.insert(extra_lua_paths, exec_dir .. "/plugins/?/src/?.lua")
-            table.insert(extra_lua_paths, exec_dir .. "/src/?.lua")
-            table.insert(extra_lua_paths, exec_dir .. "/src/?/init.lua")
-            table.insert(extra_lua_paths, exec_dir .. "/?.lua")
-            table.insert(extra_lua_paths, exec_dir .. "/?/init.lua")
+            if dev_mode then
+                table.insert(extra_lua_paths, exec_dir .. "/src/?.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/src/?/init.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/?.lua")
+                table.insert(extra_lua_paths, exec_dir .. "/?/init.lua")
+            end
             table.insert(extra_lua_paths, exec_dir .. "/../share/plugins/?.lua")
             table.insert(extra_lua_paths, exec_dir .. "/../share/plugins/?/init.lua")
             table.insert(extra_lua_paths, exec_dir .. "/rocks/share/lua/5.1/?.lua")
@@ -261,30 +265,36 @@ local function setup_module_search_paths(extra_conf)
                 table.insert(extra_lua_paths, "/usr/share/" .. c .. "/plugins/?.lua")
                 table.insert(extra_lua_paths, "/usr/share/" .. c .. "/plugins/?/init.lua")
                 table.insert(extra_lua_paths, "/usr/share/" .. c .. "/plugins/?/src/?.lua")
-                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/src/?.lua")
-                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/src/?/init.lua")
-                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/?.lua")
-                table.insert(extra_lua_paths, "/usr/share/" .. c .. "/?/init.lua")
+                if dev_mode then
+                    table.insert(extra_lua_paths, "/usr/share/" .. c .. "/src/?.lua")
+                    table.insert(extra_lua_paths, "/usr/share/" .. c .. "/src/?/init.lua")
+                    table.insert(extra_lua_paths, "/usr/share/" .. c .. "/?.lua")
+                    table.insert(extra_lua_paths, "/usr/share/" .. c .. "/?/init.lua")
+                end
                 table.insert(extra_lua_paths, "/usr/share/" .. c .. "/rocks/share/lua/5.1/?.lua")
                 table.insert(extra_lua_paths, "/usr/share/" .. c .. "/rocks/share/lua/5.1/?/init.lua")
 
                 table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/plugins/?.lua")
                 table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/plugins/?/init.lua")
                 table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/plugins/?/src/?.lua")
-                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/src/?.lua")
-                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/src/?/init.lua")
-                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/?.lua")
-                table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/?/init.lua")
+                if dev_mode then
+                    table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/src/?.lua")
+                    table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/src/?/init.lua")
+                    table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/?.lua")
+                    table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/?/init.lua")
+                end
                 table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/rocks/share/lua/5.1/?.lua")
                 table.insert(extra_lua_paths, "/usr/local/share/" .. c .. "/rocks/share/lua/5.1/?/init.lua")
 
                 table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/plugins/?.lua")
                 table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/plugins/?/init.lua")
                 table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/plugins/?/src/?.lua")
-                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/src/?.lua")
-                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/src/?/init.lua")
-                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/?.lua")
-                table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/?/init.lua")
+                if dev_mode then
+                    table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/src/?.lua")
+                    table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/src/?/init.lua")
+                    table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/?.lua")
+                    table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/?/init.lua")
+                end
                 table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/rocks/share/lua/5.1/?.lua")
                 table.insert(extra_lua_paths, exec_dir .. "/../share/" .. c .. "/rocks/share/lua/5.1/?/init.lua")
 
@@ -296,27 +306,26 @@ local function setup_module_search_paths(extra_conf)
         end
     end
 
-    local current_path = package.path or ""
-    for _, p in ipairs(extra_lua_paths) do
-        if not current_path:find(p, 1, true) then
-            current_path = current_path .. ";" .. p
+    if dev_mode then
+        local current_path = package.path or ""
+        for _, p in ipairs(extra_lua_paths) do
+            if not current_path:find(p, 1, true) then
+                current_path = current_path .. ";" .. p
+            end
         end
-    end
-    if not dev_mode then
-        current_path = filter_absolute_only(current_path)
-    end
-    package.path = current_path
+        package.path = current_path
 
-    local current_cpath = package.cpath or ""
-    for _, cp in ipairs(extra_c_paths) do
-        if not current_cpath:find(cp, 1, true) then
-            current_cpath = current_cpath .. ";" .. cp
+        local current_cpath = package.cpath or ""
+        for _, cp in ipairs(extra_c_paths) do
+            if not current_cpath:find(cp, 1, true) then
+                current_cpath = current_cpath .. ";" .. cp
+            end
         end
+        package.cpath = current_cpath
+    else
+        package.path = filter_absolute_only(table.concat(extra_lua_paths, ";"))
+        package.cpath = filter_absolute_only(table.concat(extra_c_paths, ";"))
     end
-    if not dev_mode then
-        current_cpath = filter_absolute_only(current_cpath)
-    end
-    package.cpath = current_cpath
 end
 
 setup_module_search_paths()
@@ -392,6 +401,7 @@ void platform_state_set_number(const char *key, double val);
 int platform_state_get_number(const char *key, double *out_val);
 void platform_state_set_json(const char *key, const char *json_val);
 int platform_state_get_json(const char *key, char *out_val, int max_len);
+int platform_state_get_length(const char *key);
 int platform_state_has(const char *key);
 void platform_state_delete(const char *key);
 void platform_state_clear();
@@ -446,6 +456,7 @@ int closedir(DIR *dirp);
 int remove(const char *pathname);
 int usleep(unsigned int usec);
 void Sleep(unsigned long dwMilliseconds);
+char *realpath(const char *path, char *resolved_path);
 ]])
 
 local clib = ffi.C
@@ -514,7 +525,15 @@ if not has_state_sym then
             local sk = type(k) == "string" and k or ffi.string(k)
             if _state_types[sk] == "string" then
                 local s = _state_store[sk]
-                ffi.copy(buf, s, math.min(#s + 1, maxlen))
+                local len = #s
+                if not buf or maxlen <= 0 or len >= maxlen then
+                    if buf and maxlen > 0 then
+                        ffi.copy(buf, s, maxlen - 1)
+                        buf[maxlen - 1] = 0
+                    end
+                    return len + 1
+                end
+                ffi.copy(buf, s, len + 1)
                 return 1
             end
             return 0
@@ -523,14 +542,47 @@ if not has_state_sym then
             local sk = type(k) == "string" and k or ffi.string(k)
             if _state_types[sk] == "json" then
                 local s = _state_store[sk]
-                ffi.copy(buf, s, math.min(#s + 1, maxlen))
+                local len = #s
+                if not buf or maxlen <= 0 or len >= maxlen then
+                    if buf and maxlen > 0 then
+                        ffi.copy(buf, s, maxlen - 1)
+                        buf[maxlen - 1] = 0
+                    end
+                    return len + 1
+                end
+                ffi.copy(buf, s, len + 1)
                 return 1
             end
             return 0
         end,
+        platform_state_get_length = function(k)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            if _state_types[sk] == "string" or _state_types[sk] == "json" then
+                local s = _state_store[sk]
+                return s and #s or 0
+            end
+            return 0
+        end,
+        platform_state_clear = function()
+            _state_store = {}
+            _state_types = {}
+        end,
+        platform_window_eval = function(...) end,
+        platform_resolve_path = function(in_path, out_buf, maxlen)
+            local p = type(in_path) == "string" and in_path or ffi.string(in_path)
+            if not out_buf or maxlen <= 0 then return 0 end
+            local ok, rp = pcall(function() return real_clib.realpath(p, out_buf) end)
+            if ok and rp ~= nil then
+                return 1
+            end
+            ffi.copy(out_buf, p, math.min(#p + 1, maxlen))
+            return 1
+        end,
     }, {
         __index = function(_, k)
-            return real_clib[k]
+            local ok, val = pcall(function() return real_clib[k] end)
+            if ok then return val end
+            return nil
         end
     })
 end
@@ -1046,7 +1098,7 @@ function Security:assert_capability(name)
     if prefix and (self.capabilities[prefix .. ":*"] or self.capabilities[prefix .. ":all"] or self.capabilities[prefix .. ":default"]) then
         if prefix ~= "fs" then
             if stripped == "window:create:external" and (self.capabilities["window:default"] or self.capabilities["core:default"]) then
-                -- do not grant external window creation under default presets
+            elseif (stripped == "state:set" or stripped == "state:write") and self.capabilities["state:default"] and not self.capabilities["state:*"] and not self.capabilities["state:all"] and not self.capabilities["state:set"] and not self.capabilities["state:write"] then
             else
                 return true
             end
@@ -1060,7 +1112,7 @@ function Security:assert_capability(name)
        stripped:match("^shortcut:") or
        stripped:match("^tray:") or
        stripped == "menu:set" or
-       stripped:match("^state:") or
+       (stripped:match("^state:") and stripped ~= "state:set" and stripped ~= "state:write") or
        stripped:match("^store:") or
        stripped:match("^path:") or
        stripped == "theme:get" or
@@ -1072,40 +1124,50 @@ function Security:assert_capability(name)
 end
 
 function Security:assert_program(program)
-    if not self.capabilities["shell:execute"] and not self.capabilities["shell:allow-execute"] then
-        error("Capability non autorizzata: shell:execute")
+    self:assert_capability("shell:execute")
+    local prog_str = tostring(program or "")
+    if prog_str == "" or prog_str:find("%z") then
+        error("Shell: invalid program name")
     end
-
-    -- Windows .bat/.cmd injection protection: reject shell script wrappers
-    local prog_lower = tostring(program):lower()
-    if prog_lower:match("%.bat$") or prog_lower:match("%.cmd$") then
-        error(string.format("Shell: direct execution of .bat / .cmd files is blocked for security (CWE-78): %s", program))
+    local lower_prog = prog_str:lower()
+    if lower_prog:match("%.bat$") or lower_prog:match("%.cmd$") then
+        error(string.format("Shell: direct execution of .bat / .cmd files is blocked for security (CWE-78): %s", prog_str))
     end
-
-    -- Default-deny: allowed_programs is mandatory (empty list = nothing allowed)
     if not self.allowed_programs or #self.allowed_programs == 0 then
-        error(string.format("Shell: execution denied (allowed_programs is empty or missing): %s", program))
+        error(string.format("Shell: execution denied (allowed_programs is empty or missing): %s", prog_str))
     end
-
-    -- Check if program is explicitly whitelisted or wildcard "*" is granted
-    if self._program_map["*"] == nil and self._program_map[program] == nil then
-        error(string.format("Shell: program not in allowlist: %s", program))
+    local has_sep = prog_str:find("[/\\]") ~= nil
+    local rule = self._program_map[prog_str]
+    if not rule and not has_sep then
+        local base_name = prog_str:match("[^/\\]+$") or prog_str
+        rule = self._program_map[base_name]
     end
+    if not rule then
+        error(string.format("Shell: program not in allowlist: %s", prog_str))
+    end
+    return rule
 end
 
--- Check that each arg in args[] is permitted for the given program.
 function Security:assert_args(program, args)
     args = args or {}
-    local prog_base = tostring(program):match("[^/\\]+$") or tostring(program)
+    local prog_base = (tostring(program):match("[^/\\]+$") or tostring(program)):lower():gsub("%.exe$", "")
 
-    -- 1. Always block known high-risk command execution switches
     for _, arg in ipairs(args) do
-        local s = tostring(arg)
-        if (prog_base == "git" and (s == "-c" or s:match("^%-c") or s == "--exec-path" or s:match("^%-%-exec%-path") or s == "--upload-pack")) or
-           (prog_base == "find" and (s == "-exec" or s == "-execdir" or s == "-ok")) or
-           (prog_base == "xargs" and (s:match("^%-I") or s:match("^%-%-replace"))) or
-           (prog_base == "ssh" and (s:match("[pP]roxy[cC]ommand"))) then
-            error(string.format("Shell: blocked dangerous argument for '%s': %s", program, s))
+        local a = tostring(arg)
+        if prog_base == "git" then
+            if a == "-c" or a:match("^%-c")
+               or a == "--exec-path" or a:match("^%-%-exec%-path")
+               or a == "--upload-pack" or a:match("^%-%-upload%-pack")
+               or a == "--receive-pack" or a:match("^%-%-receive%-pack")
+               or a == "--config-env" or a:match("^%-%-config%-env")
+               or a == "--pager" or a:match("^%-%-pager")
+               or a:match("^ext::") then
+                error(string.format("Shell: blocked dangerous argument for '%s': %s", tostring(program), a))
+            end
+        elseif (prog_base == "find" and (a == "-exec" or a == "-execdir" or a == "-ok")) or
+               (prog_base == "xargs" and (a:match("^%-I") or a:match("^%-%-replace"))) or
+               (prog_base == "ssh" and (a:lower():match("proxycommand"))) then
+            error(string.format("Shell: blocked dangerous argument for '%s': %s", tostring(program), a))
         end
     end
 
@@ -1115,6 +1177,9 @@ function Security:assert_args(program, args)
     end
 
     local arg_policy = self._program_map[program]
+    if arg_policy == nil and not tostring(program):find("[/\\]") then
+        arg_policy = self._program_map[prog_base]
+    end
     if arg_policy == false then
         -- Explicit opt-in for any arguments on this program
         return
@@ -1122,13 +1187,13 @@ function Security:assert_args(program, args)
 
     if type(arg_policy) == "table" then
         if #arg_policy == 0 and #args > 0 then
-            error(string.format("Shell: arguments not permitted for program '%s' (no arg allowlist defined)", program))
+            error(string.format("Shell: arguments not permitted for program '%s' (no arg allowlist defined)", tostring(program)))
         end
         local whiteset = {}
         for _, a in ipairs(arg_policy) do whiteset[tostring(a)] = true end
         for _, arg in ipairs(args) do
             if not whiteset[tostring(arg)] then
-                error(string.format("Shell: argument not in allowlist for '%s': %s", program, tostring(arg)))
+                error(string.format("Shell: argument not in allowlist for '%s': %s", tostring(program), tostring(arg)))
             end
         end
         return
@@ -1136,7 +1201,7 @@ function Security:assert_args(program, args)
 
     -- If no arguments allowlist was configured, default deny non-empty arguments
     if #args > 0 then
-        error(string.format("Shell: arguments not permitted for program '%s' (no arg allowlist defined)", program))
+        error(string.format("Shell: arguments not permitted for program '%s' (no arg allowlist defined)", tostring(program)))
     end
 end
 
@@ -1192,15 +1257,17 @@ end
 local function real_filesystem_path(path)
     if type(path) ~= "string" or path == "" then return "" end
     local canon = canonicalize_path(path)
-    if clib and clib.platform_resolve_path then
+    local has_sym, fn = pcall(function() return clib and clib.platform_resolve_path end)
+    if has_sym and fn then
         local buf = ffi.new("char[4096]")
-        local ok = clib.platform_resolve_path(canon, buf, 4096)
-        if ok == 1 then
+        local ok_call, res = pcall(fn, canon, buf, 4096)
+        if ok_call and res == 1 then
             local resolved = ffi.string(buf)
             if resolved ~= "" then
                 return resolved:gsub("\\", "/")
             end
         end
+        error("Impossibile risolvere in modo canonico il percorso: " .. tostring(path))
     end
     return canon
 end
@@ -1220,7 +1287,6 @@ function Security:assert_scope(target_path, base_paths)
     if type(target_path) ~= "string" or target_path == "" then
         error("Percorso file non specificato o non valido")
     end
-    local normalized = real_filesystem_path(target_path)
 
     local function substitute_base(str)
         return str:gsub("%$([A-Z_]+)", function(var)
@@ -1231,6 +1297,9 @@ function Security:assert_scope(target_path, base_paths)
             return "$" .. var
         end)
     end
+
+    local expanded_target = substitute_base(target_path)
+    local normalized = real_filesystem_path(expanded_target)
 
     for _, pattern in ipairs(self.scopes) do
         if type(pattern) == "string" and pattern ~= "" then
@@ -1328,26 +1397,39 @@ function State:set(key, value)
 end
 
 function State:get(key)
-    local skey = tostring(key)
-    if clib.platform_state_has(skey) == 0 then
+    local k = tostring(key)
+    if clib.platform_state_has(k) == 0 then
         return nil
     end
 
     local num_buf = ffi.new("double[1]")
-    if clib.platform_state_get_number(skey, num_buf) == 1 then
+    if clib.platform_state_get_number(k, num_buf) == 1 then
         return tonumber(num_buf[0])
     end
 
-    local str_buf = ffi.new("char[65536]")
-    if clib.platform_state_get_string(skey, str_buf, 65536) == 1 then
-        local s = ffi.string(str_buf)
-        if s == "true" then return true end
-        if s == "false" then return false end
-        return s
+    local buf_size = 65536
+    local s_buf = ffi.new("char[?]", buf_size)
+    local rc_j = clib.platform_state_get_json(k, s_buf, buf_size)
+    if rc_j > 1 then
+        s_buf = ffi.new("char[?]", rc_j)
+        rc_j = clib.platform_state_get_json(k, s_buf, rc_j)
     end
-
-    if clib.platform_state_get_json(skey, str_buf, 65536) == 1 then
-        return self.json.decode(ffi.string(str_buf))
+    if rc_j == 1 then
+        local raw = ffi.string(s_buf)
+        if raw == "true" then return true end
+        if raw == "false" then return false end
+        return self.json.decode(raw)
+    end
+    local rc_s = clib.platform_state_get_string(k, s_buf, buf_size)
+    if rc_s > 1 then
+        s_buf = ffi.new("char[?]", rc_s)
+        rc_s = clib.platform_state_get_string(k, s_buf, rc_s)
+    end
+    if rc_s == 1 then
+        local raw = ffi.string(s_buf)
+        if raw == "true" then return true end
+        if raw == "false" then return false end
+        return raw
     end
 
     return nil
@@ -1393,6 +1475,21 @@ local function safe_mkdir_p(target_path)
     return true
 end
 
+local function with_state_lock(fn)
+    local has_lock = clib and clib.platform_state_lock and clib.platform_state_unlock
+    if has_lock then
+        clib.platform_state_lock()
+    end
+    local ok, res, err = pcall(fn)
+    if has_lock then
+        clib.platform_state_unlock()
+    end
+    if not ok then
+        error(res)
+    end
+    return res, err
+end
+
 local Store = {}
 Store.__index = Store
 
@@ -1406,53 +1503,84 @@ function Store.new(store_path, json_codec)
 end
 
 function Store:load()
-    local f = io.open(self.path, "rb")
-    if f then
-        local raw = f:read("*a")
-        f:close()
-        self.data = self.json.decode(raw) or {}
-    end
+    return with_state_lock(function()
+        local f = io.open(self.path, "rb")
+        if f then
+            local raw = f:read("*a")
+            f:close()
+            self.data = self.json.decode(raw) or {}
+        else
+            self.data = {}
+        end
+        return self.data
+    end)
 end
 
 function Store:save()
-    local parent = self.path:match("^(.*)/[^/]+$")
-    if parent and parent ~= "" then
-        safe_mkdir_p(parent)
-    end
-    local f = io.open(self.path, "wb")
-    if f then
-        f:write(self.json.encode(self.data))
-        f:close()
-        return true
-    end
-    return false
+    return with_state_lock(function()
+        local parent = self.path:match("^(.*)/[^/]+$")
+        if parent and parent ~= "" then
+            safe_mkdir_p(parent)
+        end
+        local tmp_path = self.path .. ".tmp"
+        local f = io.open(tmp_path, "wb")
+        if f then
+            f:write(self.json.encode(self.data))
+            f:flush()
+            f:close()
+            local ok = os.rename(tmp_path, self.path)
+            if not ok then
+                os.remove(self.path)
+                ok = os.rename(tmp_path, self.path)
+            end
+            return ok == true or ok == 0
+        end
+        return false
+    end)
 end
 
 function Store:get(key)
-    return self.data[tostring(key)]
+    return with_state_lock(function()
+        self:load()
+        return self.data[tostring(key)]
+    end)
 end
 
 function Store:set(key, val)
-    self.data[tostring(key)] = val
-    return self:save()
+    return with_state_lock(function()
+        self:load()
+        self.data[tostring(key)] = val
+        return self:save()
+    end)
 end
 
 function Store:has(key)
-    return self.data[tostring(key)] ~= nil
+    return with_state_lock(function()
+        self:load()
+        return self.data[tostring(key)] ~= nil
+    end)
 end
 
 function Store:delete(key)
-    self.data[tostring(key)] = nil
-    return self:save()
+    return with_state_lock(function()
+        self:load()
+        self.data[tostring(key)] = nil
+        return self:save()
+    end)
 end
 
 function Store:clear()
-    self.data = {}
-    return self:save()
+    return with_state_lock(function()
+        self.data = {}
+        return self:save()
+    end)
 end
 
 function Store:entries()
-    return self.data
+    return with_state_lock(function()
+        self:load()
+        return self.data
+    end)
 end
 
 -- ============================================================================
@@ -1874,7 +2002,7 @@ local TAURI_CLIENT_SCRIPT = [[
           show: function() { return makeInvoke("tauri:window:show", {}); },
           minimize: function() { return makeInvoke("tauri:window:minimize", {}); },
           maximize: function() { return makeInvoke("tauri:window:maximize", {}); },
-          setFocus: function() { return makeInvoke("tauri:window:set_focus", { label: label }); },
+          setFocus: function() { return makeInvoke("tauri:window:set_focus", {}); },
           theme: function() { return makeInvoke("tauri:theme:get", {}); },
           onDragDropEvent: function(handler) {
             return window.__TAURI__.event.listen("tauri://drag-drop", function(e) {
@@ -2011,7 +2139,30 @@ end
 
 local function sh_quote(s)
     s = tostring(s or '')
-    return "'" .. s:gsub("'", "'\''") .. "'"
+    if ffi.os == "Windows" then
+        s = s:gsub('"', '""')
+        return '"' .. s .. '"'
+    else
+        return "'" .. s:gsub("'", "'\\''") .. "'"
+    end
+end
+
+local FORBIDDEN_ENV_KEYS = {
+    LD_PRELOAD = true, LD_LIBRARY_PATH = true, LD_AUDIT = true,
+    DYLD_INSERT_LIBRARIES = true, DYLD_LIBRARY_PATH = true, DYLD_FRAMEWORK_PATH = true,
+    PATH = true, IFS = true, BASH_ENV = true, ENV = true,
+    NODE_OPTIONS = true, PYTHONSTARTUP = true, PYTHONPATH = true,
+    LUA_PATH = true, LUA_CPATH = true, LUA_INIT = true
+}
+
+local function is_safe_env_key(k)
+    if type(k) ~= "string" or not k:match("^[a-zA-Z_][a-zA-Z0-9_]*$") then
+        return false
+    end
+    if FORBIDDEN_ENV_KEYS[k:upper()] then
+        return false
+    end
+    return true
 end
 
 local function parse_env_file(path)
@@ -2039,6 +2190,7 @@ function Sidecar.resolve_path(name, app_name)
     if not name or name == '' then return nil end
     app_name = app_name or 'tauri-lua-app'
 
+    local is_dev = (os.getenv("TAURILUA_DEV") == "1") or (rawget(_G, "__TAURI_DEV__") == true)
     local os_name = ffi.os
     local arch_name = ffi.arch
     local norm_arch = (arch_name == 'arm64' or arch_name == 'aarch64') and 'arm64' or 'amd64'
@@ -2104,26 +2256,26 @@ function Sidecar.resolve_path(name, app_name)
     end
 
     -- 4. Development mode relative paths
-    table.insert(search_dirs, 'src-tauri/binaries')
-    table.insert(search_dirs, 'binaries')
-    table.insert(search_dirs, './src-tauri/binaries')
-    table.insert(search_dirs, './binaries')
-    table.insert(search_dirs, '../src-tauri/binaries')
-    table.insert(search_dirs, '../binaries')
+    if is_dev then
+        table.insert(search_dirs, 'src-tauri/binaries')
+        table.insert(search_dirs, 'binaries')
+        table.insert(search_dirs, './src-tauri/binaries')
+        table.insert(search_dirs, './binaries')
+    end
 
     for _, dir in ipairs(search_dirs) do
         for _, bin_file in ipairs(candidates) do
             local full_path = dir .. '/' .. bin_file
             if file_readable(full_path) then
-                if os_name ~= 'Windows' then
-                    pcall(os.execute, 'chmod +x ' .. sh_quote(full_path) .. ' 2>/dev/null')
+                if os_name ~= 'Windows' and is_dev then
+                    pcall(function() os.execute('chmod +x ' .. sh_quote(full_path) .. ' 2>/dev/null') end)
                 end
                 return full_path
             end
         end
     end
 
-    if file_readable(name) then
+    if is_dev and file_readable(name) then
         return name
     end
 
@@ -2135,34 +2287,16 @@ function Sidecar.find_env_file(bin_path, app_name, custom_env_file)
         return custom_env_file
     end
 
+    local is_dev = (os.getenv("TAURILUA_DEV") == "1") or (rawget(_G, "__TAURI_DEV__") == true)
+    if not is_dev then
+        return nil
+    end
+
     local search_paths = {}
     if bin_path then
         local bin_dir = bin_path:match('^(.*)/[^/]+$')
         if bin_dir then
             table.insert(search_paths, bin_dir .. '/.env')
-            local parent_dir = bin_dir:match('^(.*)/[^/]+$')
-            if parent_dir then
-                table.insert(search_paths, parent_dir .. '/.env')
-            end
-        end
-    end
-
-    local exec_dir = get_executable_dir()
-    if exec_dir and exec_dir:match('/Contents/MacOS$') then
-        local res_dir = exec_dir:gsub('/MacOS$', '/Resources')
-        table.insert(search_paths, res_dir .. '/binaries/.env')
-        table.insert(search_paths, res_dir .. '/.env')
-    end
-
-    if app_name and ffi.os == 'Linux' then
-        local clean_name = app_name:gsub('[^%w_%- ]', '')
-        local slug_name = clean_name:lower():gsub('%s+', '-')
-        table.insert(search_paths, '/usr/share/' .. clean_name .. '/binaries/.env')
-        table.insert(search_paths, '/usr/share/' .. slug_name .. '/binaries/.env')
-        table.insert(search_paths, '/etc/' .. slug_name .. '/.env')
-        if exec_dir then
-            table.insert(search_paths, exec_dir .. '/../share/' .. clean_name .. '/binaries/.env')
-            table.insert(search_paths, exec_dir .. '/../share/' .. slug_name .. '/binaries/.env')
         end
     end
 
@@ -2172,7 +2306,6 @@ function Sidecar.find_env_file(bin_path, app_name, custom_env_file)
     table.insert(search_paths, './src-tauri/.env')
     table.insert(search_paths, '.env')
     table.insert(search_paths, './.env')
-    table.insert(search_paths, '../.env')
 
     for _, p in ipairs(search_paths) do
         if file_readable(p) then
@@ -2218,14 +2351,12 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
         env_vars['FRONTEND_URL'] = '*'
     end
 
-    if port and ffi.os ~= 'Windows' then
-        -- Free any stale orphaned instance holding our port
-        os.execute(string.format('lsof -ti :%d 2>/dev/null | xargs kill -9 2>/dev/null', port))
-    end
-
     local host = opts.host or '127.0.0.1'
     local bin_dir = opts.cwd or bin_path:match('^(.*)/[^/]+$') or '.'
-    local log_file = opts.log_file or string.format('/tmp/%s_%s.log', app_name:lower():gsub('[^%w_]', '_'), tostring(name):lower():gsub('[^%w_]', '_'))
+    local log_file = opts.log_file
+    if not log_file or log_file == '' then
+        log_file = (ffi.os == 'Windows') and 'NUL' or '/dev/null'
+    end
 
     local sc = setmetatable({
         name = name,
@@ -2243,7 +2374,7 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
 
     local env_parts = {}
     for k, v in pairs(env_vars) do
-        if k:match('^[%w_]+$') then
+        if is_safe_env_key(k) then
             table.insert(env_parts, k .. '=' .. sh_quote(v))
         end
     end
@@ -2317,9 +2448,6 @@ function Sidecar:kill(sig)
             pcall(os.execute, string.format('(sleep 0.1 && kill -9 %d 2>/dev/null) &', self.pid))
         end
         self.pid = nil
-    end
-    if self.port and ffi.os ~= 'Windows' then
-        pcall(os.execute, string.format('lsof -ti :%d 2>/dev/null | xargs kill -9 2>/dev/null', self.port))
     end
     return true
 end
@@ -2810,124 +2938,146 @@ function Tauri:_register_builtins()
 
     self:register("tauri:window:create", function(payload)
         self.security:assert_capability("core:default")
-        local label = (payload and payload.label) or ("win_" .. tostring(os.time()))
-        local title = (payload and payload.title) or "New Window"
-        local raw_url = payload and payload.url
-        local url = self.default_origin
-        local is_trusted = false
-
-        if not raw_url or raw_url == "" then
-            url = self.default_origin
-            is_trusted = is_trusted_origin(url)
-        elseif is_trusted_origin(raw_url) then
-            url = raw_url
-            is_trusted = true
-        elseif raw_url:match("^https?://") or raw_url:match("^tauri://") then
+        payload = type(payload) == "table" and payload or {}
+        local label = tostring(payload.label or ("win_" .. tostring(os.time())))
+        if not label:match("^[a-zA-Z0-9_%-]+$") or #label > 64 then
+            error("Invalid window label")
+        end
+        local title = tostring(payload.title or "New Window")
+        local raw_url = tostring(payload.url or "")
+        if raw_url:find("%z") or raw_url:find("[\r\n]") then
+            error("Invalid window URL")
+        end
+        local lower_raw = raw_url:lower():gsub("^%s+", "")
+        if lower_raw:match("^javascript:") or lower_raw:match("^data:") or lower_raw:match("^file:") or lower_raw:match("^vbscript:") or lower_raw:match("^blob:") or lower_raw:match("^//") then
             self.security:assert_capability("window:create:external")
-            url = raw_url
-            is_trusted = false
-        else
-            -- Relative path: join onto default_origin
-            if self.default_origin:match("/$") then
-                url = self.default_origin .. raw_url:gsub("^/", "")
-            else
-                url = self.default_origin .. "/" .. raw_url:gsub("^/", "")
-            end
-            is_trusted = is_trusted_origin(url)
-            if not is_trusted then
+            error("Forbidden URL scheme in tauri:window:create")
+        end
+        local url = raw_url
+        if url == "" then
+            url = self.default_origin .. "index.html"
+        elseif not url:match("^https?://") and not url:match("^tauri://") then
+            if url:find(":", 1, true) then
                 self.security:assert_capability("window:create:external")
+                error("Forbidden URL scheme in tauri:window:create")
+            end
+            url = self.default_origin .. url:gsub("^/+", "")
+        end
+        local is_internal = false
+        if clib and clib.platform_is_origin_allowed then
+            local ok_o, allowed = pcall(function() return clib.platform_is_origin_allowed(url) end)
+            if ok_o and allowed == 1 then
+                is_internal = true
+            end
+        else
+            local low = url:lower()
+            if (low == "tauri://localhost" or low:match("^tauri://localhost[/%?#]") or low == "https://tauri.localhost" or low:match("^https://tauri%.localhost[/%?#]")) and not low:find("@", 1, true) then
+                is_internal = true
             end
         end
-
-        local width = (payload and payload.width) or 800
-        local height = (payload and payload.height) or 600
-        local resizable = (payload and payload.resizable ~= false) and 1 or 0
-        local decorations = (payload and payload.decorations ~= false) and 1 or 0
-        local transparent = (payload and payload.transparent) and 1 or 0
-
-        pcall(function() clib.platform_set_client_script(TAURI_CLIENT_SCRIPT) end)
-        local ok = clib.platform_window_create(label, title, url, width, height, resizable, decorations, transparent)
-        if ok == 1 then
-            if is_trusted then
-                pcall(function() clib.platform_window_init_script(label, TAURI_CLIENT_SCRIPT) end)
-                clib.platform_window_eval(label, TAURI_CLIENT_SCRIPT)
-            end
-            self.windows[label] = true
-            return true
+        if not is_internal then
+            self.security:assert_capability("window:create:external")
         end
-        error("Impossibile creare la finestra: " .. label)
+        local width = tonumber(payload.width) or 800
+        local height = tonumber(payload.height) or 600
+        local resizable = (payload.resizable == nil or payload.resizable) and 1 or 0
+        local decorations = (payload.decorations == nil or payload.decorations) and 1 or 0
+        local transparent = payload.transparent and 1 or 0
+        if clib then
+            local ok_c, rc = pcall(function()
+                return clib.platform_window_create(label, title, url, width, height, resizable, decorations, transparent)
+            end)
+            if not ok_c or rc ~= 0 then
+                error("Impossibile creare la finestra: " .. label)
+            end
+        end
+        self.windows[label] = { label = label, title = title, url = url }
+        return { label = label }
     end)
 
-    self:register("tauri:window:close", function(payload, caller_label)
+    local function resolve_win_label(payload, caller)
+        local lbl = (type(payload) == "table" and payload.label) or caller or "main"
+        lbl = tostring(lbl)
+        if lbl == "" then lbl = "main" end
+        return lbl
+    end
+
+    self:register("tauri:window:close", function(payload, caller)
         self.security:assert_capability("core:default")
-        local target = (payload and payload.label) or caller_label or "main"
+        local target = resolve_win_label(payload, caller)
         clib.platform_window_close(target)
         return true
     end)
 
-    self:register("tauri:window:destroy", function(payload, caller_label)
+    self:register("tauri:window:destroy", function(payload, caller)
         self.security:assert_capability("core:default")
-        local target = (payload and payload.label) or caller_label or "main"
+        local target = resolve_win_label(payload, caller)
         clib.platform_window_force_close(target)
         self.windows[target] = nil
         return true
     end)
 
-    self:register("tauri:window:force_close", function(payload, caller_label)
+    self:register("tauri:window:force_close", function(payload, caller)
         self.security:assert_capability("core:default")
-        local target = (payload and payload.label) or caller_label or "main"
+        local target = resolve_win_label(payload, caller)
         clib.platform_window_force_close(target)
         self.windows[target] = nil
         return true
     end)
 
-    self:register("tauri:window:set_title", function(payload, caller_label)
+    self:register("tauri:window:set_title", function(payload, caller)
         self.security:assert_capability("core:default")
-        local target = payload.label or caller_label
-        clib.platform_window_set_title(target, tostring(payload.title or ""))
+        local target = resolve_win_label(payload, caller)
+        clib.platform_window_set_title(target, tostring((payload and payload.title) or ""))
         return true
     end)
 
-    self:register("tauri:window:set_size", function(payload, caller_label)
+    self:register("tauri:window:set_size", function(payload, caller)
         self.security:assert_capability("core:default")
-        local target = payload.label or caller_label
-        clib.platform_window_set_size(target, tonumber(payload.width) or 800, tonumber(payload.height) or 600)
+        local target = resolve_win_label(payload, caller)
+        clib.platform_window_set_size(target, tonumber(payload and payload.width) or 800, tonumber(payload and payload.height) or 600)
         return true
     end)
 
-    self:register("tauri:window:minimize", function(payload, caller_label)
+    self:register("tauri:window:minimize", function(payload, caller)
         self.security:assert_capability("core:default")
-        clib.platform_window_minimize(payload.label or caller_label)
+        local target = resolve_win_label(payload, caller)
+        clib.platform_window_minimize(target)
         return true
     end)
 
-    self:register("tauri:window:maximize", function(payload, caller_label)
+    self:register("tauri:window:maximize", function(payload, caller)
         self.security:assert_capability("core:default")
-        clib.platform_window_maximize(payload.label or caller_label)
+        local target = resolve_win_label(payload, caller)
+        clib.platform_window_maximize(target)
         return true
     end)
 
-    self:register("tauri:window:show", function(payload, caller_label)
+    self:register("tauri:window:show", function(payload, caller)
         self.security:assert_capability("core:default")
-        clib.platform_window_show(payload.label or caller_label)
+        local target = resolve_win_label(payload, caller)
+        clib.platform_window_show(target)
         return true
     end)
 
-    self:register("tauri:window:hide", function(payload, caller_label)
+    self:register("tauri:window:hide", function(payload, caller)
         self.security:assert_capability("core:default")
-        clib.platform_window_hide(payload.label or caller_label)
+        local target = resolve_win_label(payload, caller)
+        clib.platform_window_hide(target)
         return true
     end)
 
-    self:register("tauri:window:set_focus", function(payload, caller_label)
+    self:register("tauri:window:set_focus", function(payload, caller)
         self.security:assert_capability("core:default")
-        clib.platform_window_set_focus(payload.label or caller_label)
+        local target = resolve_win_label(payload, caller)
+        clib.platform_window_set_focus(target)
         return true
     end)
 
-    self:register("tauri:window:start_dragging", function(payload, caller_label)
+    self:register("tauri:window:start_dragging", function(payload, caller)
         self.security:assert_capability("core:default")
-        clib.platform_window_start_dragging(caller_label)
+        local target = resolve_win_label(payload, caller)
+        clib.platform_window_start_dragging(target)
         return true
     end)
 
@@ -2959,9 +3109,17 @@ function Tauri:_register_builtins()
 
     self:register("tauri:fs:read_text_file", function(payload)
         self.security:assert_capability("fs:read-text-file")
-        local safe_path = self.security:assert_scope(payload.path, self.base_paths)
-        local f, err = io.open(safe_path, "r")
-        if not f then error(err) end
+        local safe_path = self.security:assert_scope(payload and payload.path, self.base_paths)
+        local f, err = io.open(safe_path, "rb")
+        if not f then
+            error("Impossibile leggere il file: " .. tostring(err))
+        end
+        local size = f:seek("end")
+        if size and size > 52428800 then
+            f:close()
+            error("File exceeds maximum read_text_file size limit (50MB)")
+        end
+        f:seek("set", 0)
         local content = f:read("*a")
         f:close()
         return content
@@ -3189,7 +3347,9 @@ function Tauri:emit(event_name, payload)
         json.encode(event_name),
         json.encode(payload)
     )
-    clib.platform_window_eval("*", js)
+    if clib and clib.platform_window_eval then
+        pcall(clib.platform_window_eval, "*", js)
+    end
 end
 
 function _G.__TAURI_DISPATCH_EMIT__(event_name, payload_json)
@@ -3400,39 +3560,116 @@ local function validate_single_instance_payload(payload_or_size)
 end
 
 local function resolve_single_instance_socket_path(app_name)
+    local safe_id = tostring(app_name or "tauri-app"):gsub("[^a-zA-Z0-9_%-%.]", "_")
     local xdg = os.getenv("XDG_RUNTIME_DIR")
     if xdg and xdg ~= "" then
-        return xdg .. "/" .. tostring(app_name or "app") .. ".sock"
+        return xdg .. "/" .. safe_id .. ".sock"
     end
     local home = os.getenv("HOME")
     if home and home ~= "" then
-        return home .. "/.local/state/" .. tostring(app_name or "app") .. ".sock"
+        return home .. "/.local/run/" .. safe_id .. ".sock"
     end
     error("No secure user runtime directory found (refusing insecure /tmp fallback)")
 end
 
-local function parse_and_normalize_url(url_str)
-    local scheme, host, path = url_str:match("^([a-zA-Z][a-zA-Z0-9%+%-%.]*)://([^/]+)(/?.*)$")
-    if not scheme or not host then error("Invalid URL") end
-    path = path ~= "" and path or "/"
-    -- Normalize %2e and traversal
-    local decoded_path = path:gsub("%%2[eE]", "."):gsub("/%./", "/"):gsub("//+", "/")
-    while decoded_path:find("/[^/]+/%.%./") do
-        decoded_path = decoded_path:gsub("/[^/]+/%.%./", "/")
+local function parse_and_normalize_url(raw_url)
+    if type(raw_url) ~= "string" or raw_url == "" or raw_url:find("%z") then
+        error("Invalid URL")
     end
-    return { scheme = scheme:lower(), host = host:lower(), path = decoded_path }
+    local scheme, authority, raw_path = raw_url:match("^([a-zA-Z][a-zA-Z0-9%+%-%.]*)://([^/%?#]+)(.*)$")
+    if not scheme or not authority then
+        error("Invalid URL")
+    end
+    if authority:find("@", 1, true) then
+        error("Invalid URL: userinfo is forbidden")
+    end
+    scheme = scheme:lower()
+    local host, port_str
+    if authority:sub(1, 1) == "[" then
+        host, port_str = authority:match("^%[([^%]]+)%]:?(%d*)$")
+        if not host then
+            error("Invalid IPv6 URL authority")
+        end
+        host = "[" .. host:lower() .. "]"
+    else
+        host, port_str = authority:match("^([^:]+):?(%d*)$")
+        if not host or host:find(":", 1, true) then
+            error("Invalid URL authority")
+        end
+        host = host:lower()
+    end
+    host = host:gsub("%.$", "")
+    local path_only = (raw_path or ""):match("^([^%?#]*)") or ""
+    if path_only == "" then path_only = "/" end
+    local decoded_path = path_only:gsub("%%2[eE]", "."):gsub("%%2[fF]", "/"):gsub("%%5[cC]", "/")
+    if decoded_path:find("%%00") then
+        error("Invalid URL: NUL byte in path")
+    end
+    local segments = {}
+    for seg in decoded_path:gmatch("[^/]+") do
+        if seg == ".." then
+            table.remove(segments)
+        elseif seg ~= "." then
+            table.insert(segments, seg)
+        end
+    end
+    local norm_path = "/" .. table.concat(segments, "/")
+    return {
+        scheme = scheme,
+        host = host,
+        port = port_str ~= "" and tonumber(port_str) or nil,
+        path = norm_path
+    }
 end
 
-local function is_ssrf_forbidden(host)
-    local h = host:lower()
-    if h == "localhost" or h == "127.0.0.1" or h == "::1" then return true end
-    if h == "169.254.169.254" or h == "metadata.google.internal" then return true end
-    local o1, o2 = h:match("^(%d+)%.(%d+)%.")
-    if o1 and o2 then
-        o1, o2 = tonumber(o1), tonumber(o2)
-        if o1 == 10 then return true end
-        if o1 == 172 and (o2 >= 16 and o2 <= 31) then return true end
-        if o1 == 192 and o2 == 168 then return true end
+local function is_ssrf_forbidden(raw_host)
+    if type(raw_host) ~= "string" or raw_host == "" then
+        return true
+    end
+    local h = raw_host:lower():gsub("^%s+", ""):gsub("%s+$", "")
+    if h:sub(1, 1) == "[" then
+        h = h:match("^%[([^%]]+)%]") or h
+    else
+        h = h:match("^([^:]+)") or h
+    end
+    h = h:gsub("%.$", "")
+    if h == "" or h == "localhost" or h:match("%.localhost$") or h:match("%.local$") or h == "metadata.google.internal" or h == "169.254.169.254" or h == "100.100.100.200" then
+        return true
+    end
+    if h == "::1" or h == "::" or h == "0:0:0:0:0:0:0:1" or h == "0:0:0:0:0:0:0:0" then
+        return true
+    end
+    if h:match("^::ffff:") or h:match("^fe[89ab][0-9a-f]:") or h:match("^f[cd][0-9a-f][0-9a-f]:") then
+        return true
+    end
+    if h:match("^0[xX][0-9a-f]+$") or h:match("^%d+$") then
+        return true
+    end
+    local o1, o2, o3, o4 = h:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+    if o1 then
+        if o1:match("^0%d") or o2:match("^0%d") or o3:match("^0%d") or o4:match("^0%d") then
+            return true
+        end
+        local a, b = tonumber(o1), tonumber(o2)
+        local c, d = tonumber(o3), tonumber(o4)
+        if not a or not b or not c or not d or a > 255 or b > 255 or c > 255 or d > 255 then
+            return true
+        end
+        if a == 0 or a == 10 or a == 127 then
+            return true
+        end
+        if a == 169 and b == 254 then
+            return true
+        end
+        if a == 172 and b >= 16 and b <= 31 then
+            return true
+        end
+        if a == 192 and b == 168 then
+            return true
+        end
+        if a == 100 and b >= 64 and b <= 127 then
+            return true
+        end
     end
     return false
 end
@@ -3442,12 +3679,30 @@ local function mask_db_uri(uri)
     return uri:gsub("(%w+://)([^:]+):([^@]+)@", "%1%2:***@")
 end
 
-local function is_db_allowed(uri, scopes)
-    for _, s in ipairs(scopes or {}) do
-        if s:sub(-1) == "*" and uri:sub(1, #s - 1) == s:sub(1, -2) then
-            return true
+local function is_db_allowed(uri, allowed_scopes)
+    if type(uri) ~= "string" or uri == "" or uri:find("%z") then
+        return false
+    end
+    if type(allowed_scopes) ~= "table" or #allowed_scopes == 0 then
+        return false
+    end
+    local lower_uri = uri:lower()
+    if lower_uri:find("%%2e") or lower_uri:find("%%2f") or lower_uri:find("%%5c") or lower_uri:find("%%00") then
+        return false
+    end
+    if lower_uri:match("^sqlite:") then
+        local db_path = uri:sub(8)
+        if db_path == "" or db_path:find("%.%.") or db_path:find("\\") or db_path:match("^/") or db_path:match("^[a-zA-Z]:") then
+            return false
         end
-        if uri == s then return true end
+    end
+    for _, pattern in ipairs(allowed_scopes) do
+        if type(pattern) == "string" and pattern ~= "" then
+            local pat = pattern:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1"):gsub("%*", ".*")
+            if uri:match("^" .. pat .. "$") then
+                return true
+            end
+        end
     end
     return false
 end

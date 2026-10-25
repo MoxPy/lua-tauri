@@ -2,21 +2,39 @@
 #include <cassert>
 #include <string>
 #include <vector>
-#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
 
-#include "src/origin_check.hpp"
-#include "src/resource_resolver.hpp"
-#include "src/asset_resolver.hpp"
-#include "src/security_policy.hpp"
-#include "src/ipc_envelope.hpp"
+#if defined(__has_include)
+  #if __has_include("origin_check.hpp")
+    #include "origin_check.hpp"
+    #include "resource_resolver.hpp"
+    #include "asset_resolver.hpp"
+    #include "security_policy.hpp"
+    #include "ipc_envelope.hpp"
+  #elif __has_include("../src/origin_check.hpp")
+    #include "../src/origin_check.hpp"
+    #include "../src/resource_resolver.hpp"
+    #include "../src/asset_resolver.hpp"
+    #include "../src/security_policy.hpp"
+    #include "../src/ipc_envelope.hpp"
+  #else
+    #include "src/origin_check.hpp"
+    #include "src/resource_resolver.hpp"
+    #include "src/asset_resolver.hpp"
+    #include "src/security_policy.hpp"
+    #include "src/ipc_envelope.hpp"
+  #endif
+#else
+  #include "origin_check.hpp"
+  #include "resource_resolver.hpp"
+  #include "asset_resolver.hpp"
+  #include "security_policy.hpp"
+  #include "ipc_envelope.hpp"
+#endif
 
-// ---------------------------------------------------------------------------
-// 1. OriginValidator Tests (§4)
-// ---------------------------------------------------------------------------
 void test_origin_validator() {
     std::cout << "[Test] OriginValidator (§4)..." << std::endl;
 
@@ -293,13 +311,16 @@ void test_csp_injection() {
     inject_csp_meta(html2, default_csp);
     assert(html2.find("<meta http-equiv=\"Content-Security-Policy\" content=\"" + default_csp + "\">") != std::string::npos);
 
-    // (c) Comment containing Content-Security-Policy must NOT prevent injection
     std::string html3 = "<html><!-- Comment mentioning Content-Security-Policy --><head></head></html>";
     inject_csp_meta(html3, default_csp);
     assert(has_existing_csp_meta(html3));
     assert(html3.find("<meta http-equiv=\"Content-Security-Policy\"") != std::string::npos);
 
-    // (d) Script string containing Content-Security-Policy must NOT prevent injection
+    std::string html_commented_tag = "<html><!-- <meta http-equiv=\"Content-Security-Policy\" content=\"...\"> --><head></head></html>";
+    assert(!has_existing_csp_meta(html_commented_tag));
+    inject_csp_meta(html_commented_tag, default_csp);
+    assert(html_commented_tag.find("<meta http-equiv=\"Content-Security-Policy\" content=\"" + default_csp + "\">") != std::string::npos);
+
     std::string html4 = "<html><head><script>console.log('Content-Security-Policy header');</script></head></html>";
     inject_csp_meta(html4, default_csp);
     assert(has_existing_csp_meta(html4));
