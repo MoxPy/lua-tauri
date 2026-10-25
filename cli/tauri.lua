@@ -1509,7 +1509,10 @@ local function cmd_build(args)
     end
 
     local frontend_dist = build_conf.frontendDist or build_conf.distDir or bundle_conf.distDir or "dist"
-    frontend_dist = frontend_dist:gsub("^(%.%./)+", ""):gsub("^/+", "")
+    while frontend_dist:match("^%.%./") or frontend_dist:match("^%./") do
+        frontend_dist = frontend_dist:gsub("^%.%./", ""):gsub("^%./", "")
+    end
+    frontend_dist = frontend_dist:gsub("^/+", "")
     if frontend_dist == "" or frontend_dist:find("%.%.") then
         error("Invalid frontendDist path: " .. tostring(frontend_dist))
     end
