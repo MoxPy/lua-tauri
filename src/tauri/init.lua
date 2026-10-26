@@ -2136,6 +2136,7 @@ local function file_readable(path)
     end
     return false
 end
+local file_exists = file_readable
 
 local function sh_quote(s)
     s = tostring(s or '')
@@ -2282,68 +2283,50 @@ function Sidecar.resolve_path(name, app_name)
     return nil
 end
 
-function Sidecar.find_env_file(bin_path, app_name, custom_env_file)
-    if custom_env_file and file_readable(custom_env_file) then
-        return custom_env_file
+function Sidecar.find_env_file(explicit_path, binary_path, app_name)
+    local explicit = explicit_path
+    local bin = binary_path
+    local app = app_name
+    if explicit and type(explicit) == "string" and not explicit:find("%.env$") and bin and type(bin) == "string" and not bin:find("[/\\]") then
+        explicit, bin, app = app, explicit, bin
     end
-
-    local clean_name = (app_name or "tauri-app"):gsub("[^%w_%- ]", "")
-    local slug_name = clean_name:lower():gsub("%s+", "-")
-    local home = os.getenv("HOME")
-
-    local search_paths = {}
-
-    -- 1. Adjacent to binary (.env in sidecar directory or parent)
-    if bin_path then
-        local bin_dir = bin_path:match('^(.*)/[^/]+$')
-        if bin_dir then
-            table.insert(search_paths, bin_dir .. "/.env")
-            local parent_dir = bin_dir:match('^(.*)/[^/]+$')
-            if parent_dir then
-                table.insert(search_paths, parent_dir .. "/.env")
-            end
-        end
+    if explicit and explicit ~= "" and file_exists(explicit) then
+        return explicit
     end
-
-    -- 2. User Configuration Directory (~/.config/<slug>/.env and Application Support)
-    if home and home ~= "" then
-        table.insert(search_paths, home .. "/.config/" .. slug_name .. "/.env")
-        table.insert(search_paths, home .. "/.config/" .. clean_name .. "/.env")
-        table.insert(search_paths, home .. "/." .. slug_name .. ".env")
+    local is_dev = (os.getenv("TAURILUA_DEV") == "1") or (_G.__TAURI_DEV__ == true)
+    local candidates = {}
+    if is_dev then
+        table.insert(candidates, "src-tauri/binaries/.env")
+        table.insert(candidates, ".env")
+    end
+    local home = os.getenv("HOME") or os.getenv("USERPROFILE")
+    if home and app and app ~= "" then
         if ffi.os == "OSX" then
-            table.insert(search_paths, home .. "/Library/Application Support/" .. (app_name or "tauri-app") .. "/.env")
-            table.insert(search_paths, home .. "/Library/Application Support/" .. slug_name .. "/.env")
+            table.insert(candidates, home .. "/Library/Application Support/" .. app .. "/.env")
+        elseif ffi.os == "Windows" then
+            local appdata = os.getenv("APPDATA") or (home .. "\\AppData\\Roaming")
+            table.insert(candidates, appdata .. "\\" .. app .. "\\.env")
+        else
+            table.insert(candidates, home .. "/.config/" .. app .. "/.env")
         end
     end
-
-    -- 3. System Configuration Directories (Linux)
-    if ffi.os == "Linux" then
-        table.insert(search_paths, "/usr/share/" .. clean_name .. "/binaries/.env")
-        table.insert(search_paths, "/usr/share/" .. slug_name .. "/binaries/.env")
-        table.insert(search_paths, "/etc/" .. slug_name .. "/.env")
-        table.insert(search_paths, "/etc/" .. clean_name .. "/.env")
+    if bin and bin ~= "" then
+        local bin_dir = bin:match("^(.*)[/\\][^/\\]+$")
+        if bin_dir then
+            table.insert(candidates, bin_dir .. "/.env")
+        end
     end
-
-    -- 4. macOS Bundle Resources (.app/Contents/Resources/binaries/.env)
-    local exec_dir = get_executable_dir()
-    if exec_dir and exec_dir:match("/Contents/MacOS$") then
-        local res_dir = exec_dir:gsub("/MacOS$", "/Resources")
-        table.insert(search_paths, res_dir .. "/binaries/.env")
-        table.insert(search_paths, res_dir .. "/.env")
+    local exe_dir = get_executable_dir()
+    if exe_dir then
+        table.insert(candidates, exe_dir .. "/../Resources/binaries/.env")
+        table.insert(candidates, exe_dir .. "/binaries/.env")
+        if app and app ~= "" then
+            table.insert(candidates, "/usr/share/" .. app .. "/binaries/.env")
+        end
     end
-
-    -- 5. Development & Project root relative paths
-    table.insert(search_paths, "src-tauri/binaries/.env")
-    table.insert(search_paths, "src-tauri/.env")
-    table.insert(search_paths, "./src-tauri/binaries/.env")
-    table.insert(search_paths, "./src-tauri/.env")
-    table.insert(search_paths, ".env")
-    table.insert(search_paths, "./.env")
-    table.insert(search_paths, "../.env")
-
-    for _, p in ipairs(search_paths) do
-        if file_readable(p) then
-            return p
+    for _, c in ipairs(candidates) do
+        if file_exists(c) then
+            return c
         end
     end
     return nil
@@ -2370,7 +2353,7 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
         error(string.format("Sidecar binary '%s' not found for platform %s (%s)", tostring(name), ffi.os, ffi.arch))
     end
 
-    local env_file = Sidecar.find_env_file(bin_path, app_name, opts.env_file)
+    local env_file = Sidecar.find_env_file(opts.env_file, bin_path, app_name)
     local env_vars = env_file and parse_env_file(env_file) or {}
 
     if opts.env and type(opts.env) == 'table' then
@@ -2389,7 +2372,18 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
     local bin_dir = opts.cwd or bin_path:match('^(.*)/[^/]+$') or '.'
     local log_file = opts.log_file
     if not log_file or log_file == '' then
-        log_file = (ffi.os == 'Windows') and 'NUL' or string.format('/tmp/%s_%s.log', app_name:lower():gsub('[^%w_]', '_'), tostring(name):lower():gsub('[^%w_]', '_'))
+        if ffi.os == 'Windows' then
+            log_file = 'NUL'
+        else
+            local tmp_f = string.format('/tmp/%s_%s.log', app_name:lower():gsub('[^%w_]', '_'), tostring(name):lower():gsub('[^%w_]', '_'))
+            local f_try = io.open(tmp_f, 'w')
+            if f_try then
+                f_try:close()
+                log_file = tmp_f
+            else
+                log_file = '/dev/null'
+            end
+        end
     end
 
     local sc = setmetatable({

@@ -1697,7 +1697,9 @@ local function cmd_build(args)
             exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/*-darwin-* 2>/dev/null || true")
             exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/*-macos-* 2>/dev/null || true")
             exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/*.exe 2>/dev/null || true")
-            exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/.env") .. " " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/.env.*") .. " 2>/dev/null || true")
+            if file_exists("src-tauri/binaries/.env") then
+                exec("cp " .. shell_quote("src-tauri/binaries/.env") .. " " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/.env") .. " 2>/dev/null || true")
+            end
             exec("chmod +x " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/* 2>/dev/null || true")
         end
 
@@ -1777,8 +1779,6 @@ Description: %s built with Tauri-Lua
             local bsrc = file_exists("src-tauri\\binaries") and "src-tauri\\binaries" or "src-tauri/binaries"
             info("Packaging native sidecar binaries into Windows standalone bundle...")
             copy_dir_recursive(bsrc, win_dir .. "\\binaries")
-            exec('del /Q "' .. win_dir .. '\\binaries\\.env" 2>NUL || rem')
-            exec('del /Q "' .. win_dir .. '\\binaries\\.env.*" 2>NUL || rem')
         end
 
         if file_exists("src-tauri\\plugins") or file_exists("src-tauri/plugins") then

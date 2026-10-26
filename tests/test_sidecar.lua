@@ -12,6 +12,22 @@ local resolved_sh = tauri.Sidecar.resolve_path(test_bin, "TestApp")
 assert(resolved_sh == test_bin, "Direct binary path must resolve correctly")
 print("  - Direct binary path resolves: PASS")
 
+local env_none = tauri.Sidecar.find_env_file(nil, "/bin/sh", "NonExistentApp123XYZ")
+assert(env_none == nil or type(env_none) == "string", "find_env_file returns nil or string")
+
+local tmp_env = "/tmp/test_sidecar_" .. tostring(os.time()) .. ".env"
+local f_env = io.open(tmp_env, "w")
+if f_env then
+    f_env:write("FOO=BAR\n")
+    f_env:close()
+    local found = tauri.Sidecar.find_env_file(tmp_env, "/bin/sh", "TestApp")
+    assert(found == tmp_env, "Explicit env file must be found")
+    local found_legacy = tauri.Sidecar.find_env_file("/bin/sh", "TestApp", tmp_env)
+    assert(found_legacy == tmp_env, "Legacy signature finds explicit env file")
+    os.remove(tmp_env)
+end
+print("  - Sidecar.find_env_file candidate resolution: PASS")
+
 local app = tauri.init({
     productName = "TestApp",
     version = "1.0.0"
