@@ -270,11 +270,12 @@ static inline void platform_apply_app_name_macos(const char *name) {
                     [appMenu setTitle:appName];
                     for (NSMenuItem *item in [appMenu itemArray]) {
                         SEL act = [item action];
-                        if (act == @selector(orderFrontStandardAboutPanel:)) {
+                        NSString *curTitle = [item title] ?: @"";
+                        if (act == @selector(orderFrontStandardAboutPanel:) && [curTitle hasPrefix:@"About "]) {
                             [item setTitle:[NSString stringWithFormat:@"About %@", appName]];
-                        } else if (act == @selector(hide:)) {
+                        } else if (act == @selector(hide:) && [curTitle hasPrefix:@"Hide "]) {
                             [item setTitle:[NSString stringWithFormat:@"Hide %@", appName]];
-                        } else if (act == @selector(terminate:)) {
+                        } else if ((act == @selector(terminate:) || act == @selector(terminateApp:)) && [curTitle hasPrefix:@"Quit "]) {
                             [item setTitle:[NSString stringWithFormat:@"Quit %@", appName]];
                         }
                     }

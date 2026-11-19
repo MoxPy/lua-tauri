@@ -2655,16 +2655,22 @@ static void parse_accelerator(const std::string &accel, NSString *__strong *out_
     *out_flags = 0;
     if (accel.empty()) return;
 
-    if (accel.find("Shift") != std::string::npos) {
+    std::string cleaned = accel;
+    size_t coc_pos = 0;
+    while ((coc_pos = cleaned.find("CmdOrCtrl")) != std::string::npos) {
+        *out_flags |= NSEventModifierFlagCommand;
+        cleaned.replace(coc_pos, 9, "");
+    }
+    if (cleaned.find("Shift") != std::string::npos) {
         *out_flags |= NSEventModifierFlagShift;
     }
-    if (accel.find("CmdOrCtrl") != std::string::npos || accel.find("Command") != std::string::npos || accel.find("Cmd") != std::string::npos) {
+    if (cleaned.find("Command") != std::string::npos || cleaned.find("Cmd") != std::string::npos) {
         *out_flags |= NSEventModifierFlagCommand;
     }
-    if (accel.find("Alt") != std::string::npos || accel.find("Option") != std::string::npos) {
+    if (cleaned.find("Alt") != std::string::npos || cleaned.find("Option") != std::string::npos) {
         *out_flags |= NSEventModifierFlagOption;
     }
-    if (accel.find("Control") != std::string::npos || accel.find("Ctrl") != std::string::npos) {
+    if (cleaned.find("Control") != std::string::npos || cleaned.find("Ctrl") != std::string::npos) {
         *out_flags |= NSEventModifierFlagControl;
     }
 
@@ -2729,7 +2735,7 @@ static void build_nsmenu_items(NSMenu *menu, const std::vector<JsonVal> &items) 
                 modFlags = NSEventModifierFlagCommand;
             } else if (role == "redo") {
                 action = @selector(redo:);
-                keyEq = @"Z";
+                keyEq = @"z";
                 modFlags = NSEventModifierFlagShift | NSEventModifierFlagCommand;
             } else if (role == "cut") {
                 action = @selector(cut:);
@@ -2770,7 +2776,7 @@ static void build_nsmenu_items(NSMenu *menu, const std::vector<JsonVal> &items) 
             if (modFlags != 0) {
                 [mi setKeyEquivalentModifierMask:modFlags];
             }
-            if (role == "quit") {
+            if (role == "quit" || role == "hide" || role == "hide_others" || role == "show_all") {
                 [mi setTarget:NSApp];
             }
             [menu addItem:mi];
@@ -3131,38 +3137,59 @@ void platform_set_menu(const char *json_menu) {
 
         NSMenu *mainMenu = [[NSMenu alloc] init];
 
-        // 1. Build default App Menu
-        NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
-        [appMenuItem setTitle:appName];
-        [mainMenu addItem:appMenuItem];
-        NSMenu *appMenu = [[NSMenu alloc] initWithTitle:appName];
-        [appMenuItem setSubmenu:appMenu];
+        bool hasCustomAppMenu = false;
+        if (!items_to_build->empty()) {
+            const JsonVal &first = (*items_to_build)[0];
+            std::string first_title = first["label"].str();
+            if (first_title.empty()) first_title = first["text"].str();
+            if (!first_title.empty() && [appName isEqualToString:[NSString stringWithUTF8String:first_title.c_str()]]) {
+                hasCustomAppMenu = true;
+            }
+        }
 
-        NSString *aboutTitle = [NSString stringWithFormat:@"About %@", appName];
-        [appMenu addItemWithTitle:aboutTitle action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
-        [appMenu addItem:[NSMenuItem separatorItem]];
+        if (!hasCustomAppMenu) {
+            // 1. Build default App Menu when caller didn't supply one
+            NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
+            [appMenuItem setTitle:appName];
+            [mainMenu addItem:appMenuItem];
+            NSMenu *appMenu = [[NSMenu alloc] initWithTitle:appName];
+            [appMenuItem setSubmenu:appMenu];
 
-        NSMenuItem *servicesItem = [[NSMenuItem alloc] init];
-        [servicesItem setTitle:@"Services"];
-        [appMenu addItem:servicesItem];
-        NSMenu *servicesMenu = [[NSMenu alloc] initWithTitle:@"Services"];
-        [servicesItem setSubmenu:servicesMenu];
-        [NSApp setServicesMenu:servicesMenu];
-        [appMenu addItem:[NSMenuItem separatorItem]];
+            NSString *aboutTitle = [NSString stringWithFormat:@"About %@", appName];
+            [appMenu addItemWithTitle:aboutTitle action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+            [appMenu addItem:[NSMenuItem separatorItem]];
 
-        NSString *hideTitle = [NSString stringWithFormat:@"Hide %@", appName];
-        [appMenu addItemWithTitle:hideTitle action:@selector(hide:) keyEquivalent:@"h"];
-        NSMenuItem *hideOthers = [[NSMenuItem alloc] initWithTitle:@"Hide Others" action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
-        [hideOthers setKeyEquivalentModifierMask:(NSEventModifierFlagOption | NSEventModifierFlagCommand)];
-        [appMenu addItem:hideOthers];
-        [appMenu addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
-        [appMenu addItem:[NSMenuItem separatorItem]];
+            NSMenuItem *servicesItem = [[NSMenuItem alloc] init];
+            [servicesItem setTitle:@"Services"];
+            [appMenu addItem:servicesItem];
+            NSMenu *servicesMenu = [[NSMenu alloc] initWithTitle:@"Services"];
+            [servicesItem setSubmenu:servicesMenu];
+            [NSApp setServicesMenu:servicesMenu];
+            [appMenu addItem:[NSMenuItem separatorItem]];
 
-        NSString *quitTitle = [NSString stringWithFormat:@"Quit %@", appName];
-        [appMenu addItemWithTitle:quitTitle action:@selector(terminate:) keyEquivalent:@"q"];
+            NSString *hideTitle = [NSString stringWithFormat:@"Hide %@", appName];
+            [appMenu addItemWithTitle:hideTitle action:@selector(hide:) keyEquivalent:@"h"];
+            NSMenuItem *hideOthers = [[NSMenuItem alloc] initWithTitle:@"Hide Others" action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
+            [hideOthers setKeyEquivalentModifierMask:(NSEventModifierFlagOption | NSEventModifierFlagCommand)];
+            [appMenu addItem:hideOthers];
+            [appMenu addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
+            [appMenu addItem:[NSMenuItem separatorItem]];
+
+            NSString *quitTitle = [NSString stringWithFormat:@"Quit %@", appName];
+            [appMenu addItemWithTitle:quitTitle action:@selector(terminate:) keyEquivalent:@"q"];
+        }
 
         // 2. Build custom user submenus
         build_nsmenu_items(mainMenu, *items_to_build);
+
+        for (NSMenuItem *topItem in mainMenu.itemArray) {
+            if (!topItem.submenu) continue;
+            if ([topItem.title isEqualToString:@"Window"] || [topItem.title isEqualToString:@"Finestra"]) {
+                [NSApp setWindowsMenu:topItem.submenu];
+            } else if ([topItem.title isEqualToString:@"Help"] || [topItem.title isEqualToString:@"Aiuto"]) {
+                [NSApp setHelpMenu:topItem.submenu];
+            }
+        }
 
         [NSApp setMainMenu:mainMenu];
     });
