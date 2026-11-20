@@ -131,10 +131,10 @@ do
     end)
     check("NUL byte in path rejected", not ok9 and err9:find("NUL") ~= nil)
 
-    -- N2: Symlink escape containment test
-    do
+    local ffi_chk = require("ffi")
+    if ffi_chk.os ~= "Windows" then
         local cwd = io.popen("pwd"):read("*l") or "."
-        local temp_root = cwd .. "/build/tauri_test_symlink_" .. tostring(os.time())
+        local temp_root = cwd .. "/target/tauri_test_symlink_" .. tostring(os.time())
         os.execute("mkdir -p " .. temp_root .. "/scope " .. temp_root .. "/secret")
         local f = io.open(temp_root .. "/secret/topsecret.txt", "w")
         if f then
@@ -473,54 +473,64 @@ end
 
 print("\n7. Phase 1 Hardening Regression Tests:")
 do
-    local cwd = io.popen("pwd"):read("*l") or "."
-    local temp_root = cwd .. "/build/tauri_phase1_" .. tostring(os.time())
-    os.execute("mkdir -p " .. temp_root .. "/scope/sub " .. temp_root .. "/outside")
-    local f_in = io.open(temp_root .. "/scope/hello.txt", "wb")
-    if f_in then f_in:write("hi") f_in:close() end
-    os.execute("ln -s " .. temp_root .. "/outside/new_secret.txt " .. temp_root .. "/scope/dangling_out.txt 2>/dev/null")
-
-    local app_p1 = tauri.new({
+    local ffi_p1 = require("ffi")
+    local app_p1_caps = tauri.new({
         security = {
             capabilities = { "fs:read-text-file", "fs:write-text-file", "fs:read-dir", "shell:default", "window:*" },
-            scope = { temp_root .. "/scope/**", "$APPDATA/**" }
+            scope = { "$APPDATA/**" }
         }
     })
 
-    local ok_dangling = pcall(function()
-        app_p1.security:assert_scope(temp_root .. "/scope/dangling_out.txt", app_p1.base_paths)
-    end)
-    check("Phase 1: Dangling symlink escaping scope is denied", not ok_dangling)
-
     local ok_empty_appdata = pcall(function()
-        app_p1.security:assert_scope("/etc/passwd", { home = "/tmp", appData = "", desktop = "/tmp" })
+        app_p1_caps.security:assert_scope("/etc/passwd", { home = "/tmp", appData = "", desktop = "/tmp" })
     end)
     check("Phase 1: Empty APPDATA does not widen $APPDATA/** to root", not ok_empty_appdata)
 
     local ok_shell_def = pcall(function()
-        app_p1.security:assert_capability("shell:execute")
+        app_p1_caps.security:assert_capability("shell:execute")
     end)
     check("Phase 1: shell:default does not grant shell:execute", not ok_shell_def)
 
     local ok_win_star = pcall(function()
-        app_p1.security:assert_capability("window:create:external")
+        app_p1_caps.security:assert_capability("window:create:external")
     end)
     check("Phase 1: window:* grants window:create:external", ok_win_star)
 
-    local ok_dir, dir_entries = pcall(function()
-        return app_p1.commands["tauri:fs:read_dir"]({ path = temp_root .. "/scope" })
-    end)
-    if ok_dir and type(dir_entries) == "table" then
-        local found_hello = false
-        local found_sub = false
-        for _, e in ipairs(dir_entries) do
-            if e.name == "hello.txt" and e.isDirectory == false then found_hello = true end
-            if e.name == "sub" and e.isDirectory == true then found_sub = true end
-        end
-        check("Phase 1: tauri:fs:read_dir returns accurate native entries", found_hello and found_sub)
-    end
+    if ffi_p1.os ~= "Windows" then
+        local cwd = io.popen("pwd"):read("*l") or "."
+        local temp_root = cwd .. "/target/tauri_phase1_" .. tostring(os.time())
+        os.execute("mkdir -p " .. temp_root .. "/scope/sub " .. temp_root .. "/outside")
+        local f_in = io.open(temp_root .. "/scope/hello.txt", "wb")
+        if f_in then f_in:write("hi") f_in:close() end
+        os.execute("ln -s " .. temp_root .. "/outside/new_secret.txt " .. temp_root .. "/scope/dangling_out.txt 2>/dev/null")
 
-    os.execute("rm -rf " .. temp_root)
+        local app_p1 = tauri.new({
+            security = {
+                capabilities = { "fs:read-text-file", "fs:write-text-file", "fs:read-dir" },
+                scope = { temp_root .. "/scope/**" }
+            }
+        })
+
+        local ok_dangling = pcall(function()
+            app_p1.security:assert_scope(temp_root .. "/scope/dangling_out.txt", app_p1.base_paths)
+        end)
+        check("Phase 1: Dangling symlink escaping scope is denied", not ok_dangling)
+
+        local ok_dir, dir_entries = pcall(function()
+            return app_p1.commands["tauri:fs:read_dir"]({ path = temp_root .. "/scope" })
+        end)
+        if ok_dir and type(dir_entries) == "table" then
+            local found_hello = false
+            local found_sub = false
+            for _, e in ipairs(dir_entries) do
+                if e.name == "hello.txt" and e.isDirectory == false then found_hello = true end
+                if e.name == "sub" and e.isDirectory == true then found_sub = true end
+            end
+            check("Phase 1: tauri:fs:read_dir returns accurate native entries", found_hello and found_sub)
+        end
+
+        os.execute("rm -rf " .. temp_root)
+    end
 
     check("Phase 1: SSRF blocks unbracketed IPv6 fe80::1", tauri.is_ssrf_forbidden("fe80::1"))
     check("Phase 1: SSRF blocks unbracketed IPv6 fd00:ec2::254", tauri.is_ssrf_forbidden("fd00:ec2::254"))

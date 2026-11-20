@@ -236,7 +236,11 @@ test("Lockfile serialization produces deterministic JSON structure", function()
         }
     }
     local temp_lock = "target/test_tauri.lock"
-    os.execute("mkdir -p target 2>/dev/null")
+    if ffi.os == "Windows" then
+        os.execute('mkdir target 2>NUL')
+    else
+        os.execute("mkdir -p target 2>/dev/null")
+    end
     cli.save_lockfile(test_lock, temp_lock)
     local loaded = cli.read_lockfile(temp_lock)
     assert(loaded and loaded.version == 1, "Lockfile version must be 1")
@@ -394,13 +398,26 @@ test("Build mode halts with error when lockfile checksum does not match", functi
     _G.TAURI_CLI_TEST_MODE = true
     local cli = dofile("cli/tauri.lua")
 
+    local tmp_rocks = "target/test_mismatch_rocks_" .. tostring(os.time())
+    local tmp_lock = "target/test_mismatch_" .. tostring(os.time()) .. ".lock"
+    if ffi.os == "Windows" then
+        os.execute('mkdir "' .. (tmp_rocks .. "/lib/luarocks/rocks-5.1/inspect/3.1.3-0"):gsub("/", "\\") .. '" 2>NUL')
+        os.execute('mkdir "' .. (tmp_rocks .. "/share/lua/5.1"):gsub("/", "\\") .. '" 2>NUL')
+    else
+        os.execute("mkdir -p " .. tmp_rocks .. "/lib/luarocks/rocks-5.1/inspect/3.1.3-0 " .. tmp_rocks .. "/share/lua/5.1")
+    end
+    local mf = io.open(tmp_rocks .. "/lib/luarocks/rocks-5.1/inspect/3.1.3-0/rock_manifest", "wb")
+    mf:write('rock_manifest = { lua = { ["inspect.lua"] = "abc" } }\n')
+    mf:close()
+    local rf = io.open(tmp_rocks .. "/share/lua/5.1/inspect.lua", "wb")
+    rf:write("return {}\n")
+    rf:close()
+
     local fake_conf = {
         dependencies = {
             luarocks = { "inspect 3.1.3-0" }
         }
     }
-    -- Test with mismatched lockfile
-    local original_lock = cli.read_lockfile()
     cli.save_lockfile({
         version = 1,
         rocks = {
@@ -410,12 +427,16 @@ test("Build mode halts with error when lockfile checksum does not match", functi
                 server = "https://luarocks.org"
             }
         }
-    })
+    }, tmp_lock)
     local ok_mismatch, err_mismatch = pcall(function()
-        cli.ensure_rocks_installed(fake_conf, false, true, false)
+        cli.ensure_rocks_installed(fake_conf, false, true, false, true, tmp_rocks, tmp_lock)
     end)
-    -- Restore original lockfile
-    if original_lock then cli.save_lockfile(original_lock) end
+    os.remove(tmp_lock)
+    if ffi.os == "Windows" then
+        os.execute('rmdir /s /q "' .. tmp_rocks:gsub("/", "\\") .. '" 2>NUL')
+    else
+        os.execute("rm -rf " .. tmp_rocks)
+    end
 
     assert(not ok_mismatch, "Build mode must reject rock when checksum does not match lockfile")
     assert(tostring(err_mismatch):find("Checksum verification failed"), "Error explains checksum verification failure")
@@ -545,8 +566,13 @@ end)
 test("LuaRocks file walker hashes nested subdirectories and rejects symlinks", function()
     _G.TAURI_CLI_TEST_MODE = true
     local cli = dofile("cli/tauri.lua")
-    local root = "build/test_p2_rocks_" .. tostring(os.time())
-    os.execute("mkdir -p " .. root .. "/lib/luarocks/rocks-5.1/demo/1.0-1 " .. root .. "/share/lua/5.1/socket")
+    local root = "target/test_p2_rocks_" .. tostring(os.time())
+    if ffi.os == "Windows" then
+        os.execute('mkdir "' .. (root .. "/lib/luarocks/rocks-5.1/demo/1.0-1"):gsub("/", "\\") .. '" 2>NUL')
+        os.execute('mkdir "' .. (root .. "/share/lua/5.1/socket"):gsub("/", "\\") .. '" 2>NUL')
+    else
+        os.execute("mkdir -p " .. root .. "/lib/luarocks/rocks-5.1/demo/1.0-1 " .. root .. "/share/lua/5.1/socket")
+    end
     local mf = io.open(root .. "/lib/luarocks/rocks-5.1/demo/1.0-1/rock_manifest", "wb")
     mf:write('rock_manifest = { lua = { ["init.lua"] = "abc", socket = { ["http.lua"] = "def" } } }\n')
     mf:close()
@@ -566,17 +592,26 @@ test("LuaRocks file walker hashes nested subdirectories and rejects symlinks", f
     local sum2 = cli.compute_composite_checksum(files)
     assert(sum1 ~= sum2, "Modifying nested subdirectory file must change composite checksum")
 
-    os.remove(root .. "/share/lua/5.1/socket/http.lua")
-    os.execute("ln -s /etc/hosts " .. root .. "/share/lua/5.1/socket/http.lua 2>/dev/null")
-    local ok_sym = pcall(cli.get_installed_rock_files, root, "demo", "1.0-1")
-    os.execute("rm -rf " .. root)
-    assert(not ok_sym, "Symlink inside LuaRocks tree must be rejected")
+    if ffi.os ~= "Windows" then
+        os.remove(root .. "/share/lua/5.1/socket/http.lua")
+        os.execute("ln -s /etc/hosts " .. root .. "/share/lua/5.1/socket/http.lua 2>/dev/null")
+        local ok_sym = pcall(cli.get_installed_rock_files, root, "demo", "1.0-1")
+        os.execute("rm -rf " .. root)
+        assert(not ok_sym, "Symlink inside LuaRocks tree must be rejected")
+    else
+        os.execute('rmdir /s /q "' .. root:gsub("/", "\\") .. '" 2>NUL')
+    end
 end)
 
 test("read_lockfile fails closed on corrupted JSON and validate_app_meta blocks injection", function()
     _G.TAURI_CLI_TEST_MODE = true
     local cli = dofile("cli/tauri.lua")
-    local bad_lock = "build/test_corrupt.lock"
+    local bad_lock = "target/test_corrupt.lock"
+    if ffi.os == "Windows" then
+        os.execute('mkdir target 2>NUL')
+    else
+        os.execute("mkdir -p target 2>/dev/null")
+    end
     local f = io.open(bad_lock, "wb"); f:write("{ broken json"); f:close()
     local ok_corrupt = pcall(cli.read_lockfile, bad_lock)
     os.remove(bad_lock)

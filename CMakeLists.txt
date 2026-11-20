@@ -16,7 +16,7 @@ if(APPLE)
     endif()
 endif()
 
-find_program(LUAJIT_BIN luajit REQUIRED)
+find_program(LUAJIT_BIN luajit REQUIRED HINTS "$ENV{LUAJIT_ROOT}/bin" "${LUAJIT_ROOT}/bin")
 
 find_path(LUAJIT_INCLUDE_DIR
     NAMES lua.hpp lua.h
@@ -289,6 +289,7 @@ elseif(WIN32)
         ole32.lib
         oleaut32.lib
         advapi32.lib
+        bcrypt.lib
         user32.lib
         comdlg32.lib
         shell32.lib

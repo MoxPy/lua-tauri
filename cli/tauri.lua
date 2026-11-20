@@ -1258,7 +1258,7 @@ local function is_valid_sha256_checksum(val)
     return #val == 71 and val:match("^sha256:[0-9a-f]+$") ~= nil
 end
 
-local function ensure_rocks_installed(conf, force, is_build, allow_custom_server, frozen_lockfile)
+local function ensure_rocks_installed(conf, force, is_build, allow_custom_server, frozen_lockfile, custom_rocks_dir, custom_lock_path)
     local rocks = extract_luarocks_dependencies(conf)
     local rockspec_file = find_rockspec_file()
     local strict_verify = is_build or frozen_lockfile
@@ -1278,14 +1278,15 @@ local function ensure_rocks_installed(conf, force, is_build, allow_custom_server
         if srv_err then error(srv_err) end
     end
 
-    local rocks_dir = get_rocks_tree_dir()
+    local rocks_dir = custom_rocks_dir or get_rocks_tree_dir()
+    local lock_path = custom_lock_path or get_lockfile_path()
     local luarocks_bin = find_luarocks_bin()
-    local lock = read_lockfile()
+    local lock = read_lockfile(lock_path)
 
     if strict_verify then
         if #rocks > 0 then
             if not lock or type(lock.rocks) ~= "table" then
-                error("Security error: lockfile '" .. get_lockfile_path() .. "' is missing. Run 'lua-tauri rocks install' in dev before building.")
+                error("Security error: lockfile '" .. lock_path .. "' is missing. Run 'lua-tauri rocks install' in dev before building.")
             end
             for _, rock_def in ipairs(rocks) do
                 local lock_entry = lock.rocks[rock_def.name]
