@@ -805,9 +805,15 @@ void bridge_init(ipc_callback_fn on_ipc, tray_callback_fn on_tray, shortcut_call
     g_deeplink_cb = on_deeplink;
 
 #if !defined(_WIN32) && !defined(__APPLE__)
-    WebKitWebContext *context = webkit_web_context_get_default();
-    webkit_web_context_register_uri_scheme(context, "tauri", gtk_uri_scheme_request_cb, NULL, NULL);
-    webkit_web_context_register_uri_scheme(context, "asset", gtk_uri_scheme_request_cb, NULL, NULL);
+    static bool g_gtk_schemes_registered = false;
+    if (!g_gtk_schemes_registered) {
+        g_gtk_schemes_registered = true;
+        WebKitWebContext *context = webkit_web_context_get_default();
+        if (context) {
+            webkit_web_context_register_uri_scheme(context, "tauri", gtk_uri_scheme_request_cb, NULL, NULL);
+            webkit_web_context_register_uri_scheme(context, "asset", gtk_uri_scheme_request_cb, NULL, NULL);
+        }
+    }
 #endif
 }
 
@@ -2013,17 +2019,19 @@ const char *platform_get_theme() {
     }
     return "light";
 #else
-    GtkSettings *settings = gtk_settings_get_default();
-    if (settings) {
-        gchar *theme_name = NULL;
-        gboolean prefer_dark = FALSE;
-        g_object_get(settings, "gtk-theme-name", &theme_name, "gtk-application-prefer-dark-theme", &prefer_dark, NULL);
-        bool is_dark = prefer_dark;
-        if (theme_name) {
-            if (strcasestr(theme_name, "dark")) is_dark = true;
-            g_free(theme_name);
+    if (gdk_display_get_default() != NULL || gtk_init_check(NULL, NULL)) {
+        GtkSettings *settings = gtk_settings_get_default();
+        if (settings) {
+            gchar *theme_name = NULL;
+            gboolean prefer_dark = FALSE;
+            g_object_get(settings, "gtk-theme-name", &theme_name, "gtk-application-prefer-dark-theme", &prefer_dark, NULL);
+            bool is_dark = prefer_dark;
+            if (theme_name) {
+                if (strcasestr(theme_name, "dark")) is_dark = true;
+                g_free(theme_name);
+            }
+            if (is_dark) return "dark";
         }
-        if (is_dark) return "dark";
     }
     return "light";
 #endif
@@ -2044,15 +2052,17 @@ void platform_theme_set_callback(theme_callback_fn cb) {
         }];
     }
 #elif !defined(_WIN32)
-    GtkSettings *settings = gtk_settings_get_default();
-    if (settings && !g_theme_observer_installed) {
-        g_theme_observer_installed = true;
-        g_signal_connect(settings, "notify::gtk-theme-name", G_CALLBACK(+[](GObject *, GParamSpec *, gpointer) {
-            if (g_theme_cb) g_theme_cb(platform_get_theme());
-        }), NULL);
-        g_signal_connect(settings, "notify::gtk-application-prefer-dark-theme", G_CALLBACK(+[](GObject *, GParamSpec *, gpointer) {
-            if (g_theme_cb) g_theme_cb(platform_get_theme());
-        }), NULL);
+    if (!g_theme_observer_installed && (gdk_display_get_default() != NULL || gtk_init_check(NULL, NULL))) {
+        GtkSettings *settings = gtk_settings_get_default();
+        if (settings) {
+            g_theme_observer_installed = true;
+            g_signal_connect(settings, "notify::gtk-theme-name", G_CALLBACK(+[](GObject *, GParamSpec *, gpointer) {
+                if (g_theme_cb) g_theme_cb(platform_get_theme());
+            }), NULL);
+            g_signal_connect(settings, "notify::gtk-application-prefer-dark-theme", G_CALLBACK(+[](GObject *, GParamSpec *, gpointer) {
+                if (g_theme_cb) g_theme_cb(platform_get_theme());
+            }), NULL);
+        }
     }
 #endif
 }

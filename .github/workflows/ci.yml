@@ -50,8 +50,9 @@ jobs:
           cmd /c msvcbuild.bat
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
-          New-Item -ItemType Directory -Force -Path "$ljRoot\bin","$ljRoot\include","$ljRoot\lib" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$ljRoot\bin","$ljRoot\bin\lua\jit","$ljRoot\include","$ljRoot\lib" | Out-Null
           Copy-Item "$ljRoot\repo\src\luajit.exe","$ljRoot\repo\src\lua51.dll" "$ljRoot\bin\" -Force
+          Copy-Item "$ljRoot\repo\src\jit\*.lua" "$ljRoot\bin\lua\jit\" -Force
           Copy-Item "$ljRoot\repo\src\lua51.lib" "$ljRoot\lib\" -Force
           Copy-Item "$ljRoot\repo\src\lua.h","$ljRoot\repo\src\lualib.h","$ljRoot\repo\src\lauxlib.h","$ljRoot\repo\src\luaconf.h","$ljRoot\repo\src\lua.hpp","$ljRoot\repo\src\luajit.h" "$ljRoot\include\" -Force
           echo "LUAJIT_ROOT=$ljRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
