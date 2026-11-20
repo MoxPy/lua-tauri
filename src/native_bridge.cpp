@@ -616,8 +616,6 @@ static bool get_native_window_origin(webview_t w, std::string &out_origin) {
 #endif
 }
 
-extern "C" {
-
 void platform_set_assets_path(const char *path) {
     if (path && strlen(path) > 0) {
         std::lock_guard<std::mutex> lk(g_config_mutex);
@@ -1817,7 +1815,7 @@ int platform_clipboard_read(char *out_text, int max_len) {
 
 static const std::string b64_table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-static std::string base64_encode(const unsigned char *data, size_t len) {
+[[maybe_unused]] static std::string tauri_base64_encode(const unsigned char *data, size_t len) {
     std::string out;
     out.reserve(((len + 2) / 3) * 4);
     int val = 0, valb = -6;
@@ -1834,7 +1832,7 @@ static std::string base64_encode(const unsigned char *data, size_t len) {
     return out;
 }
 
-static std::vector<unsigned char> base64_decode(const std::string &in) {
+static std::vector<unsigned char> tauri_base64_decode(const std::string &in) {
     std::vector<unsigned char> out;
     std::vector<int> T(256, -1);
     for (int i = 0; i < 64; ++i) T[(unsigned char)b64_table[i]] = i;
@@ -1933,7 +1931,7 @@ int platform_clipboard_write_image(const char *base64_png) {
     if (comma != std::string::npos && b64.find("data:image/") != std::string::npos) {
         b64 = b64.substr(comma + 1);
     }
-    std::vector<unsigned char> bytes = base64_decode(b64);
+    std::vector<unsigned char> bytes = tauri_base64_decode(b64);
     if (bytes.empty()) return 0;
 
 #if defined(__APPLE__)
@@ -1964,7 +1962,7 @@ int platform_clipboard_read_image(char *out_base64_png, int max_len) {
             }
         }
         if (data && [data length] > 0) {
-            std::string encoded = base64_encode(static_cast<const unsigned char *>([data bytes]), [data length]);
+            std::string encoded = tauri_base64_encode(static_cast<const unsigned char *>([data bytes]), [data length]);
             strncpy(out_base64_png, encoded.c_str(), max_len - 1);
             out_base64_png[max_len - 1] = '\0';
             ok = 1;
@@ -4147,6 +4145,4 @@ int platform_resolve_path(const char *in_path, char *out_path, int max_len) {
     } catch (...) {
         return 0;
     }
-}
-
 }
