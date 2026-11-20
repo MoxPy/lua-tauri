@@ -47,7 +47,8 @@ find_library(LUAJIT_LIB
 )
 
 if(MSVC)
-    add_compile_options(/W4 /wd4100 /GS /guard:cf /SDL)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    add_compile_options(/W4 /wd4100 /GS /guard:cf /sdl)
     add_link_options(/guard:cf /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /CETCOMPAT)
 else()
     add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wformat -Wformat-security -fstack-protector-strong)
@@ -240,6 +241,16 @@ set_tests_properties(test_audit PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SO
 
 add_test(NAME test_sidecar COMMAND "${LUAJIT_BIN}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sidecar.lua")
 set_tests_properties(test_sidecar PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+if(WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.22")
+    foreach(win_test smoke_test test_security_set1 test_json_rfc8259 test_audit test_sidecar)
+        if(TEST ${win_test})
+            set_tests_properties(${win_test} PROPERTIES
+                ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:taurilua>"
+            )
+        endif()
+    endforeach()
+endif()
 
 if(APPLE)
     target_compile_definitions(taurilua PRIVATE WEBVIEW_COCOA)

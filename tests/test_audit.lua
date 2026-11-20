@@ -45,13 +45,15 @@ local tauri = dofile("src/tauri/init.lua")
 print("1. Module Auto-Discovery & CWD Stripping (P0-1):")
 
 test("Release mode filters relative and CWD paths from package.path", function()
-    local test_path = "./?.lua;../plugins/?.lua;/opt/app/bundle/?.lua;./node_modules/?.lua;/usr/share/lua/5.1/?.lua"
+    local abs_bundle = ffi.os == "Windows" and "C:/opt/app/bundle/?.lua" or "/opt/app/bundle/?.lua"
+    local abs_system = ffi.os == "Windows" and "C:/usr/share/lua/5.1/?.lua" or "/usr/share/lua/5.1/?.lua"
+    local test_path = "./?.lua;../plugins/?.lua;" .. abs_bundle .. ";./node_modules/?.lua;" .. abs_system
     local filtered = tauri._filter_absolute_only(test_path)
     assert(not filtered:find("%./%?%.lua"), "CWD ./?.lua must be removed in release")
     assert(not filtered:find("%.%./plugins"), "Relative ../plugins must be removed in release")
     assert(not filtered:find("node_modules"), "Relative node_modules must be removed in release")
-    assert(filtered:find("/opt/app/bundle/"), "Absolute bundle path must be preserved")
-    assert(filtered:find("/usr/share/lua/5.1/"), "Absolute system rock path must be preserved")
+    assert(filtered:find(abs_bundle, 1, true), "Absolute bundle path must be preserved")
+    assert(filtered:find(abs_system, 1, true), "Absolute system rock path must be preserved")
 end)
 
 test("Dev mode retains local development search paths", function()

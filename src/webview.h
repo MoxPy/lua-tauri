@@ -419,6 +419,9 @@ static inline void setup_macos_default_menu(bool debug) {
     [NSApp setMainMenu:mainMenu];
 }
 
+static inline void webview_destroy(webview_t w);
+static inline void webview_init(webview_t w, const char *js);
+
 static inline webview_t webview_create(int debug, void *window) {
     __block WebviewImpl *impl = nullptr;
     run_on_main_sync(^{
@@ -659,7 +662,14 @@ static inline void webview_terminate(webview_t w) {
 }
 #endif
 #elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+#include <objbase.h>
 #include <wrl.h>
 #include <WebView2.h>
 #include <map>
@@ -732,6 +742,9 @@ static LRESULT CALLBACK WebviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
+
+static inline void webview_destroy(webview_t w);
+static inline void webview_init(webview_t w, const char *js);
 
 static inline webview_t webview_create(int debug, void *window) {
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW) };
@@ -1165,6 +1178,9 @@ static gboolean on_gtk_window_delete_event(GtkWidget *widget, GdkEvent *event, g
     }
     return FALSE;
 }
+
+static inline void webview_destroy(webview_t w);
+static inline void webview_init(webview_t w, const char *js);
 
 static inline webview_t webview_create(int debug, void *window) {
     (void)window;

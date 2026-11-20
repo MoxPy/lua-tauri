@@ -2,19 +2,19 @@ local ffi = require("ffi")
 local bit = require("bit")
 
 if ffi.os == "Windows" then
-    ffi.cdef[[
+    pcall(ffi.cdef, [[
         unsigned long GetFileAttributesA(const char *lpFileName);
         unsigned long GetCurrentDirectoryA(unsigned long nBufferLength, char *lpBuffer);
         void Sleep(unsigned long dwMilliseconds);
-    ]]
+    ]])
 else
-    ffi.cdef[[
+    pcall(ffi.cdef, [[
         int kill(int pid, int sig);
         int usleep(unsigned int usec);
         int access(const char *pathname, int mode);
         char *getcwd(char *buf, size_t size);
         long readlink(const char *pathname, char *buf, size_t bufsiz);
-    ]]
+    ]])
 end
 
 -- ==========================================================

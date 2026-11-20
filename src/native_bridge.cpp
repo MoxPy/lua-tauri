@@ -13,6 +13,8 @@
 #include <sstream>
 #include <fstream>
 #include <thread>
+#include <chrono>
+#include <functional>
 #include <queue>
 #include <mutex>
 #include <shared_mutex>
@@ -48,12 +50,19 @@ TAURILUA_INTERNAL std::mutex g_config_mutex;
 #include "webview.h"
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+#include <objbase.h>
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <sddl.h>
+#include <cwctype>
 #include <wrl.h>
 #include "WebView2.h"
 using namespace Microsoft::WRL;
@@ -1978,7 +1987,9 @@ void platform_clipboard_clear() {
 }
 
 static theme_callback_fn g_theme_cb = nullptr;
+#if !defined(_WIN32)
 static bool g_theme_observer_installed = false;
+#endif
 
 const char *platform_get_theme() {
 #if defined(__APPLE__)
@@ -2698,7 +2709,7 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
 #if defined(_WIN32)
     std::string prog_str = program;
     std::string prog_lower = prog_str;
-    for (char &c : prog_lower) c = ::tolower((unsigned char)c);
+    for (char &c : prog_lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     if (prog_lower.size() >= 4 && (prog_lower.substr(prog_lower.size() - 4) == ".bat" || prog_lower.substr(prog_lower.size() - 4) == ".cmd")) {
         ::fprintf(stderr, "[tauri-lua] error: direct execution of .bat / .cmd files is blocked for security (CWE-78)\n");
         return nullptr;
