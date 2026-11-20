@@ -1,12 +1,14 @@
 local ffi = require("ffi")
 local bit = require("bit")
 
+local kernel32 = nil
 if ffi.os == "Windows" then
     pcall(ffi.cdef, [[
         unsigned long GetFileAttributesA(const char *lpFileName);
         unsigned long GetCurrentDirectoryA(unsigned long nBufferLength, char *lpBuffer);
         void Sleep(unsigned long dwMilliseconds);
     ]])
+    pcall(function() kernel32 = ffi.load("kernel32") end)
 else
     pcall(ffi.cdef, [[
         int kill(int pid, int sig);
@@ -457,7 +459,7 @@ local function sleep_ms(ms)
     ms = tonumber(ms) or 0
     if ms <= 0 then return end
     if ffi.os == "Windows" then
-        ffi.C.Sleep(math.floor(ms))
+        (kernel32 or ffi.C).Sleep(math.floor(ms))
     else
         local remaining = math.floor(ms * 1000)
         while remaining > 0 do
@@ -471,7 +473,7 @@ end
 local function get_cwd()
     if ffi.os == "Windows" then
         local buf = ffi.new("char[4096]")
-        local n = ffi.C.GetCurrentDirectoryA(4096, buf)
+        local n = (kernel32 or ffi.C).GetCurrentDirectoryA(4096, buf)
         if n > 0 and n < 4096 then
             return ffi.string(buf, n)
         end
@@ -489,7 +491,7 @@ end
 local function is_symlink(path)
     if type(path) ~= "string" or path == "" then return false end
     if ffi.os == "Windows" then
-        local attrs = ffi.C.GetFileAttributesA(path)
+        local attrs = (kernel32 or ffi.C).GetFileAttributesA(path)
         if attrs == 0xFFFFFFFF then return false end
         return bit.band(attrs, 0x0400) ~= 0
     else
@@ -501,7 +503,7 @@ end
 local function file_exists(path)
     if type(path) ~= "string" or path == "" then return false end
     if ffi.os == "Windows" then
-        return ffi.C.GetFileAttributesA(path) ~= 0xFFFFFFFF
+        return (kernel32 or ffi.C).GetFileAttributesA(path) ~= 0xFFFFFFFF
     else
         return ffi.C.access(path, 0) == 0
     end

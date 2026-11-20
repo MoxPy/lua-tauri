@@ -433,6 +433,10 @@ char *realpath(const char *path, char *resolved_path);
 ]])
 
 local clib = ffi.C
+local kernel32_lib = nil
+if ffi.os == "Windows" then
+    pcall(function() kernel32_lib = ffi.load("kernel32") end)
+end
 local has_sym = pcall(function() return ffi.C.platform_state_has end)
 if not has_sym then
     pcall(function()
@@ -576,7 +580,7 @@ if not has_state_sym then
         platform_resolve_path = function(in_path, out_buf, maxlen)
             local p = type(in_path) == "string" and in_path or ffi.string(in_path)
             if not out_buf or maxlen <= 0 then return 0 end
-            local ok, rp = pcall(function() return real_clib.realpath(p, out_buf) end)
+            local ok, rp = pcall(function() return ffi.C.realpath(p, out_buf) end)
             if ok and rp ~= nil then
                 out_buf[maxlen - 1] = 0
                 return 1
@@ -588,7 +592,7 @@ if not has_state_sym then
                 if not leaf then break end
                 table.insert(suffix, 1, leaf)
                 probe = (parent == "" and "/" or parent)
-                local ok_p, rp_p = pcall(function() return real_clib.realpath(probe, out_buf) end)
+                local ok_p, rp_p = pcall(function() return ffi.C.realpath(probe, out_buf) end)
                 if ok_p and rp_p ~= nil then
                     out_buf[maxlen - 1] = 0
                     local base = ffi.string(out_buf)
@@ -1551,9 +1555,9 @@ local function safe_mkdir_p(target_path)
         if part ~= "" and part ~= "." then
             current = (current == "" or current:match("/$")) and (current .. part) or (current .. "/" .. part)
             if ffi.os == "Windows" then
-                pcall(function() clib._mkdir(current) end)
+                pcall(function() ffi.C._mkdir(current) end)
             else
-                pcall(function() clib.mkdir(current, 493) end)
+                pcall(function() ffi.C.mkdir(current, 493) end)
             end
         end
     end
@@ -2838,12 +2842,12 @@ function Tauri.sleep(ms)
     ms = tonumber(ms) or 0
     if ms <= 0 then return end
     if ffi.os == "Windows" then
-        clib.Sleep(math.floor(ms))
+        (kernel32_lib or ffi.C).Sleep(math.floor(ms))
     else
         local remaining = math.floor(ms * 1000)
         while remaining > 0 do
             local chunk = remaining > 500000 and 500000 or remaining
-            clib.usleep(chunk)
+            ffi.C.usleep(chunk)
             remaining = remaining - chunk
         end
     end
@@ -3368,7 +3372,7 @@ function Tauri:_register_builtins()
     self:register("tauri:fs:remove", function(payload)
         self.security:assert_capability("fs:remove")
         local safe_path = self.security:assert_scope(payload.path, self.base_paths)
-        if clib.remove(safe_path) ~= 0 then
+        if ffi.C.remove(safe_path) ~= 0 then
             error("Impossibile eliminare: " .. payload.path)
         end
         return true
@@ -3752,6 +3756,9 @@ end
 
 local function resolve_single_instance_socket_path(app_name)
     local safe_id = tostring(app_name or "tauri-app"):gsub("[^a-zA-Z0-9_%-%.]", "_")
+    if ffi.os == "Windows" then
+        return "\\\\.\\pipe\\" .. safe_id .. "-single-instance"
+    end
     local xdg = os.getenv("XDG_RUNTIME_DIR")
     if xdg and xdg ~= "" then
         return xdg .. "/" .. safe_id .. ".sock"
