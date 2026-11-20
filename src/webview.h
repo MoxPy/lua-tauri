@@ -751,7 +751,7 @@ static inline webview_t webview_create(int debug, void *window) {
     wc.lpfnWndProc = WebviewWndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"TauriLuaWebviewClass";
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     RegisterClassExW(&wc);
 
     HWND hwnd = CreateWindowExW(

@@ -795,6 +795,22 @@ extern "C" void platform_kill_child_processes() {
     }
 }
 
+#if !defined(_WIN32) && !defined(__APPLE__)
+static void ensure_gtk_uri_schemes_registered() {
+    static bool g_gtk_schemes_registered = false;
+    if (g_gtk_schemes_registered) return;
+    if (gdk_display_get_default() == NULL && !gtk_init_check(NULL, NULL)) {
+        return;
+    }
+    WebKitWebContext *context = webkit_web_context_get_default();
+    if (context) {
+        g_gtk_schemes_registered = true;
+        webkit_web_context_register_uri_scheme(context, "tauri", gtk_uri_scheme_request_cb, NULL, NULL);
+        webkit_web_context_register_uri_scheme(context, "asset", gtk_uri_scheme_request_cb, NULL, NULL);
+    }
+}
+#endif
+
 void bridge_init(ipc_callback_fn on_ipc, tray_callback_fn on_tray, shortcut_callback_fn on_shortcut, deeplink_callback_fn on_deeplink) {
     atexit(platform_kill_child_processes);
     g_ipc_cb = on_ipc;
@@ -803,15 +819,7 @@ void bridge_init(ipc_callback_fn on_ipc, tray_callback_fn on_tray, shortcut_call
     g_deeplink_cb = on_deeplink;
 
 #if !defined(_WIN32) && !defined(__APPLE__)
-    static bool g_gtk_schemes_registered = false;
-    if (!g_gtk_schemes_registered) {
-        g_gtk_schemes_registered = true;
-        WebKitWebContext *context = webkit_web_context_get_default();
-        if (context) {
-            webkit_web_context_register_uri_scheme(context, "tauri", gtk_uri_scheme_request_cb, NULL, NULL);
-            webkit_web_context_register_uri_scheme(context, "asset", gtk_uri_scheme_request_cb, NULL, NULL);
-        }
-    }
+    ensure_gtk_uri_schemes_registered();
 #endif
 }
 
@@ -950,6 +958,9 @@ int platform_window_create(const char *label, const char *title, const char *url
         default_client_script_copy = g_default_client_script;
     }
 
+#if !defined(_WIN32) && !defined(__APPLE__)
+    ensure_gtk_uri_schemes_registered();
+#endif
     webview_t w = webview_create(g_dev_mode.load() ? 1 : 0, nullptr);
     if (!w) return -1;
 
