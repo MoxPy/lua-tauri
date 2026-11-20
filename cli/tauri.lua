@@ -1,9 +1,21 @@
 local ffi = require("ffi")
+local bit = require("bit")
 
-ffi.cdef[[
-    int kill(int pid, int sig);
-    int usleep(unsigned int usec);
-]]
+if ffi.os == "Windows" then
+    ffi.cdef[[
+        unsigned long GetFileAttributesA(const char *lpFileName);
+        unsigned long GetCurrentDirectoryA(unsigned long nBufferLength, char *lpBuffer);
+        void Sleep(unsigned long dwMilliseconds);
+    ]]
+else
+    ffi.cdef[[
+        int kill(int pid, int sig);
+        int usleep(unsigned int usec);
+        int access(const char *pathname, int mode);
+        char *getcwd(char *buf, size_t size);
+        long readlink(const char *pathname, char *buf, size_t bufsiz);
+    ]]
+end
 
 -- ==========================================================
 -- Minimal Color & Print Helpers
@@ -85,8 +97,12 @@ local function encode_string(s)
     end) .. '"'
 end
 
-function json.encode(val, visited)
+function json.encode(val, visited, depth)
     visited = visited or {}
+    depth = depth or 0
+    if depth > 128 then
+        error("JSON encode error: maximum nesting depth exceeded")
+    end
     local t = type(val)
     if val == nil or val == json.null or (t == "table" and getmetatable(val) and getmetatable(val).__is_json_null) then
         return "null"
@@ -135,16 +151,20 @@ function json.encode(val, visited)
         end
 
         if (is_array and max_idx == count) or (is_explicit_array and is_array) then
+            if max_idx > count and max_idx > 4096 then
+                visited[val] = nil
+                error("JSON encode error: sparse array index exceeds limit")
+            end
             local parts = {}
             for i = 1, max_idx do
-                parts[i] = json.encode(val[i], visited)
+                parts[i] = json.encode(val[i], visited, depth + 1)
             end
             visited[val] = nil
             return "[" .. table.concat(parts, ",") .. "]"
         else
             local parts = {}
             for k, v in pairs(val) do
-                table.insert(parts, encode_string(tostring(k)) .. ":" .. json.encode(v, visited))
+                table.insert(parts, encode_string(tostring(k)) .. ":" .. json.encode(v, visited, depth + 1))
             end
             visited[val] = nil
             return "{" .. table.concat(parts, ",") .. "}"
@@ -433,13 +453,58 @@ end
 -- ==========================================================
 -- Utility Functions
 -- ==========================================================
-local function file_exists(path)
-    local f = io.open(path, "r")
-    if f then
-        f:close()
-        return true
+local function sleep_ms(ms)
+    ms = tonumber(ms) or 0
+    if ms <= 0 then return end
+    if ffi.os == "Windows" then
+        ffi.C.Sleep(math.floor(ms))
+    else
+        local remaining = math.floor(ms * 1000)
+        while remaining > 0 do
+            local chunk = remaining > 500000 and 500000 or remaining
+            ffi.C.usleep(chunk)
+            remaining = remaining - chunk
+        end
     end
-    return false
+end
+
+local function get_cwd()
+    if ffi.os == "Windows" then
+        local buf = ffi.new("char[4096]")
+        local n = ffi.C.GetCurrentDirectoryA(4096, buf)
+        if n > 0 and n < 4096 then
+            return ffi.string(buf, n)
+        end
+        return "."
+    else
+        local buf = ffi.new("char[4096]")
+        local p = ffi.C.getcwd(buf, 4096)
+        if p ~= nil then
+            return ffi.string(p)
+        end
+        return "."
+    end
+end
+
+local function is_symlink(path)
+    if type(path) ~= "string" or path == "" then return false end
+    if ffi.os == "Windows" then
+        local attrs = ffi.C.GetFileAttributesA(path)
+        if attrs == 0xFFFFFFFF then return false end
+        return bit.band(attrs, 0x0400) ~= 0
+    else
+        local buf = ffi.new("char[16]")
+        return tonumber(ffi.C.readlink(path, buf, 16)) >= 0
+    end
+end
+
+local function file_exists(path)
+    if type(path) ~= "string" or path == "" then return false end
+    if ffi.os == "Windows" then
+        return ffi.C.GetFileAttributesA(path) ~= 0xFFFFFFFF
+    else
+        return ffi.C.access(path, 0) == 0
+    end
 end
 
 local function read_file(path)
@@ -453,9 +518,9 @@ end
 local function write_file(path, content)
     local f = io.open(path, "wb")
     if not f then return false end
-    f:write(content)
+    local ok = f:write(content)
     f:close()
-    return true
+    return ok ~= nil
 end
 
 local function exec(cmd)
@@ -467,6 +532,9 @@ end
 
 local function shell_quote(str)
     local s = tostring(str)
+    if s:find("[%z\r\n]") then
+        error("Security error: control characters (NUL/CR/LF) are forbidden in shell arguments")
+    end
     if ffi.os == "Windows" then
         s = s:gsub("%%", "^%%")
         s = s:gsub('(\\*)"', '%1%1\\"')
@@ -480,6 +548,14 @@ local function shell_quote(str)
     end
 end
 
+local function assert_safe_win_path(path)
+    local s = tostring(path or "")
+    if s == "" or s:find('[%z\r\n&|<>^%%"]') then
+        error("Security error: unsafe characters in Windows path: " .. s)
+    end
+    return s:gsub("/", "\\")
+end
+
 local function xml_escape(s)
     return tostring(s or "")
         :gsub("&", "&amp;")
@@ -491,7 +567,7 @@ end
 
 local function make_dir(path)
     if ffi.os == "Windows" then
-        local win_path = path:gsub("/", "\\")
+        local win_path = assert_safe_win_path(path)
         os.execute('mkdir "' .. win_path .. '" 2>NUL')
     else
         exec("mkdir -p " .. shell_quote(path))
@@ -501,7 +577,7 @@ end
 local function remove_dir_recursive(path)
     if not file_exists(path) then return end
     if ffi.os == "Windows" then
-        local win_path = path:gsub("/", "\\")
+        local win_path = assert_safe_win_path(path)
         os.execute('rmdir /s /q "' .. win_path .. '" 2>NUL')
     else
         os.execute("rm -rf " .. shell_quote(path) .. " 2>/dev/null")
@@ -510,8 +586,8 @@ end
 
 local function copy_dir_recursive(src, dest)
     if ffi.os == "Windows" then
-        local win_src = src:gsub("/", "\\")
-        local win_dest = dest:gsub("/", "\\")
+        local win_src = assert_safe_win_path(src)
+        local win_dest = assert_safe_win_path(dest)
         make_dir(dest)
         os.execute('xcopy /E /I /Y /Q "' .. win_src .. '" "' .. win_dest .. '\\" >NUL 2>NUL')
     else
@@ -575,15 +651,34 @@ local function load_config()
     end
 
     local raw = read_file(conf_path)
-    local parsed = json.decode(raw) or {}
+    if not raw or raw == "" then
+        error("Configuration file is empty: " .. conf_path)
+    end
+    local parsed, parse_err = json.decode(raw)
+    if not parsed or type(parsed) ~= "table" then
+        error("Invalid JSON in " .. conf_path .. ": " .. tostring(parse_err))
+    end
     return parsed, conf_path
+end
+
+local function validate_app_meta(name, version, identifier)
+    if type(name) ~= "string" or name == "" or #name > 128 or name:find("%.%.") or not name:match("^[a-zA-Z0-9][a-zA-Z0-9 %._%-]*$") then
+        error("Security error: invalid application name '" .. tostring(name) .. "'")
+    end
+    if type(version) ~= "string" or version == "" or #version > 64 or not version:match("^[0-9][a-zA-Z0-9%.%-_%+~:]*$") then
+        error("Security error: invalid application version '" .. tostring(version) .. "'")
+    end
+    if type(identifier) ~= "string" or identifier == "" or #identifier > 128 or identifier:find("%.%.") or not identifier:match("^[a-zA-Z0-9][a-zA-Z0-9%.%-_]*$") then
+        error("Security error: invalid application identifier '" .. tostring(identifier) .. "'")
+    end
+    return name, version, identifier
 end
 
 local function get_app_meta(conf)
     local name = (conf.package and conf.package.name) or conf.productName or "tauri-lua-app"
     local version = (conf.package and conf.package.version) or conf.version or "0.1.0"
     local identifier = conf.identifier or "com.tauri.lua"
-    return name, version, identifier
+    return validate_app_meta(name, version, identifier)
 end
 
 local ENGINE_ROOT = os.getenv("TAURI_LUA_ROOT")
@@ -615,11 +710,8 @@ local function ensure_runtime_built(release_mode)
     if release_mode or not file_exists(bin) then
         local build_type = release_mode and "Release" or "Debug"
         info("Compiling Tauri-Lua runtime (" .. build_type .. ")...")
-        local p = io.popen("pwd 2>/dev/null")
-        local cwd = p and p:read("*l") or "."
-        if p then p:close() end
+        local cwd = get_cwd()
 
-        -- Force clean regeneration of embedded headers in release mode to avoid stale dev/fallback artifacts
         if release_mode then
             if file_exists("build/generated") then
                 remove_dir_recursive("build/generated")
@@ -627,7 +719,8 @@ local function ensure_runtime_built(release_mode)
         end
 
         info("Configuring CMake for Tauri-Lua runtime...")
-        exec("cmake -B build -S " .. shell_quote(ENGINE_ROOT) .. " -DAPP_DIR=" .. shell_quote(cwd) .. " -DCMAKE_BUILD_TYPE=" .. shell_quote(build_type))
+        local fuse_flag = release_mode and " -DTAURILUA_RELEASE_FUSE=ON" or " -DTAURILUA_RELEASE_FUSE=OFF"
+        exec("cmake -B build -S " .. shell_quote(ENGINE_ROOT) .. " -DAPP_DIR=" .. shell_quote(cwd) .. " -DCMAKE_BUILD_TYPE=" .. shell_quote(build_type) .. fuse_flag)
         info("Building Tauri-Lua runtime with CMake...")
         exec("cmake --build build --config " .. shell_quote(build_type))
         success("Runtime built successfully.")
@@ -745,35 +838,123 @@ local function get_lockfile_path()
     return "tauri.lock"
 end
 
-local function compute_file_checksum(filepath)
-    if not file_exists(filepath) then return "unknown" end
-    local cmd
-    if ffi.os == "OSX" then
-        cmd = "shasum -a 256 " .. shell_quote(filepath) .. " 2>/dev/null"
-    elseif ffi.os == "Linux" then
-        cmd = "sha256sum " .. shell_quote(filepath) .. " 2>/dev/null"
-    else
-        local ps_path = filepath:gsub("/", "\\"):gsub("'", "''")
-        cmd = 'powershell -NoProfile -Command "(Get-FileHash -LiteralPath \'' .. ps_path .. '\' -Algorithm SHA256).Hash.ToLower()" 2>NUL'
-    end
-    local p = io.popen(cmd)
-    if p then
-        local out = p:read("*l")
-        p:close()
-        if out then
-            local hash = out:match("(%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x)")
-            if hash then return "sha256:" .. hash end
+local SHA256_K = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+}
+
+local function sha256_hex(msg)
+    local band, bxor, bnot, rshift, ror, tobit = bit.band, bit.bxor, bit.bnot, bit.rshift, bit.ror, bit.tobit
+    local len = #msg
+    local bit_len = len * 8
+    local pad_len = (56 - ((len + 1) % 64)) % 64
+    local hi = math.floor(bit_len / 4294967296)
+    local lo = bit_len % 4294967296
+    local len_bytes = string.char(
+        band(rshift(hi, 24), 0xff), band(rshift(hi, 16), 0xff), band(rshift(hi, 8), 0xff), band(hi, 0xff),
+        band(rshift(lo, 24), 0xff), band(rshift(lo, 16), 0xff), band(rshift(lo, 8), 0xff), band(lo, 0xff)
+    )
+    local data = msg .. "\128" .. string.rep("\0", pad_len) .. len_bytes
+
+    local h0 = tobit(0x6a09e667)
+    local h1 = tobit(0xbb67ae85)
+    local h2 = tobit(0x3c6ef372)
+    local h3 = tobit(0xa54ff53a)
+    local h4 = tobit(0x510e527f)
+    local h5 = tobit(0x9b05688c)
+    local h6 = tobit(0x1f83d9ab)
+    local h7 = tobit(0x5be0cd19)
+
+    local w = {}
+    local total = #data
+    for offset = 1, total, 64 do
+        for i = 0, 15 do
+            local p = offset + i * 4
+            local b1, b2, b3, b4 = string.byte(data, p, p + 3)
+            w[i + 1] = tobit(b1 * 16777216 + b2 * 65536 + b3 * 256 + b4)
         end
+        for i = 17, 64 do
+            local v1 = w[i - 15]
+            local s0 = bxor(ror(v1, 7), ror(v1, 18), rshift(v1, 3))
+            local v2 = w[i - 2]
+            local s1 = bxor(ror(v2, 17), ror(v2, 19), rshift(v2, 10))
+            w[i] = tobit(w[i - 16] + s0 + w[i - 7] + s1)
+        end
+
+        local a, b, c, d, e, f, g, h = h0, h1, h2, h3, h4, h5, h6, h7
+        for i = 1, 64 do
+            local S1 = bxor(ror(e, 6), ror(e, 11), ror(e, 25))
+            local ch = bxor(band(e, f), band(bnot(e), g))
+            local t1 = tobit(h + S1 + ch + SHA256_K[i] + w[i])
+            local S0 = bxor(ror(a, 2), ror(a, 13), ror(a, 22))
+            local maj = bxor(band(a, b), band(a, c), band(b, c))
+            local t2 = tobit(S0 + maj)
+            h = g
+            g = f
+            f = e
+            e = tobit(d + t1)
+            d = c
+            c = b
+            b = a
+            a = tobit(t1 + t2)
+        end
+
+        h0 = tobit(h0 + a)
+        h1 = tobit(h1 + b)
+        h2 = tobit(h2 + c)
+        h3 = tobit(h3 + d)
+        h4 = tobit(h4 + e)
+        h5 = tobit(h5 + f)
+        h6 = tobit(h6 + g)
+        h7 = tobit(h7 + h)
+    end
+
+    return bit.tohex(h0, 8) .. bit.tohex(h1, 8) .. bit.tohex(h2, 8) .. bit.tohex(h3, 8)
+        .. bit.tohex(h4, 8) .. bit.tohex(h5, 8) .. bit.tohex(h6, 8) .. bit.tohex(h7, 8)
+end
+
+local function compute_file_checksum(filepath)
+    if not file_exists(filepath) then
+        error("Checksum error: file not found: " .. tostring(filepath))
+    end
+    if is_symlink(filepath) then
+        error("Security error: symlink forbidden in LuaRocks tree: " .. tostring(filepath))
     end
     local content = read_file(filepath)
-    if content then
-        local h = 5381
-        for i = 1, #content do
-            h = (h * 33 + string.byte(content, i)) % 4294967296
-        end
-        return string.format("hash:%08x", h)
+    if content == nil then
+        error("Checksum error: cannot read file: " .. tostring(filepath))
     end
-    return "unknown"
+    return "sha256:" .. sha256_hex(content)
+end
+
+local function collect_manifest_entries(tbl, base_dir, prefix, out_files, depth)
+    depth = depth or 0
+    if depth > 32 or type(tbl) ~= "table" then return end
+    for k, v in pairs(tbl) do
+        if type(k) == "string" and k ~= "" and k ~= "." and k ~= ".." and not k:find("%.%.") and not k:match("^[/\\]") and not k:find("%z") then
+            local rel = (prefix == "" and k or (prefix .. "/" .. k))
+            local full = base_dir .. "/" .. rel
+            if type(v) == "table" then
+                if is_symlink(full) then
+                    error("Security error: symlink directory forbidden in LuaRocks tree: " .. full)
+                end
+                collect_manifest_entries(v, base_dir, rel, out_files, depth + 1)
+            else
+                if is_symlink(full) then
+                    error("Security error: symlink file forbidden in LuaRocks tree: " .. full)
+                end
+                if file_exists(full) then
+                    table.insert(out_files, full)
+                end
+            end
+        end
+    end
 end
 
 local function get_installed_rock_files(rocks_dir, rock_name, ver)
@@ -781,6 +962,9 @@ local function get_installed_rock_files(rocks_dir, rock_name, ver)
     local manifest_file = base .. "/rock_manifest"
     local files = {}
     if file_exists(manifest_file) then
+        if is_symlink(manifest_file) then
+            error("Security error: symlink rock_manifest forbidden: " .. manifest_file)
+        end
         table.insert(files, manifest_file)
         local content = read_file(manifest_file)
         if content then
@@ -794,27 +978,20 @@ local function get_installed_rock_files(rocks_dir, rock_name, ver)
                 if debug and debug.sethook then
                     debug.sethook(function() error("rock_manifest execution timeout") end, "", 100000)
                 end
-                pcall(fn)
+                local ok_run, run_err = pcall(fn)
                 if debug and debug.sethook then
                     debug.sethook()
+                end
+                if not ok_run then
+                    error("Security error: rock_manifest evaluation failed: " .. tostring(run_err))
                 end
                 local mf = env.rock_manifest
                 if type(mf) == "table" then
                     if type(mf.lua) == "table" then
-                        for rel, _ in pairs(mf.lua) do
-                            if type(rel) == "string" and not rel:find("%.%.") and not rel:match("^[/\\]") then
-                                local p = rocks_dir .. "/share/lua/5.1/" .. rel
-                                if file_exists(p) then table.insert(files, p) end
-                            end
-                        end
+                        collect_manifest_entries(mf.lua, rocks_dir .. "/share/lua/5.1", "", files, 0)
                     end
                     if type(mf.lib) == "table" then
-                        for rel, _ in pairs(mf.lib) do
-                            if type(rel) == "string" and not rel:find("%.%.") and not rel:match("^[/\\]") then
-                                local p = rocks_dir .. "/lib/lua/5.1/" .. rel
-                                if file_exists(p) then table.insert(files, p) end
-                            end
-                        end
+                        collect_manifest_entries(mf.lib, rocks_dir .. "/lib/lua/5.1", "", files, 0)
                     end
                 end
             end
@@ -825,39 +1002,23 @@ local function get_installed_rock_files(rocks_dir, rock_name, ver)
 end
 
 local function compute_composite_checksum(file_list)
-    if not file_list or #file_list == 0 then return "sha256:unknown" end
+    if not file_list or #file_list == 0 then
+        error("Security error: cannot compute composite checksum for empty file list")
+    end
     if #file_list == 1 then
         return compute_file_checksum(file_list[1])
     end
-    local quoted = {}
+    local sorted = {}
     for _, f in ipairs(file_list) do
-        table.insert(quoted, shell_quote(f))
+        table.insert(sorted, f)
     end
-    local file_args = table.concat(quoted, " ")
-    local cmd
-    if ffi.os == "OSX" then
-        cmd = "shasum -a 256 " .. file_args .. " 2>/dev/null | shasum -a 256 2>/dev/null"
-    elseif ffi.os == "Linux" then
-        cmd = "sha256sum " .. file_args .. " 2>/dev/null | sha256sum 2>/dev/null"
-    else
-        local hashes = {}
-        for _, f in ipairs(file_list) do
-            table.insert(hashes, compute_file_checksum(f))
-        end
-        local combined = table.concat(hashes, "\n")
-        local escaped = combined:gsub("'", "''")
-        cmd = 'powershell -NoProfile -Command "[Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes(\'' .. escaped .. '\')) | ForEach-Object { $_.ToString(\'x2\') } | Join-String" 2>NUL'
+    table.sort(sorted)
+    local parts = {}
+    for _, f in ipairs(sorted) do
+        local norm = f:gsub("\\", "/")
+        table.insert(parts, norm .. "\0" .. compute_file_checksum(f) .. "\n")
     end
-    local p = io.popen(cmd)
-    if p then
-        local out = p:read("*l")
-        p:close()
-        if out then
-            local hash = out:match("(%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x)")
-            if hash then return "sha256:" .. hash end
-        end
-    end
-    return compute_file_checksum(file_list[1])
+    return "sha256:" .. sha256_hex(table.concat(parts))
 end
 
 local function get_installed_rock_details(rocks_dir, rock_name)
@@ -896,8 +1057,14 @@ local function read_lockfile(custom_path)
     local lock_path = custom_path or get_lockfile_path()
     if not file_exists(lock_path) then return nil end
     local content = read_file(lock_path)
-    if not content or content == "" then return nil end
-    return json.decode(content)
+    if not content or content == "" then
+        error("Lockfile corrupted ('" .. lock_path .. "'): file is empty")
+    end
+    local parsed, parse_err = json.decode(content)
+    if not parsed or type(parsed) ~= "table" then
+        error("Lockfile corrupted ('" .. lock_path .. "'): " .. tostring(parse_err))
+    end
+    return parsed
 end
 
 local function save_lockfile(lock_data, custom_path)
@@ -1086,20 +1253,26 @@ local function install_single_rock(rock_def, rocks_dir, luarocks_bin, allow_cust
     end
 end
 
-local function ensure_rocks_installed(conf, force, is_build, allow_custom_server)
+local function is_valid_sha256_checksum(val)
+    if type(val) ~= "string" then return false end
+    return #val == 71 and val:match("^sha256:[0-9a-f]+$") ~= nil
+end
+
+local function ensure_rocks_installed(conf, force, is_build, allow_custom_server, frozen_lockfile)
     local rocks = extract_luarocks_dependencies(conf)
     local rockspec_file = find_rockspec_file()
+    local strict_verify = is_build or frozen_lockfile
     if #rocks == 0 and not rockspec_file then
         return true
     end
 
-    local allow_custom = allow_custom_server or conf.allow_custom_rock_server or (conf.security and conf.security.allow_custom_rock_server) or false
+    local sec_conf = (conf.app and conf.app.security) or conf.security or {}
+    local allow_custom = allow_custom_server or conf.allow_custom_rock_server or sec_conf.allow_custom_rock_server or false
 
-    -- 1. Validate all rocks
     for _, rock_def in ipairs(rocks) do
         local name, name_err = validate_rock_name(rock_def.name)
         if not name then error(name_err) end
-        local ver, ver_err = validate_rock_version(rock_def.version, is_build)
+        local ver, ver_err = validate_rock_version(rock_def.version, strict_verify)
         if ver_err then error(ver_err) end
         local srv, srv_err = validate_rock_server(rock_def.server, allow_custom)
         if srv_err then error(srv_err) end
@@ -1109,26 +1282,32 @@ local function ensure_rocks_installed(conf, force, is_build, allow_custom_server
     local luarocks_bin = find_luarocks_bin()
     local lock = read_lockfile()
 
-    -- In build mode, verify against lockfile if present
-    if is_build and lock and lock.rocks then
-        for _, rock_def in ipairs(rocks) do
-            local lock_entry = lock.rocks[rock_def.name]
-            if not lock_entry then
-                error("Lockfile missing entry for rock '" .. rock_def.name .. "'. Run 'lua-tauri dev' or 'lua-tauri rocks install' to generate tauri.lock first.")
+    if strict_verify then
+        if #rocks > 0 then
+            if not lock or type(lock.rocks) ~= "table" then
+                error("Security error: lockfile '" .. get_lockfile_path() .. "' is missing. Run 'lua-tauri rocks install' in dev before building.")
             end
-            if rock_def.version and lock_entry.version and rock_def.version ~= lock_entry.version then
-                error("Lockfile mismatch for '" .. rock_def.name .. "': tauri.conf.json requires " .. rock_def.version .. " but tauri.lock specifies " .. lock_entry.version)
-            end
-            local details = get_installed_rock_details(rocks_dir, rock_def.name)
-            if not details then
-                error("LuaRock '" .. rock_def.name .. "' is not installed in hermetic tree '" .. rocks_dir .. "'")
-            end
-            if lock_entry.checksum and lock_entry.checksum ~= "" and lock_entry.checksum ~= "sha256:unknown" then
+            for _, rock_def in ipairs(rocks) do
+                local lock_entry = lock.rocks[rock_def.name]
+                if not lock_entry then
+                    error("Lockfile missing entry for rock '" .. rock_def.name .. "'. Run 'lua-tauri dev' or 'lua-tauri rocks install' to generate tauri.lock first.")
+                end
+                if rock_def.version and lock_entry.version and rock_def.version ~= lock_entry.version then
+                    error("Lockfile mismatch for '" .. rock_def.name .. "': tauri.conf.json requires " .. rock_def.version .. " but tauri.lock specifies " .. lock_entry.version)
+                end
+                local details = get_installed_rock_details(rocks_dir, rock_def.name)
+                if not details then
+                    error("LuaRock '" .. rock_def.name .. "' is not installed in hermetic tree '" .. rocks_dir .. "'")
+                end
+                if not is_valid_sha256_checksum(lock_entry.checksum) then
+                    error("Security error: invalid or missing SHA-256 checksum in lockfile for LuaRock '" .. rock_def.name .. "'")
+                end
                 if details.checksum ~= lock_entry.checksum then
                     error("Checksum verification failed for LuaRock '" .. rock_def.name .. "': lockfile expected " .. lock_entry.checksum .. " but found " .. details.checksum)
                 end
             end
         end
+        return true
     end
 
     if not luarocks_bin then
@@ -1151,7 +1330,7 @@ local function ensure_rocks_installed(conf, force, is_build, allow_custom_server
         info("Detected rockspec: `" .. rockspec_file .. "` - checking dependencies...")
         local cmd = shell_quote(luarocks_bin) .. " --tree " .. shell_quote(rocks_dir) .. " --lua-version 5.1 install --only-deps " .. shell_quote(rockspec_file)
         running(cmd)
-        os.execute(cmd)
+        exec(cmd)
     end
 
     if #rocks > 0 then
@@ -1171,23 +1350,23 @@ local function ensure_rocks_installed(conf, force, is_build, allow_custom_server
             success("Hermetic LuaRocks tree synchronized (" .. installed_count .. " packages installed/updated).")
         end
 
-        -- Update or create lockfile only during dev/install, NEVER overwrite during production build
-        if not is_build then
-            local lock_data = lock or { version = 1, rocks = {} }
-            lock_data.rocks = lock_data.rocks or {}
-            for _, rock_def in ipairs(rocks) do
-                local details = get_installed_rock_details(rocks_dir, rock_def.name)
-                local installed_ver = (details and details.version) or rock_def.version or "unknown"
-                local checksum = (details and details.checksum) or "sha256:unknown"
-                lock_data.rocks[rock_def.name] = {
-                    version = installed_ver,
-                    checksum = checksum,
-                    server = rock_def.server or "https://luarocks.org"
-                }
+        local lock_data = lock or { version = 1, rocks = {} }
+        lock_data.rocks = lock_data.rocks or {}
+        for _, rock_def in ipairs(rocks) do
+            local details = get_installed_rock_details(rocks_dir, rock_def.name)
+            local installed_ver = (details and details.version) or rock_def.version or "unknown"
+            local checksum = (details and details.checksum) or ""
+            if not is_valid_sha256_checksum(checksum) then
+                error("Security error: failed to compute SHA-256 checksum for LuaRock '" .. rock_def.name .. "'")
             end
-            save_lockfile(lock_data)
-            info("Saved dependency lockfile: " .. get_lockfile_path())
+            lock_data.rocks[rock_def.name] = {
+                version = installed_ver,
+                checksum = checksum,
+                server = rock_def.server or "https://luarocks.org"
+            }
         end
+        save_lockfile(lock_data)
+        info("Saved dependency lockfile: " .. get_lockfile_path())
     end
     return true
 end
@@ -1197,10 +1376,18 @@ local function cmd_rocks(args)
     local rocks_dir = get_rocks_tree_dir()
     local sub = args[1] or "install"
     local allow_custom = has_flag(args, "--allow-custom-server")
+    local frozen = has_flag(args, "--frozen-lockfile")
 
     if sub == "install" then
+        if frozen then
+            ensure_rocks_installed(conf, false, false, allow_custom, true)
+            success("Frozen lockfile verification passed.")
+            return
+        end
         local rock_name = args[2]
+        if rock_name and rock_name:match("^%-") then rock_name = nil end
         local rock_ver = args[3]
+        if rock_ver and rock_ver:match("^%-") then rock_ver = nil end
         local luarocks_bin = find_luarocks_bin()
         if not luarocks_bin then
             print_luarocks_missing_guidance()
@@ -1211,8 +1398,12 @@ local function cmd_rocks(args)
             local ok = install_single_rock({ name = rock_name, version = rock_ver }, rocks_dir, luarocks_bin, allow_custom)
             if not ok then os.exit(1) end
         else
-            ensure_rocks_installed(conf, true, false, allow_custom)
+            ensure_rocks_installed(conf, true, false, allow_custom, false)
         end
+
+    elseif sub == "verify" then
+        ensure_rocks_installed(conf, false, false, allow_custom, true)
+        success("All LuaRocks dependencies match tauri.lock SHA-256 checksums.")
 
     elseif sub == "list" then
         info("Hermetic LuaRocks tree: " .. rocks_dir)
@@ -1281,6 +1472,41 @@ end
 -- ==========================================================
 -- Command: DEV
 -- ==========================================================
+local function validate_dev_url(dev_url)
+    if type(dev_url) ~= "string" or dev_url == "" then return false end
+    if dev_url:find("[%z%c%s\\@;&|`$><()!]") then return false end
+    return dev_url:match("^https?://[a-zA-Z0-9%.%-_]+:%d+/?$") ~= nil
+        or dev_url:match("^https?://[a-zA-Z0-9%.%-_]+/?$") ~= nil
+        or dev_url:match("^https?://%[::1%]:%d+/?$") ~= nil
+        or dev_url:match("^https?://%[::1%]/?$") ~= nil
+end
+
+local function is_pid_alive(pid)
+    if not pid or pid <= 0 then return false end
+    if ffi.os == "Windows" then
+        return true
+    end
+    return ffi.C.kill(pid, 0) == 0
+end
+
+local function terminate_pid(pid, kill_group)
+    if not pid or pid <= 0 then return end
+    if ffi.os == "Windows" then
+        os.execute(string.format("taskkill /F /T /PID %d >NUL 2>NUL", math.floor(pid)))
+        return
+    end
+    if kill_group then
+        pcall(function() ffi.C.kill(-pid, 15) end)
+    end
+    if ffi.C.kill(pid, 0) == 0 then
+        ffi.C.kill(pid, 15)
+        sleep_ms(50)
+        if ffi.C.kill(pid, 0) == 0 then
+            ffi.C.kill(pid, 9)
+        end
+    end
+end
+
 local function cmd_dev(args)
     local conf, conf_path = load_config()
     local app_name, version, identifier = get_app_meta(conf)
@@ -1288,8 +1514,7 @@ local function cmd_dev(args)
 
     info("Starting Tauri-Lua development for `" .. app_name .. "` v" .. version)
 
-    -- Ensure hermetic LuaRocks dependencies are synchronized
-    ensure_rocks_installed(conf, false, false, has_flag(args, "--allow-custom-server"))
+    ensure_rocks_installed(conf, false, false, has_flag(args, "--allow-custom-server"), false)
 
     local dev_url = build_conf.devUrl or build_conf.devPath
 
@@ -1300,7 +1525,7 @@ local function cmd_dev(args)
         local log_redirect = " > .dev_server.log 2>&1"
         local p
         if ffi.os == "Windows" then
-            p = io.popen("start /B " .. before_dev .. log_redirect)
+            p = io.popen('start /B "" ' .. before_dev .. log_redirect)
         else
             p = io.popen("(" .. before_dev .. ")" .. log_redirect .. " & echo $!")
         end
@@ -1311,7 +1536,7 @@ local function cmd_dev(args)
     end
 
     if dev_url and type(dev_url) == "string" and dev_url ~= "" then
-        if not dev_url:match("^https?://[a-zA-Z0-9%.%-_]+:%d+/?$") and not dev_url:match("^https?://[a-zA-Z0-9%.%-_]+/?$") then
+        if not validate_dev_url(dev_url) then
             error("Invalid or insecure devUrl format in configuration: " .. tostring(dev_url))
         end
         info("Waiting for dev server at " .. dev_url .. " ...")
@@ -1324,7 +1549,7 @@ local function cmd_dev(args)
                 ready = true
                 break
             end
-            ffi.C.usleep(500000) -- 500ms
+            sleep_ms(500)
         end
         if ready then
             success("Dev server is ready!")
@@ -1398,13 +1623,11 @@ local function cmd_dev(args)
 
     local function spawn_app()
         running(bin_path)
-        -- TAURILUA_DEV=1 activates cwd-relative module discovery (./plugins, ../lua-tauri-plugins, etc.)
-        -- which is deliberately excluded from release builds for security.
         local p
         if ffi.os == "Windows" then
-            p = io.popen("set TAURILUA_DEV=1 && start /B " .. shell_quote(bin_path))
+            p = io.popen('set TAURILUA_DEV=1 && start /B "" ' .. shell_quote(bin_path))
         else
-            p = io.popen("TAURILUA_DEV=1 " .. shell_quote(bin_path) .. " > /dev/null 2>&1 & echo $!")
+            p = io.popen("TAURILUA_DEV=1 " .. shell_quote(bin_path) .. " < /dev/null & echo $!")
         end
         local pid = p and tonumber(p:read("*l"))
         if p then p:close() end
@@ -1417,35 +1640,16 @@ local function cmd_dev(args)
     local function cleanup()
         io.stdout:write("\n")
         info("Shutting down development processes...")
-        if app_pid and ffi.C.kill(app_pid, 0) == 0 then
-            ffi.C.kill(app_pid, 15)
-            ffi.C.usleep(50000)
-            if ffi.C.kill(app_pid, 0) == 0 then
-                ffi.C.kill(app_pid, 9)
-            end
-        end
-        if dev_server_pid then
-            if ffi.os ~= "Windows" then
-                pcall(function() ffi.C.kill(-dev_server_pid, 15) end)
-            end
-            if ffi.C.kill(dev_server_pid, 0) == 0 then
-                ffi.C.kill(dev_server_pid, 15)
-                ffi.C.usleep(50000)
-                if ffi.C.kill(dev_server_pid, 0) == 0 then
-                    ffi.C.kill(dev_server_pid, 9)
-                end
-            end
-        end
+        terminate_pid(app_pid, false)
+        terminate_pid(dev_server_pid, true)
         pcall(function() os.remove(".dev_server.log") end)
         os.exit(0)
     end
 
-    -- Run watch loop
     while true do
-        ffi.C.usleep(300000) -- poll every 300ms
+        sleep_ms(300)
 
-        -- Check if child application process is still alive
-        if app_pid and ffi.C.kill(app_pid, 0) ~= 0 then
+        if app_pid and not is_pid_alive(app_pid) then
             info("Application closed, stopping dev session.")
             cleanup()
         end
@@ -1467,14 +1671,8 @@ local function cmd_dev(args)
 
         if changed_file then
             log_tag("Reload", colors.magenta, "Detected change in " .. changed_file .. ", reloading backend...")
-            if app_pid and ffi.C.kill(app_pid, 0) == 0 then
-                ffi.C.kill(app_pid, 15)
-                ffi.C.usleep(50000)
-                if ffi.C.kill(app_pid, 0) == 0 then
-                    ffi.C.kill(app_pid, 9)
-                end
-            end
-            ffi.C.usleep(50000) -- 50ms pause
+            terminate_pid(app_pid, false)
+            sleep_ms(50)
             app_pid = spawn_app()
         end
     end
@@ -1549,9 +1747,7 @@ local function cmd_build(args)
             exec("cp -r src-tauri/binaries " .. shell_quote(res_dir .. "/binaries"))
             exec("rm -f " .. shell_quote(res_dir .. "/binaries") .. "/*-linux-* 2>/dev/null || true")
             exec("rm -f " .. shell_quote(res_dir .. "/binaries") .. "/*.exe 2>/dev/null || true")
-            if file_exists("src-tauri/binaries/.env") then
-                exec("cp " .. shell_quote("src-tauri/binaries/.env") .. " " .. shell_quote(res_dir .. "/binaries/.env") .. " 2>/dev/null || true")
-            end
+            exec("rm -f " .. shell_quote(res_dir .. "/binaries/.env") .. " " .. shell_quote(res_dir .. "/binaries") .. "/.env.* 2>/dev/null || true")
         end
 
         if file_exists("src-tauri/plugins") then
@@ -1620,35 +1816,61 @@ local function cmd_build(args)
             end
         end
 
+        local inner_sign_opts = "--force"
+        if sign_identity ~= "-" then
+            inner_sign_opts = inner_sign_opts .. " --options runtime --timestamp"
+        end
         if file_exists(macos_dir .. "/libtaurilua.dylib") then
             bundle_macos_luajit(macos_dir, macos_dir .. "/libtaurilua.dylib")
         end
         if file_exists(macos_dir .. "/libluajit-5.1.dylib") then
-            exec("codesign --force --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_dir .. "/libluajit-5.1.dylib") .. " 2>/dev/null || true")
+            exec("codesign " .. inner_sign_opts .. " --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_dir .. "/libluajit-5.1.dylib"))
         end
         if file_exists(macos_dir .. "/libtaurilua.dylib") then
-            exec("codesign --force --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_dir .. "/libtaurilua.dylib") .. " 2>/dev/null || true")
+            exec("codesign " .. inner_sign_opts .. " --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_dir .. "/libtaurilua.dylib"))
         end
         local p_dylibs = io.popen("find " .. shell_quote(res_dir) .. " -type f \\( -name '*.dylib' -o -name '*.so' \\) 2>/dev/null")
         if p_dylibs then
             for dylib_path in p_dylibs:lines() do
                 if dylib_path ~= "" then
-                    exec("codesign --force --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(dylib_path) .. " 2>/dev/null || true")
+                    exec("codesign " .. inner_sign_opts .. " --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(dylib_path))
                 end
             end
             p_dylibs:close()
         end
+        if file_exists(res_dir .. "/binaries") then
+            local p_bins = io.popen("find " .. shell_quote(res_dir .. "/binaries") .. " -type f 2>/dev/null")
+            if p_bins then
+                for bpath in p_bins:lines() do
+                    if bpath ~= "" and not bpath:match("%.env$") then
+                        local pf = io.popen("file -b " .. shell_quote(bpath) .. " 2>/dev/null")
+                        local fdesc = pf and pf:read("*l") or ""
+                        if pf then pf:close() end
+                        if fdesc:find("Mach%-O") then
+                            exec("codesign " .. inner_sign_opts .. " --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(bpath))
+                        end
+                    end
+                end
+                p_bins:close()
+            end
+        end
 
         local sign_opts = "--force"
         if sign_identity ~= "-" then
-            sign_opts = sign_opts .. " --options runtime"
+            sign_opts = sign_opts .. " --options runtime --timestamp"
         end
-        if file_exists("src-tauri/entitlements.plist") then
+        local entitlements_path = mac_conf.entitlements
+        if entitlements_path and entitlements_path ~= "" and file_exists(entitlements_path) then
+            sign_opts = sign_opts .. " --entitlements " .. shell_quote(entitlements_path)
+        elseif file_exists("src-tauri/entitlements.plist") then
             sign_opts = sign_opts .. " --entitlements " .. shell_quote("src-tauri/entitlements.plist")
         elseif file_exists(ENGINE_ROOT .. "/src-tauri/entitlements.plist") then
             sign_opts = sign_opts .. " --entitlements " .. shell_quote(ENGINE_ROOT .. "/src-tauri/entitlements.plist")
         end
-        exec("codesign " .. sign_opts .. " --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_bundle_dir) .. " 2>/dev/null || codesign --force --sign - " .. shell_quote(macos_bundle_dir) .. " 2>/dev/null || true")
+        exec("codesign " .. sign_opts .. " --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(macos_bundle_dir))
+        if sign_identity ~= "-" then
+            exec("codesign --verify --deep --strict " .. shell_quote(macos_bundle_dir))
+        end
 
         local raw_arch, deb_arch = detect_arch()
         local dmg_file = dmg_dir .. "/" .. app_name .. "_" .. version .. "_" .. raw_arch .. ".dmg"
@@ -1663,6 +1885,9 @@ local function cmd_build(args)
             exec("hdiutil create -volname " .. shell_quote(app_name) .. " -srcfolder " .. shell_quote(dmg_stage) .. " -ov -format UDZO " .. shell_quote(dmg_file) .. " > /dev/null 2>&1")
         end
         exec("rm -rf " .. shell_quote(dmg_stage))
+        if sign_identity ~= "-" then
+            exec("codesign --force --timestamp --sign " .. shell_quote(sign_identity) .. " " .. shell_quote(dmg_file))
+        end
 
         success("Finished 2 bundles at:")
         io.stdout:write("        " .. colors.green .. macos_bundle_dir .. colors.reset .. "\n")
@@ -1686,21 +1911,20 @@ local function cmd_build(args)
 
         if file_exists("build/libtaurilua.so") then
             exec("cp build/libtaurilua.so " .. shell_quote(deb_dir .. "/usr/bin/") .. " 2>/dev/null || true")
-            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/lib") .. " && cp build/libtaurilua.so " .. shell_quote(deb_dir .. "/usr/lib/") .. " 2>/dev/null || true")
+            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/lib/" .. deb_pkg_name) .. " && cp build/libtaurilua.so " .. shell_quote(deb_dir .. "/usr/lib/" .. deb_pkg_name .. "/"))
         end
         exec("cp -r " .. shell_quote(frontend_dist) .. "/* " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/" .. frontend_dist .. "/"))
 
         if file_exists("src-tauri/binaries") then
             info("Packaging native sidecar binaries into Debian package...")
-            exec("mkdir -p " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries"))
-            exec("cp -r src-tauri/binaries/* " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/") .. " 2>/dev/null || true")
-            exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/*-darwin-* 2>/dev/null || true")
-            exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/*-macos-* 2>/dev/null || true")
-            exec("rm -f " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/*.exe 2>/dev/null || true")
-            if file_exists("src-tauri/binaries/.env") then
-                exec("cp " .. shell_quote("src-tauri/binaries/.env") .. " " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries/.env") .. " 2>/dev/null || true")
-            end
-            exec("chmod +x " .. shell_quote(deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries") .. "/* 2>/dev/null || true")
+            local linux_bins = deb_dir .. "/usr/share/" .. deb_pkg_name .. "/binaries"
+            exec("mkdir -p " .. shell_quote(linux_bins))
+            exec("cp -r src-tauri/binaries/* " .. shell_quote(linux_bins .. "/") .. " 2>/dev/null || true")
+            exec("rm -f " .. shell_quote(linux_bins) .. "/*-darwin-* 2>/dev/null || true")
+            exec("rm -f " .. shell_quote(linux_bins) .. "/*-macos-* 2>/dev/null || true")
+            exec("rm -f " .. shell_quote(linux_bins) .. "/*.exe 2>/dev/null || true")
+            exec("rm -f " .. shell_quote(linux_bins .. "/.env") .. " " .. shell_quote(linux_bins) .. "/.env.* 2>/dev/null || true")
+            exec("find " .. shell_quote(linux_bins) .. " -maxdepth 1 -type f ! -name '*.env' -exec chmod +x {} + 2>/dev/null || true")
         end
 
         if file_exists("src-tauri/plugins") then
@@ -1758,27 +1982,29 @@ Description: %s built with Tauri-Lua
 ]], deb_pkg_name, version, deb_arch, app_name)
 
         write_file(deb_dir .. "/DEBIAN/control", control)
-        exec("dpkg-deb --build " .. shell_quote(deb_dir) .. " " .. shell_quote(target_dir .. "/deb"))
+        exec("dpkg-deb --root-owner-group --build " .. shell_quote(deb_dir) .. " " .. shell_quote(target_dir .. "/deb"))
         success("Finished bundle at " .. target_dir .. "/deb")
 
     elseif os_name == "Windows" then
-        local win_dir = target_dir .. "\\windows\\" .. app_name .. "-standalone"
+        local win_dir = assert_safe_win_path(target_dir .. "\\windows\\" .. app_name .. "-standalone")
+        local win_dist = assert_safe_win_path(frontend_dist)
         info("Bundling Windows Standalone...")
-        exec('mkdir "' .. win_dir .. '" 2>NUL || rem')
+        make_dir(win_dir)
         exec('copy build\\Release\\tauri_app.exe "' .. win_dir .. '\\" 2>NUL || copy build\\tauri_app.exe "' .. win_dir .. '\\"')
         exec('copy build\\Release\\taurilua.dll "' .. win_dir .. '\\" 2>NUL || copy build\\taurilua.dll "' .. win_dir .. '\\" 2>NUL || rem')
-        -- Bundle LuaJIT DLL (lua51.dll / luajit.dll) so the standalone runs on machines without a developer toolchain
         exec('copy build\\Release\\lua51.dll "' .. win_dir .. '\\" 2>NUL || copy build\\lua51.dll "' .. win_dir .. '\\" 2>NUL || copy build\\Release\\luajit.dll "' .. win_dir .. '\\" 2>NUL || copy build\\luajit.dll "' .. win_dir .. '\\" 2>NUL || rem')
         local luajit_env = os.getenv("LUAJIT_ROOT")
-        if luajit_env then
-            exec('copy "' .. luajit_env .. '\\bin\\lua51.dll" "' .. win_dir .. '\\" 2>NUL || copy "' .. luajit_env .. '\\lua51.dll" "' .. win_dir .. '\\" 2>NUL || rem')
+        if luajit_env and luajit_env ~= "" then
+            local safe_lj = assert_safe_win_path(luajit_env)
+            exec('copy "' .. safe_lj .. '\\bin\\lua51.dll" "' .. win_dir .. '\\" 2>NUL || copy "' .. safe_lj .. '\\lua51.dll" "' .. win_dir .. '\\" 2>NUL || rem')
         end
-        exec('xcopy /E /I "' .. frontend_dist .. '" "' .. win_dir .. '\\' .. frontend_dist .. '"')
+        exec('xcopy /E /I "' .. win_dist .. '" "' .. win_dir .. '\\' .. win_dist .. '"')
 
         if file_exists("src-tauri\\binaries") or file_exists("src-tauri/binaries") then
             local bsrc = file_exists("src-tauri\\binaries") and "src-tauri\\binaries" or "src-tauri/binaries"
             info("Packaging native sidecar binaries into Windows standalone bundle...")
             copy_dir_recursive(bsrc, win_dir .. "\\binaries")
+            exec('del /F /Q "' .. win_dir .. '\\binaries\\.env" "' .. win_dir .. '\\binaries\\.env.*" 2>NUL || rem')
         end
 
         if file_exists("src-tauri\\plugins") or file_exists("src-tauri/plugins") then
@@ -2008,7 +2234,7 @@ app:create_main_window()
                     "dialog:message"
                 },
                 scope = {
-                    "$APPDATA/**"
+                    "$APPDATA/com." .. app_name .. ".app/**"
                 }
             }
         }
@@ -2364,9 +2590,9 @@ streamBtn.addEventListener('click', async () => {
             devDependencies = {
                 ["@types/react"] = "^18.3.5",
                 ["@types/react-dom"] = "^18.3.0",
-                ["@vitejs/plugin-react"] = "^4.3.1",
-                typescript = "^5.5.3",
-                vite = "^5.4.2"
+                ["@vitejs/plugin-react"] = "^4.3.4",
+                typescript = "^5.7.3",
+                vite = "^6.2.6"
             }
         }
         if use_tailwind then
@@ -2441,7 +2667,7 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
 ]=]
         write_file(app_name .. "/src/main.tsx", main_tsx)
 
-        local app_tsx = [=[import React, { useState } from 'react';
+        local app_tsx = [=[import { useState } from 'react';
 
 declare global {
   interface Window {
@@ -2574,10 +2800,10 @@ export default App;
                 vue = "^3.4.38"
             },
             devDependencies = {
-                ["@vitejs/plugin-vue"] = "^5.1.2",
-                typescript = "^5.5.3",
-                vite = "^5.4.2",
-                ["vue-tsc"] = "^2.1.4"
+                ["@vitejs/plugin-vue"] = "^5.2.3",
+                typescript = "^5.7.3",
+                vite = "^6.2.6",
+                ["vue-tsc"] = "^2.2.8"
             }
         }
         if use_tailwind then
@@ -2586,6 +2812,26 @@ export default App;
             vue_pkg.devDependencies["autoprefixer"] = "^10.4.20"
         end
         write_file(app_name .. "/package.json", json.encode(vue_pkg))
+
+        local vue_tsconfig = [=[{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "preserve",
+    "strict": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"]
+}
+]=]
+        write_file(app_name .. "/tsconfig.json", vue_tsconfig)
 
         local vite_conf = [=[import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
@@ -2743,10 +2989,10 @@ const handleStream = async () => {
                 ["tauri:build"] = "./lua-tauri build"
             },
             devDependencies = {
-                ["@sveltejs/vite-plugin-svelte"] = "^3.1.2",
+                ["@sveltejs/vite-plugin-svelte"] = "^4.0.4",
                 svelte = "^4.2.19",
-                typescript = "^5.5.3",
-                vite = "^5.4.2"
+                typescript = "^5.7.3",
+                vite = "^6.2.6"
             }
         }
         if use_tailwind then
@@ -2755,6 +3001,24 @@ const handleStream = async () => {
             svelte_pkg.devDependencies["autoprefixer"] = "^10.4.20"
         end
         write_file(app_name .. "/package.json", json.encode(svelte_pkg))
+
+        local svelte_tsconfig = [=[{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.svelte"]
+}
+]=]
+        write_file(app_name .. "/tsconfig.json", svelte_tsconfig)
 
         local vite_conf = [=[import { defineConfig } from 'vite';
 import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
@@ -2930,20 +3194,38 @@ export default {
         write_file(app_name .. "/postcss.config.js", postcss_config)
     end
 
-    -- 5. .gitignore
+    if template ~= "vanilla" and file_exists(ENGINE_ROOT .. "/types/tauri-lua.d.ts") then
+        local dts = read_file(ENGINE_ROOT .. "/types/tauri-lua.d.ts")
+        if dts then
+            write_file(app_name .. "/src/tauri-lua.d.ts", dts)
+        end
+    end
+
     local gitignore = [[node_modules/
 dist/
 build/
 target/
+.rocks/
+src-tauri/.rocks/
+.env
+.env.*
 .DS_Store
 *.log
 ]]
     write_file(app_name .. "/.gitignore", gitignore)
 
-    -- 6. lua-tauri local launcher script
     local launcher_script = [=[#!/usr/bin/env bash
 set -e
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+    TARGET="$(readlink "$SOURCE")"
+    case "$TARGET" in
+        /*) SOURCE="$TARGET" ;;
+        *)  SOURCE="$DIR/$TARGET" ;;
+    esac
+done
+PROJECT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 ENGINE_PATH="${TAURI_LUA_ROOT}"
 
 if [ -z "$ENGINE_PATH" ] || [ ! -d "$ENGINE_PATH" ]; then
@@ -3011,7 +3293,7 @@ local function cmd_init(args)
                     "dialog:message"
                 },
                 scope = {
-                    "$APPDATA/**"
+                    "$APPDATA/com.mytauriapp.dev/**"
                 }
             }
         }
@@ -3096,17 +3378,20 @@ app:create_main_window()
         <button id="btn">Call Backend Command</button>
         <div id="output"></div>
     </div>
-    <script>
-        document.getElementById('btn').addEventListener('click', async () => {
-            const res = await window.__TAURI__.invoke('greet', { name: 'Developer' });
-            document.getElementById('output').textContent = res;
-        });
-    </script>
+    <script src="main.js"></script>
 </body>
 </html>
 ]]
         write_file("src/index.html", sample_html)
-        success("Created src/index.html")
+        if not file_exists("src/main.js") then
+            local sample_js = [[document.getElementById('btn').addEventListener('click', async () => {
+    const res = await window.__TAURI__.invoke('greet', { name: 'Developer' });
+    document.getElementById('output').textContent = res;
+});
+]]
+            write_file("src/main.js", sample_js)
+        end
+        success("Created src/index.html and src/main.js")
     end
 
     success("Project initialized! Run `./lua-tauri dev` to start developing.")
@@ -3206,6 +3491,10 @@ if _G.TAURI_CLI_TEST_MODE then
     return {
         json = json,
         shell_quote = shell_quote,
+        sha256_hex = sha256_hex,
+        is_symlink = is_symlink,
+        validate_app_meta = validate_app_meta,
+        validate_dev_url = validate_dev_url,
         parse_rock_server_url = parse_rock_server_url,
         validate_rock_server = validate_rock_server,
         validate_rock_name = validate_rock_name,

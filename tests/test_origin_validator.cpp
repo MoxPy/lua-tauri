@@ -1,3 +1,4 @@
+#undef NDEBUG
 #if defined(__has_include)
   #if __has_include("origin_check.hpp")
     #include "origin_check.hpp"

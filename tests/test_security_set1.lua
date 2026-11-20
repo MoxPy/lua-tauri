@@ -454,6 +454,97 @@ do
         app_any_git.security:assert_args("git", { "-c", "core.fsmonitor=calc.exe" })
     end)
     check("Dangerous git argument ('-c') is blocked even with any_args = true", not ok_dang and err_dang:find("dangerous") ~= nil)
+
+    local ok_any_prog = pcall(function()
+        app_any_git.security:assert_program("git")
+    end)
+    check("Phase 1: assert_program succeeds when any_args = true", ok_any_prog)
+
+    local ok_nul_arg = pcall(function()
+        app_any_git.security:assert_args("git", { "status\0--exec" })
+    end)
+    check("Phase 1: NUL byte in shell args rejected", not ok_nul_arg)
+
+    local ok_git_C = pcall(function()
+        app_any_git.security:assert_args("git", { "-C", "/tmp", "status" })
+    end)
+    check("Phase 1: git -C blocked", not ok_git_C)
+end
+
+print("\n7. Phase 1 Hardening Regression Tests:")
+do
+    local cwd = io.popen("pwd"):read("*l") or "."
+    local temp_root = cwd .. "/build/tauri_phase1_" .. tostring(os.time())
+    os.execute("mkdir -p " .. temp_root .. "/scope/sub " .. temp_root .. "/outside")
+    local f_in = io.open(temp_root .. "/scope/hello.txt", "wb")
+    if f_in then f_in:write("hi") f_in:close() end
+    os.execute("ln -s " .. temp_root .. "/outside/new_secret.txt " .. temp_root .. "/scope/dangling_out.txt 2>/dev/null")
+
+    local app_p1 = tauri.new({
+        security = {
+            capabilities = { "fs:read-text-file", "fs:write-text-file", "fs:read-dir", "shell:default", "window:*" },
+            scope = { temp_root .. "/scope/**", "$APPDATA/**" }
+        }
+    })
+
+    local ok_dangling = pcall(function()
+        app_p1.security:assert_scope(temp_root .. "/scope/dangling_out.txt", app_p1.base_paths)
+    end)
+    check("Phase 1: Dangling symlink escaping scope is denied", not ok_dangling)
+
+    local ok_empty_appdata = pcall(function()
+        app_p1.security:assert_scope("/etc/passwd", { home = "/tmp", appData = "", desktop = "/tmp" })
+    end)
+    check("Phase 1: Empty APPDATA does not widen $APPDATA/** to root", not ok_empty_appdata)
+
+    local ok_shell_def = pcall(function()
+        app_p1.security:assert_capability("shell:execute")
+    end)
+    check("Phase 1: shell:default does not grant shell:execute", not ok_shell_def)
+
+    local ok_win_star = pcall(function()
+        app_p1.security:assert_capability("window:create:external")
+    end)
+    check("Phase 1: window:* grants window:create:external", ok_win_star)
+
+    local ok_dir, dir_entries = pcall(function()
+        return app_p1.commands["tauri:fs:read_dir"]({ path = temp_root .. "/scope" })
+    end)
+    if ok_dir and type(dir_entries) == "table" then
+        local found_hello = false
+        local found_sub = false
+        for _, e in ipairs(dir_entries) do
+            if e.name == "hello.txt" and e.isDirectory == false then found_hello = true end
+            if e.name == "sub" and e.isDirectory == true then found_sub = true end
+        end
+        check("Phase 1: tauri:fs:read_dir returns accurate native entries", found_hello and found_sub)
+    end
+
+    os.execute("rm -rf " .. temp_root)
+
+    check("Phase 1: SSRF blocks unbracketed IPv6 fe80::1", tauri.is_ssrf_forbidden("fe80::1"))
+    check("Phase 1: SSRF blocks unbracketed IPv6 fd00:ec2::254", tauri.is_ssrf_forbidden("fd00:ec2::254"))
+    check("Phase 1: SSRF blocks [0::1]", tauri.is_ssrf_forbidden("[0::1]"))
+    check("Phase 1: SSRF blocks [0:0:0:0:0:ffff:7f00:1]", tauri.is_ssrf_forbidden("[0:0:0:0:0:ffff:7f00:1]"))
+    check("Phase 1: SSRF blocks [64:ff9b::127.0.0.1]", tauri.is_ssrf_forbidden("[64:ff9b::127.0.0.1]"))
+    check("Phase 1: SSRF blocks abbreviated IPv4 127.1", tauri.is_ssrf_forbidden("127.1"))
+    check("Phase 1: SSRF blocks hex IPv4 0x7f.0.0.1", tauri.is_ssrf_forbidden("0x7f.0.0.1"))
+    check("Phase 1: SSRF blocks multicast 224.0.0.1", tauri.is_ssrf_forbidden("224.0.0.1"))
+    check("Phase 1: SSRF blocks metadata.goog", tauri.is_ssrf_forbidden("metadata.goog"))
+    check("Phase 1: SSRF allows public IPv6 2606:4700:4700::1111", not tauri.is_ssrf_forbidden("2606:4700:4700::1111"))
+
+    check("Phase 1: is_db_allowed blocks sqlite:file:/etc/passwd", not tauri.is_db_allowed("sqlite:file:/etc/passwd", { "sqlite:*" }))
+    check("Phase 1: is_db_allowed blocks @ host confusion", not tauri.is_db_allowed("postgres://readonly@analytics.company.com@evil.com/db", { "postgres://readonly@analytics.company.com/*" }))
+    check("Phase 1: mask_db_uri masks password containing @", tauri.mask_db_uri("postgres://admin:p@ss@db.local:5432/app") == "postgres://admin:***@db.local:5432/app")
+
+    local deep_tbl = {}
+    local cur = deep_tbl
+    for _ = 1, 160 do
+        cur.next = {}
+        cur = cur.next
+    end
+    local ok_deep = pcall(function() tauri.json.encode(deep_tbl) end)
+    check("Phase 1: json.encode rejects deep recursion (>128)", not ok_deep)
 end
 
 print("\n=======================================================")

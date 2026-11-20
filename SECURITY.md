@@ -1,131 +1,108 @@
 # Security Policy & Threat Model
 
 > [!NOTE]
-> **Experimental Architecture Notice**
-> Tauri-Lua is an independent, research-oriented desktop runtime combining LuaJIT with a minimal C++17 native bridge and OS-native webviews. This document describes the implemented threat model, defense-in-depth boundaries, platform verification status, and responsible disclosure procedures.
+> **Security Architecture Overview**
+> Tauri-Lua combines LuaJIT with a C++17 native bridge and OS-native webviews. This document describes the implemented threat model, defense-in-depth boundaries, compile-time release fuses, platform verification matrix, and responsible disclosure procedures.
 
 ---
 
 ## 1. Threat Model & Security Boundaries
 
 ### Authoritative Boundary: Native Origin & Navigation Gating
-The primary and authoritative security boundary in Tauri-Lua is enforced at the native C++ level on every incoming navigation and IPC message (`SecurityPolicy::is_navigation_allowed` and `OriginValidator::is_allowed`):
-* **Release Mode:** Only canonical application schemes (`tauri://localhost`, `https://tauri.localhost`) are permitted. All remote web origins, arbitrary localhost ports, and userinfo-spoofed origins (e.g. `http://localhost:80@attacker.com`) are unconditionally rejected.
-* **Dev Mode (`TAURILUA_DEV=1`):** Navigation is permitted to the configured development server (e.g. `http://localhost:1420` or `http://127.0.0.1:1420`). Port and host matching is strictly validated.
-* **External URLs:** Navigations to external web origins are intercepted and blocked from the webview context. Any external URL opening must be explicitly delegated via host capabilities to the user's default operating system browser.
+The primary and authoritative security boundary is enforced at the native C++ level on every incoming navigation and IPC message (`SecurityPolicy::is_navigation_allowed` and `OriginValidator::is_allowed`):
+* **Release Mode:** Only canonical application origins (`tauri://localhost`, `https://tauri.localhost`) are permitted. All remote web origins, arbitrary localhost ports, backslash authorities, and userinfo-spoofed origins (e.g. `http://localhost:80@attacker.com`) are unconditionally rejected, while legitimate `@` characters in paths/queries (e.g. `/@vite/client`, `?email=a@b.com`) are permitted.
+* **Dev Mode (`TAURILUA_DEV=1`):** Navigation is permitted to the configured development server (e.g. `http://localhost:5173`, `http://127.0.0.1:5173`, or `http://[::1]:5173`). Host and port matching are strictly enforced.
+* **Compile-Time Release Fuse (`-DTAURILUA_RELEASE_FUSE=ON`):** Production builds produced by `lua-tauri build` compile with `TAURILUA_RELEASE_FUSE`, permanently disabling `TAURILUA_DEV`, `TAURI_LUA_ROOT`, CWD asset resolution, and relative `ffi.load` paths regardless of environment variables at runtime.
+* **External Windows:** Windows created with `window:create:external` pointing to untrusted origins do **not** receive `window.__TAURI_TOKEN__`, the client IPC bridge script, or `__TAURI_RAW_INVOKE__` bindings.
 
 ### Session Token Scope (`window.__TAURI_TOKEN__`)
-* A cryptographically secure 256-bit session token (64 hex characters) is generated on startup via the host operating system CSPRNG:
-  - **macOS / BSD:** `arc4random_buf(buf, sizeof(buf))`
-  - **Windows:** `BCryptGenRandom(NULL, buf, sizeof(buf), BCRYPT_USE_SYSTEM_PREFERRED_RNG)`
-  - **Linux / POSIX:** `getrandom(buf, sizeof(buf), 0)` with fallback to `/dev/urandom`
-  - *Fail-Closed:* If the operating system RNG fails or cannot provide entropy, the process immediately logs a critical error and terminates (`std::abort()`).
-* **Enforcement:** The session token is verified on every native IPC envelope using constant-time string comparison (`constant_time_eq`), strict whitespace boundary validation, and depth-aware RFC 8259 string parsing (`extract_json_string`), protecting against timing side-channel and injection attacks.
-* **Scope & Limitation:** This token acts as a defense-in-depth barrier against unauthorized child `<iframe>` elements and cross-origin subframes attempting to access native host APIs.
-* **Important:** The session token is **not** a same-origin sandbox boundary. Any script executing within the top-level document context (such as via an XSS flaw in frontend dependencies) can access `window.__TAURI_TOKEN__`. Same-origin isolation must always be protected with strict Content Security Policy headers (`script-src 'self'`).
+* A cryptographically secure 256-bit session token (64 hex characters) is generated on startup via the OS CSPRNG (`arc4random_buf` on macOS, `BCryptGenRandom` on Windows, `getrandom`/`/dev/urandom` on Linux). RNG failures abort the process immediately (fail-closed).
+* **Enforcement:** Verified on every native IPC envelope using constant-time comparison (`constant_time_eq`) and the unified strict RFC 8259 C++17 JSON parser (`src/json_parser.hpp`, depth cap `64`, zero infinite loops).
+* **Scope & Limitation:** The session token defends against unauthorized subframes and cross-origin contexts; it is **not** a same-origin sandbox against XSS inside the top-level document, which must be defended with strict CSP.
 
-### Frame Isolation & Webview Introspection
-Frame isolation is enforced via a combination of native webview engine hooks and declarative Content Security Policy:
-* **macOS (WebKit):** The native IPC bridge inspects `message.frameInfo.isMainFrame`. IPC messages originating from child iframes or nested browsing contexts are dropped at the native level, even if they share the application's origin.
-* **Windows (WebView2):** Incoming messages are gated via `SecurityPolicy::is_frame_source_allowed(source_u8, top_u8, ...)`. If a message originates from a subframe or unapproved frame source, it is rejected before payload extraction.
-* **Linux (WebKitGTK):** Navigation actions are evaluated through WebKit navigation policy decisions. Subframe framing attacks are mitigated by default CSP (`frame-src 'none'`, `frame-ancestors 'none'`).
+### Frame Isolation & Webview Security Controls
+* **macOS (WKWebView):** Enforces `message.frameInfo.isMainFrame`, Objective-C ARC (`-fobjc-arc`), `isKindOfClass:[NSString class]` checks, scoped `TauriWKWebView` subclassing (zero global method swizzling), HTTP CSP + `X-Content-Type-Options: nosniff` headers, and fail-closed `runOpenPanelWithParameters`.
+* **Windows (WebView2):** Enforces `SecurityPolicy::is_frame_source_allowed`, `add_FrameNavigationStarting`, `COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS`, fail-closed `WebMessageReceived`/`NavigationStarting`, and a mutex-protected dispatch queue (no raw `LPARAM` pointer dereferencing).
+* **Linux (WebKitGTK):** Enforces `decide-policy` fail-closed navigation gating, HTTP CSP + `nosniff` response headers on WebKitGTK 4.1+, `<meta>` CSP injection via linear HTML scanner (no `std::regex` ReDoS), and GLib-owned asset buffers (`g_malloc`/`g_free`).
 
 ---
 
 ## 2. Capabilities & Principle of Least Privilege
 
-Tauri-Lua adheres to a **Deny-by-Default** capability model:
-1. **Frontend IPC Restriction:** If `security.capabilities` is empty or omitted in `tauri.conf.json`, all frontend IPC invocations to host APIs fail closed with an explicit unauthorized capability error.
-2. **Backend vs Frontend Privilege Separation:** Backend code in `main.lua` runs with full LuaJIT/native privileges on the host. Frontend JavaScript running inside the webview is treated as untrusted and constrained by granted capabilities.
+Tauri-Lua enforces a **Deny-by-Default** capability model for frontend IPC:
+1. Empty or missing `security.capabilities` denies all frontend IPC invocations to built-in host APIs.
+2. Backend Lua code (`main.lua`) executes with host privileges; frontend JavaScript is treated as untrusted.
 
 ### Capability Presets & Semantics
 
 | Capability | Scope & Permissions Granted | Explicitly NOT Granted |
 | :--- | :--- | :--- |
-| **`core:default`** | Basic window manipulation (`window:show`, `window:hide`, `window:close`, `window:minimize`, `window:maximize`, `window:center`, `window:set_title`), theme querying, standard event emission/listening, and read-only shared state access (`state:get`). | Does **NOT** grant `state:set`, `window:create:external`, `updater:*`, `fs:*`, or `shell:*`. |
-| **`state:set`** | Modifying backend shared state from the frontend webview (`window.__TAURI__.core.invoke('state:set', ...)`). | Decoupled from `core:default` to enforce least-privilege security. |
-| **`fs:default`** | Read-only filesystem operations: `fs:read-text-file`, `fs:read-file`, `fs:read-dir`, `fs:exists`, `fs:stat`. | Does **NOT** grant `fs:write-text-file`, `fs:write-file`, or `fs:remove`. |
-| **`fs:remove`** | Explicit capability required to delete files or directories (`tauri:fs:remove`). | Cannot be exercised without matching filesystem scope. |
-| **`window:create`** | Creating new webview windows pointing to internal application routes (`tauri://localhost/*` or dev URL). | Does **NOT** grant loading external HTTP/HTTPS domains. |
-| **`window:create:external`** | Creating windows pointing to arbitrary external web URLs. | Requires explicit security review and deliberate opt-in. |
+| **`core:default`** | Window control (`window:create` internal, `close`, `minimize`, `maximize`, `show`, `hide`, `set_title`, `set_size`, `set_focus`), theme querying, event emit/listen, menus, shortcuts, tray, dialogs, paths, store, and read-only shared state (`state:get`). | Does **NOT** grant `state:set`, `state:delete`, `state:clear`, `window:create:external`, `updater:*`, `fs:*`, `clipboard:*`, or `shell:*`. |
+| **`state:set`** | Modifying shared backend state from the frontend. | Decoupled from `core:default` and `state:default`. |
+| **`fs:default`** | Read-only filesystem operations (`fs:read-text-file`, `fs:read-file`, `fs:read-dir`, `fs:exists`, `fs:stat`). | Does **NOT** grant `fs:write-text-file` or `fs:remove`. |
+| **`fs:remove`** | Deleting files within configured `security.scope`. | Denied unless explicitly granted. |
+| **`shell:execute`** | Executing allowlisted programs (`allowed_programs`). | `shell:default` does **NOT** act as a wildcard. |
+| **`clipboard:read-text` / `write-text`** | Granular clipboard read/write permissions. | `clipboard:default` does **NOT** act as a wildcard. |
+| **`window:create:external`** | Creating windows targeting external HTTP/HTTPS origins (without IPC bridge/token). | Denied under `core:default` and `window:default`. |
 
 ---
 
 ## 3. Subsystem Security Controls
 
 ### 1. Filesystem Scopes & Symlink Containment
-* **Deny-by-Default:** If `security.scope` is empty or omitted, all filesystem operations are rejected.
-* **Path Resolution & Canonicalization:** Both native C++ asset serving (`resolve_contained_asset` with automatic query and fragment stripping, `real_filesystem_path`) and Lua runtime operations (`platform_resolve_path`) canonicalize paths before evaluation.
-* **Symlink & Traversal Containment:** Symbolic links and relative directory traversal components (`../`, `/./`, `%2e%2e`) are dereferenced and verified against the canonical scope root. A target path is allowed only if it is strictly prefixed by the allowed directory path with a directory separator boundary (`/`), preventing sibling directory escapes (e.g., `/safe-dir` vs `/safe-dir-secret/`).
-* **Path Sanitization:** Paths containing embedded NUL bytes (`\0`), backslashes, colons, or malformed path separators are rejected immediately. Static asset queries (`?`) and fragments (`#`) are stripped prior to percent-decoding.
-* **Glob Semantics:**
-  - Single asterisk (`*`) matches characters within a single directory segment.
-  - Double asterisk (`**`) matches recursively across nested subdirectories.
+* **Deny-by-Default:** Empty `security.scope` denies all filesystem operations; empty `$APPDATA`/`$HOME`/`$DESKTOP` variables fail closed.
+* **Canonical Resolution & Dangling Symlinks:** `platform_resolve_path` resolves existing and dangling symlinks iteratively (up to 40 hops) and verifies parent directories, blocking symlink write escapes.
+* **Native I/O Primitives:** `tauri:fs:read_dir` uses C++ `platform_read_dir` (`std::filesystem::directory_iterator`, eliminating `struct dirent` ABI mismatches); `tauri:fs:write_text_file` uses `platform_fs_write_file` (`O_NOFOLLOW` on POSIX, reparse-point check on Windows); `tauri:fs:read_text_file` performs bounded chunked reads capped at 50 MB.
+* **Strict Glob Matching:** Scope pattern bases escape all Lua pattern metacharacters including `*`; single `*` matches one path segment, `**` matches recursively.
 
-### 2. Process Spawning (`shell:execute`)
-* **Direct Process Spawning:** Commands executed via `shell:execute` are launched directly using native operating system process APIs (`posix_spawnp` on POSIX, `CreateProcessW` on Windows) rather than an intermediate shell (`/bin/sh` or `cmd.exe`).
-* **Mandatory Program Allowlist:** The shell engine enforces a strict `allowed_programs` list. If missing or empty, all execution attempts are blocked.
-* **Per-Program Argument Gating:**
-  - Exact string configurations (e.g. `"git"`) permit execution only with empty argument lists.
-  - Configured argument allowlists (e.g. `{ name = "git", args = { "status", "version" } }`) permit only explicit whitelisted parameters.
-  - Blanket argument acceptance requires explicit `any_args = true` opt-in.
-* **Command Injection Protections (CWE-78):**
-  - Direct execution of `.bat` and `.cmd` script wrappers on Windows is blocked to prevent command interpreter argument injection.
-  - Dangerous program-specific injection parameters (e.g. `git -c`, `find -exec`) are detected and blocked even when `any_args = true` is configured.
-* **Bounded Output Streams:** Output capture is capped at 1 MB per command execution to prevent heap exhaustion or denial-of-service.
+### 2. Direct Process Spawning (`shell:execute`) & Native Sidecars
+* **Zero Subshell Execution:** Both `shell:execute` (`platform_process_spawn`) and sidecars (`platform_sidecar_spawn`) invoke `posix_spawnp` (POSIX) or `CreateProcessW` (Windows) directly without `/bin/sh` or `cmd.exe`.
+* **Environment Sanitization:** Child environments strip `LD_*`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `BASH_ENV`, `ENV`, `IFS`, `GIT_SSH_COMMAND`, `JAVA_TOOL_OPTIONS`, and similar injection variables. Sidecar secrets are passed via `envp`/`CREATE_UNICODE_ENVIRONMENT` and never exposed on command lines (`ps`).
+* **Argument & Extension Defenses:** Mandatory `allowed_programs` allowlist, NUL byte rejection in all arguments, dangerous flag blocking (`git -c`/`-C`/`--git-dir`/`--work-tree`, `find -exec`/`-okdir`, `ssh -F`/`ProxyCommand`/`LocalCommand`), and Windows wrapper/ADS blocking (`.bat`, `.cmd`, `.ps1`, `.vbs`, `.com`, `.hta`, `.wsf`, trailing dots, `::$DATA`).
+* **Fail-Safe `.env` Policy:** Release bundles unconditionally strip and exclude `.env` and `.env.*` across macOS, Linux, and Windows. Production sidecars load only private per-user overrides (`$APPDATA/<app>/.env`, mode `0600`) or explicit non-secret `sidecar.defaults.env` files.
 
-### 3. Application Updater
-* The application updater is **disabled for security reasons**.
-* Unauthenticated archive download and extraction has been completely removed from the runtime core. Calls to `tauri:updater:check` and `tauri:updater:install` fail closed with an explicit error.
+### 3. LuaRocks Supply Chain Integrity
+* **Pure FIPS 180-4 SHA-256:** Implemented natively in LuaJIT inside `cli/tauri.lua` (no shell pipelines, no DJB2 fallback, identical across macOS/Linux/Windows).
+* **Recursive Manifest Verification:** Walks all nested subdirectories in `rock_manifest.lua` and `rock_manifest.lib` and rejects any symlink inside `.rocks/`.
+* **Fail-Closed Lockfile:** `lua-tauri build`, `lua-tauri rocks verify`, and `lua-tauri rocks install --frozen-lockfile` fail closed on missing, corrupted, unpinned, or mismatched `tauri.lock` SHA-256 entries.
 
-### 4. Development Mode vs Release Isolation (`TAURILUA_DEV`)
-* **Release Mode:** The runtime does not resolve or load loose files from the current working directory (`CWD`) or bundle `Resources`. Scripts and configuration must be embedded into the binary as pre-compiled LuaJIT bytecode and compiled headers (`tauri_bc.h`, `main_bc.h`, `config_json.h`). `ResourceResolver::resolve_config_json(false, ...)` ignores any loose `tauri.conf.json` on disk to prevent unauthorized capability escalation.
-* **Release Packaging:** `lua-tauri build` strictly excludes plain-text Lua source files (`src-tauri/src/*`) and `tauri.conf.json` from the output application bundle.
-* **macOS Hardened Runtime & Code Signing:**
-  - `src-tauri/entitlements.plist` strictly enables only `com.apple.security.cs.allow-jit` (required for LuaJIT JIT compiler pages) and `com.apple.security.network.client`. Insecure entitlements (`com.apple.security.cs.allow-unsigned-executable-memory` and `com.apple.security.cs.disable-library-validation`) are removed.
-  - Release packaging signs all bundled dynamic libraries (`.dylib`, `.so`) individually before signing the application bundle with `--options runtime` and `--entitlements src-tauri/entitlements.plist`, avoiding deprecated `--deep`.
-* **Development Mode (`TAURILUA_DEV=1`):** Resolves local workspace scripts and assets for hot-reloading, allows connection to local development HTTP/WebSocket servers, and relaxes CSP `script-src` to include `'unsafe-inline'`.
+### 4. URL Parsing, SSRF & SQLite Scope Controls
+* Rejects userinfo (`@`), backslashes, whitespace, control characters, and invalid ports (`<1` or `>65535`).
+* Canonical IPv6 parser blocks loopback (`::1`, `0::1`), unspecified (`::`), IPv4-mapped (`::ffff:`), NAT64 (`64:ff9b::`), 6to4 (`2002::`), Teredo, ULA (`fc00::/7`), link-local (`fe80::/10`), site-local, and multicast (both bracketed and unbracketed).
+* Blocks abbreviated/hex/octal IPv4 (`127.1`, `0x7f.0.0.1`), RFC 6890 private/reserved ranges, and cloud metadata hostnames (`169.254.169.254`, `metadata.google.internal`, `metadata.goog`).
+* Blocks `sqlite:file:...`, `?`, `#`, traversal, and `@` authority confusion in `is_db_allowed`; redacts URI passwords containing `@` in `mask_db_uri`.
 
-### 5. URL Parsing & SSRF Mitigations
-* **Strict Authority Parsing:** Userinfo components (`@`) inside URL authorities are explicitly rejected to prevent authority-confusion attacks.
-* **IPv6 & Bracketed Host Handling:** URLs with bracketed IPv6 hosts (e.g. `[::1]`) are parsed and lowercased cleanly.
-* **SSRF Deny-by-Default Filter:** Outbound HTTP client requests strictly deny all loopback addresses (`127.0.0.0/8`, `::1`, `::`), unspecified addresses (`0.0.0.0/8`), private networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`), link-local/cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`), IPv6 link-local and unique local addresses (`fe80::/10`, `fc00::/7`, `fd00::/8`), trailing DNS dots, and hex/octal/integer formatted IP representations.
-* **SQLite Scope Containment:** Database URIs under `sqlite:*` are verified against relative directory traversal (`..`, `\`), root paths (`/`), and Windows drive letters to avoid arbitrary file database creation outside designated app scopes.
+### 5. Single-Instance IPC & Shared State
+* **POSIX Single-Instance:** User-private `$XDG_RUNTIME_DIR` or `~/.local/run` (`0700`, verified owner via `lstat`), `0600` socket permissions, fail-closed `getpeereid`/`SO_PEERCRED`, `SO_RCVTIMEO`, 64 KB cap, NUL rejection, and `poll()` + `join()` shutdown.
+* **Windows Single-Instance:** Per-user SID in pipe name, owner-only DACL (`D:(A;;GA;;;OW)`), `FILE_FLAG_FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS`, and 64 KB / NUL validation.
+* **Cross-Worker CAS State:** `State:update` uses C++ atomic version counters (`platform_state_get_version`) with typed booleans and `with_state_lock` exception safety.
 
-### 6. Shared State & Persistent Store Hardening
-* **Dynamic Buffer Allocation:** The native shared state bridge dynamically scales buffers for payloads exceeding 64 KB, preventing JSON truncation or data loss.
-* **Thread-Safe & Atomic Store:** File persistence for `app:store()` synchronizes mutations across native worker threads with `platform_state_lock()` and utilizes atomic temporary-file-and-rename writes (`.tmp` -> replace target) to ensure zero corruption across unexpected shutdowns.
-
-### 7. Native Webview Sandboxing & Objective-C Isolation
-* **No Global Swizzling:** Runtime Objective-C method swizzling on `WKWebView` and `WKWebViewConfiguration` has been replaced with scoped subclassing (`TauriWKWebView`) and explicit scheme handler attachment.
-* **Open Panel Gating:** The native webview delegate implements `runOpenPanelWithParameters` to fail closed (`completionHandler(nil)`), ensuring `<input type="file">` cannot bypass capability checks.
-* **CSP Comment Strip & Attribute Escaping:** Dynamic CSP meta injection strips HTML comments prior to evaluating existing meta tags, and escapes XML/HTML attribute characters to prevent injection attacks.
+### 6. Application Updater
+* Intentionally **disabled** (`Not Implemented`). Calls to `tauri:updater:check` and `tauri:updater:install` fail closed.
 
 ---
 
 ## 4. Platform Verification Matrix
 
-| Subsystem / Control | macOS (WebKit / Cocoa) | Linux (WebKitGTK / GTK3) | Windows (WebView2 / Win32) |
+| Subsystem / Control | macOS (WebKit) | Linux (WebKitGTK) | Windows (WebView2) |
 | :--- | :---: | :---: | :---: |
-| **Origin Gating & Navigation** | Verified (Native E2E) | Verified (Native Seams) | Verified (Native Seams) |
-| **IPC Session Token & Envelope** | Verified (Native E2E) | Verified (Native Seams) | Verified (Native Seams) |
-| **CSPRNG Implementation** | `arc4random_buf` | `getrandom` / `/dev/urandom` | `BCryptGenRandom` |
-| **Frame Isolation** | `frameInfo.isMainFrame` | CSP (`frame-src 'none'`) | `is_frame_source_allowed` |
-| **Symlink Containment** | Verified (Unit + E2E) | Verified (Unit + Seams) | Verified (Unit + Seams) |
-| **Shell Argument Validation** | Verified (Automated Suite) | Verified (Automated Suite) | Verified (Automated Suite) |
-| **RFC 8259 JSON Parser** | Verified (Automated Suite) | Verified (Automated Suite) | Verified (Automated Suite) |
-| **GUI Event Loop Verification** | Verified (macOS Sonoma+) | Requires Linux Display | Requires Windows Desktop |
-
-*Note on Seam Testing:* Platform-specific logic (Windows UTF-16 conversions, WebView2 JSON message extraction, Linux/Windows origin and frame source decision algorithms) is extracted into isolated headers (`src/ipc_envelope.hpp`, `src/origin_check.hpp`, `src/security_policy.hpp`, `src/asset_resolver.hpp`) and verified across unit test suites running under CTest. Full end-to-end GUI validation on Windows and Linux requires respective host display environments.
+| **Origin Gating & Navigation** | Implemented | Implemented | Implemented |
+| **IPC Session Token & Unified JSON** | Implemented | Implemented | Implemented |
+| **HTTP CSP + `nosniff` + `<meta>` CSP** | HTTP + `<meta>` | HTTP (4.1+) + `<meta>` | `<meta>` + `DENY_CORS` |
+| **Frame Isolation** | `isMainFrame` | CSP (`frame-src 'none'`) | `is_frame_source_allowed` + `FrameNavigationStarting` |
+| **Filesystem Sandbox & `platform_read_dir`** | Implemented | Implemented | Implemented |
+| **Shell-Free Sidecars & `shell:execute`** | Implemented | Implemented | Implemented |
+| **Native Menu Bar** | Implemented | Implemented | Implemented |
+| **System Tray** | Implemented | Not Implemented | Implemented |
+| **Global Shortcuts** | Stub | Stub | Implemented (Win32) |
+| **Deep Link Registration** | Info.plist | Desktop Entry | Implemented (HKCU Registry) |
+| **Clipboard Text / HTML / Image** | Text, HTML, Image | Text | Text, HTML |
+| **CI Matrix & ASan/UBSan** | GitHub Actions | GitHub Actions + ASan/UBSan | GitHub Actions |
 
 ---
 
 ## 5. Reporting a Vulnerability
 
-If you discover a security vulnerability in Tauri-Lua, please report it responsibly:
-* Open a private security advisory on GitHub or contact the maintainers directly.
-* **Include in your report:**
-  - Detailed description of the vulnerability and attack vector.
-  - Minimal reproducible demonstration or proof-of-concept.
-  - Affected platforms and configurations.
-* **Timeline:** Security reports are acknowledged within 48 hours, with patches prepared and reviewed prior to public advisory disclosure.
+Please report security vulnerabilities responsibly via GitHub Private Security Advisories rather than public issues:
+* Include attack vector, minimal reproduction, affected platforms, and build flags.
+* Reports are acknowledged within 48 hours, with coordinated fixes released prior to public disclosure.

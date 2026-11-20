@@ -1,3 +1,4 @@
+#undef NDEBUG
 #include <iostream>
 #include <cassert>
 #include <string>
@@ -14,18 +15,21 @@
     #include "asset_resolver.hpp"
     #include "security_policy.hpp"
     #include "ipc_envelope.hpp"
+    #include "json_parser.hpp"
   #elif __has_include("../src/origin_check.hpp")
     #include "../src/origin_check.hpp"
     #include "../src/resource_resolver.hpp"
     #include "../src/asset_resolver.hpp"
     #include "../src/security_policy.hpp"
     #include "../src/ipc_envelope.hpp"
+    #include "../src/json_parser.hpp"
   #else
     #include "src/origin_check.hpp"
     #include "src/resource_resolver.hpp"
     #include "src/asset_resolver.hpp"
     #include "src/security_policy.hpp"
     #include "src/ipc_envelope.hpp"
+    #include "src/json_parser.hpp"
   #endif
 #else
   #include "origin_check.hpp"
@@ -33,6 +37,7 @@
   #include "asset_resolver.hpp"
   #include "security_policy.hpp"
   #include "ipc_envelope.hpp"
+  #include "json_parser.hpp"
 #endif
 
 void test_origin_validator() {
@@ -379,6 +384,52 @@ void test_security_policy() {
     std::cout << "  -> PASSED" << std::endl;
 }
 
+void test_phase1_hardening() {
+    std::cout << "[Test] Phase 1 Hardening (Unified JSON, Origin @ in path, CSP scanner, MIME)..." << std::endl;
+
+    JsonVal val;
+    assert(!parse_json_strict("[a]", val));
+    assert(!parse_json_strict("{x}", val));
+    assert(!parse_json_strict("{\"a\":}", val));
+    assert(!parse_json_strict("{\"a\":1} trailing", val));
+    assert(!parse_json_strict("\"\\u0000\"", val));
+    assert(!parse_json_strict("\"\\uD800\"", val));
+
+    std::string deep;
+    for (int i = 0; i < 80; ++i) deep += '[';
+    for (int i = 0; i < 80; ++i) deep += ']';
+    assert(!parse_json_strict(deep, val, 64));
+
+    assert(parse_json_strict("{\"emoji\":\"\\uD83D\\uDE00\",\"ok\":true,\"n\":42}", val));
+    assert(val["emoji"].str() == "\xF0\x9F\x98\x80");
+    assert(val["ok"].boolean() == true);
+
+    assert(OriginValidator::is_allowed("http://localhost:5173/@vite/client", true, "http://localhost:5173"));
+    assert(OriginValidator::is_allowed("tauri://localhost/profile?email=a@b.com", false));
+    assert(OriginValidator::is_allowed("http://[::1]:5173/index.html", true, "http://localhost:5173"));
+    assert(!OriginValidator::is_allowed("http://localhost\\evil.com/", true, "http://localhost:5173"));
+    assert(!OriginValidator::is_allowed("http://localhost:80@evil.com/", true, "http://localhost:80"));
+
+    std::string default_csp = "default-src 'self';";
+    std::string trap_html = "<html><!-- <head> --><head><title>x</title></head></html>";
+    inject_csp_meta(trap_html, default_csp);
+    size_t meta_pos = trap_html.find("<meta http-equiv=\"Content-Security-Policy\"");
+    size_t comment_end = trap_html.find("-->");
+    assert(meta_pos != std::string::npos && comment_end != std::string::npos && meta_pos > comment_end);
+
+    std::string script_trap = "<html><head><script>var s = '<meta http-equiv=\"Content-Security-Policy\" content=\"none\">';</script></head></html>";
+    assert(!has_existing_csp_meta(script_trap));
+    inject_csp_meta(script_trap, default_csp);
+    assert(has_existing_csp_meta(script_trap));
+
+    assert(get_mime_type("font.woff2") == "font/woff2");
+    assert(get_mime_type("pic.webp") == "image/webp");
+    assert(get_mime_type("pic.avif") == "image/avif");
+    assert(get_mime_type("doc.pdf") == "application/pdf");
+
+    std::cout << "  -> PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "=== Running C++ Native Security Tests (Set 1 & Set 2) ===" << std::endl;
     test_origin_validator();
@@ -389,6 +440,7 @@ int main() {
     test_json_escaping();
     test_csp_injection();
     test_security_policy();
+    test_phase1_hardening();
     std::cout << "All C++ Native Security Tests PASSED!" << std::endl;
     return 0;
 }

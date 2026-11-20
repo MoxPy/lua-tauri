@@ -42,10 +42,12 @@ The table below documents the verification status and implementation state of ca
 | **Filesystem Access (`fs:*`)** | **Implemented** | **Implemented** | **Implemented** | Deny-by-default for empty scopes; canonical resolution; single (`*`) and recursive (`**`) globs; `fs:remove` requires explicit capability. |
 | **Desktop Notifications** | **Implemented** | **Implemented** | **Implemented** | macOS uses `UNUserNotificationCenter` with parameterized fallback; Linux uses `notify-send --`; Windows uses `Shell_NotifyIconW`. |
 | **System Theme & Events** | **Implemented** | **Implemented** | **Implemented** | System theme detection and window event dispatching across active windows. |
-| **System Tray & Menus** | **Implemented** | **Implemented** | **Implemented** | Native menu bars (Cocoa / GTK3 / Win32) and system tray icon support. |
-| **Process Spawning (`shell:execute`)** | **Implemented** | **Implemented** | **Implemented** | Mandatory `allowed_programs` allowlist, strict path matching (blocks path spoofing like `/tmp/cmd`), dangerous argument filtering (`git -c`, `--config-env`, etc.), sanitized environment, and 1 MB output cap. |
-| **Sidecars & Native Binaries** | **Implemented** | **Implemented** | **Experimental** | Bundles external executables from `src-tauri/binaries/` into `.app` and package distributions with automated code signing, release bundle isolation, `.env` exclusion, dynamic architecture detection, and signal-safe process tracking. |
-| **C Embedding (`libtaurilua`)** | **Implemented** | **Implemented** | **Implemented** | C ABI defined in `include/taurilua.h`; validated by `tests/smoke_test.c` and `examples/host_c/`. |
+| **System Tray & Menus** | **Implemented** | **Menus Implemented (Tray: N/A)** | **Implemented** | Native menu bars (Cocoa / GTK3 / Win32); system tray on macOS and Windows. |
+| **Process Spawning (`shell:execute`)** | **Implemented** | **Implemented** | **Implemented** | Mandatory `allowed_programs` allowlist, strict path matching, dangerous argument/extension filtering, sanitized `envp`, NUL rejection, and 1 MB output cap. |
+| **Sidecars & Native Binaries** | **Implemented** | **Implemented** | **Implemented** | Shell-free native spawning (`posix_spawnp` / `CreateProcessW`), sanitized environment, `0600` private logs, `.env` exclusion from release bundles, macOS Mach-O signing, and signal-safe PID tracking. |
+| **C Embedding (`libtaurilua`)** | **Implemented** | **Implemented** | **Implemented** | Versioned C ABI (`include/taurilua.h`) with `taurilua_register_command()`, full `taurilua_config_t` propagation to `IsolatePool`, `taurilua_last_error()`, and `tests/smoke_test.c`. |
+| **Global Shortcuts & Deep Links** | **Partial (Bundle/Info.plist)** | **Partial (.desktop)** | **Implemented (Win32/HKCU)** | Windows registers HKCU custom URL protocols (RFC 3986 validated) and hotkeys; macOS/Linux deep links use bundle metadata. |
+| **Clipboard (Text / HTML / Image)** | **Text, HTML, Image** | **Text** | **Text, HTML** | Native clipboard bridge; image clipboard currently implemented on macOS. |
 | **Application Updater** | **Not Implemented** | **Not Implemented** | **Not Implemented** | Disabled for security. Unauthenticated archive extraction removed; calls return a fail-closed error. |
 | **Companion Plugins (`sql`, `http`, etc.)** | **External** | **External** | **External** | Companion plugins are maintained in the separate [`lua-tauri-plugins`](https://github.com/MoxPy/lua-tauri-plugins) workspace. |
 
@@ -398,11 +400,13 @@ app:create_main_window()
 Invoke registered commands from any frontend framework using the standard Tauri IPC interface:
 
 ```javascript
-import { invoke } from '@tauri-apps/api/core'; // Or window.__TAURI__.core.invoke (window.__TAURI__.invoke supported as legacy alias)
+// Tauri-Lua injects window.__TAURI__ directly into trusted webviews (zero npm bridge required).
+// TypeScript projects automatically receive types/tauri-lua.d.ts for full type safety.
+const { invoke } = window.__TAURI__.core;
 
 async function calculate() {
   try {
-    const response = await window.__TAURI__.core.invoke('calculate_fibonacci', { n: 40 });
+    const response = await invoke('calculate_fibonacci', { n: 40 });
     console.log('Result from Lua backend:', response.result);
     console.log('Processed by worker:', response.workerId);
   } catch (error) {
@@ -506,16 +510,12 @@ end)
 
 ##### 2. Frontend Interception (`JavaScript`)
 ```javascript
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+const appWindow = window.__TAURI__.webviewWindow.getCurrentWebviewWindow();
 
-const appWindow = getCurrentWebviewWindow();
-
-// Listen for native close requests (clicking X or pressing Cmd+W / Alt+F4)
+// Listen for native close requests (clicking X or pressing Cmd+W / Alt+F4).
+// For synchronous close cancellation, register app:on_window_event() in Lua.
 await appWindow.onCloseRequested(async (event) => {
   if (isEditorDirty) {
-    // Prevent the window from closing immediately
-    event.preventDefault();
-
     const saveChanges = await window.__TAURI__.dialog.ask(
       "You have unsaved changes. Do you want to save before closing?",
       { title: "Unsaved Changes", kind: "warning" }
@@ -862,10 +862,8 @@ end)
 
 #### 2. Frontend Usage (`JavaScript`)
 ```javascript
-// Method A: Dedicated window drag & drop handler
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-
-const appWindow = getCurrentWebviewWindow();
+// Method A: Dedicated window drag & drop handler (macOS native drag-drop events)
+const appWindow = window.__TAURI__.webviewWindow.getCurrentWebviewWindow();
 appWindow.onDragDropEvent((event) => {
   if (event.type === "drop") {
     console.log("User dropped files:", event.paths);
@@ -1429,14 +1427,13 @@ Tauri-Lua implements a multi-layered **Defense-in-Depth** security model:
    - Frontend command execution (`shell:execute`) bypasses intermediate subshells (`/bin/sh` or `cmd.exe`) and invokes OS process creation directly (`posix_spawnp` on POSIX, `CreateProcessW` on Windows).
    - Shell control metacharacters (`;`, `&&`, `|`, `$()`, backticks) cannot trigger shell command injection.
    - Output chunks are buffered and streamed to `window.__TAURI__.Channel` in real time, capped at 1 MB to prevent memory exhaustion. (Developer CLI commands such as `lua-tauri dev` execute user-specified build scripts in the developer's shell environment).
-2. **Dual-Layer Content Security Policy (CSP):**
-   - Automatically injected as an HTTP response header (`Content-Security-Policy`) on custom scheme requests (`tauri://localhost`, `asset://`) and as a dynamic DOM `<meta http-equiv="Content-Security-Policy">` tag in all served HTML documents.
+2. **Content Security Policy (CSP) & Header Hardening:**
+   - Automatically injected as an HTTP response header (`Content-Security-Policy` + `X-Content-Type-Options: nosniff`) on macOS (`WKURLSchemeHandler`) and Linux (`WebKitGTK 4.1+`), plus a dynamic DOM `<meta http-equiv="Content-Security-Policy">` tag via a linear HTML scanner (no `std::regex` ReDoS) on all platforms; Windows WebView2 enforces `COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS` and `add_FrameNavigationStarting`.
    - Default policy enforces strict script origin restrictions without `'unsafe-inline'` in `script-src` (`default-src 'self' tauri: asset:; script-src 'self' tauri: asset:; style-src 'self' 'unsafe-inline'; ...`), neutralizing Cross-Site Scripting (XSS) vectors.
    - Configurable declaratively in `tauri.conf.json` (`security.csp`) or dynamically via `app:set_csp("...")`.
-3. **Session Verification Tokens & IPC Envelope Integrity:**
-   - A cryptographically random 256-bit session token (64 hex characters) is generated via OS CSPRNG (`SecRandomCopyBytes` on macOS, `/dev/urandom` on Linux, `BCryptGenRandom` on Windows) and attached to `window.__TAURI_TOKEN__` at initialization.
-   - **Constant-Time Envelope Verification:** The session token in each native IPC array is compared using constant-time equality (`constant_time_eq`), with strict verification that all characters before `[` and after `]` are pure whitespace.
-   - **Hardened JSON Extraction:** IPC message string extraction (`extract_json_string`) tracks object nesting depth and string literal boundaries, decoding RFC 8259 escape sequences (`\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX` including UTF-8 surrogate pairs).
+3. **Session Verification Tokens & Unified Strict JSON Parser:**
+   - A cryptographically random 256-bit session token (64 hex characters) is generated via OS CSPRNG (`arc4random_buf` on macOS, `getrandom`/`/dev/urandom` on Linux, `BCryptGenRandom` on Windows) and attached to `window.__TAURI_TOKEN__` on trusted origins only (never injected into `window:create:external` windows).
+   - **Constant-Time Envelope Verification:** The session token in each native IPC array is compared using constant-time equality (`constant_time_eq`) and parsed by the unified C++17 RFC 8259 JSON parser (`src/json_parser.hpp`, depth-limited to 64).
    - **Threat Model Scope:** This token acts as a defense-in-depth barrier against unauthorized child iframes and cross-origin subframes. It is **not** a same-origin security boundary (any malicious script executing within the same-origin document context can access JS window variables).
    - **Frame Isolation:** macOS WebKit verifies `message.frameInfo.isMainFrame`. On platforms where webview frame metadata is unavailable, strict CSP (`frame-src 'none'`) prevents framing attacks.
 4. **Native Origin Gating & Scheme Normalization (Authoritative Security Boundary):**
@@ -1484,8 +1481,8 @@ Tauri-Lua implements a strict **Deny-by-Default** security model for frontend IP
 7. **Transactional Atomic State Management (`app.state:update`):**
    - In-memory shared state mutations are guarded by an optimistic CAS loop, ensuring user callbacks never hold the native mutex and preventing deadlocks.
 8. **Scaffolding Defaults & Distribution Hardening:**
-   - **Default Sandbox Scope:** Newly scaffolded projects (`lua-tauri create` and `lua-tauri init`) automatically configure a default sandbox scope (`$APPDATA/**`), guaranteeing least-privilege containment out-of-the-box.
-   - **XML Entity Escaping:** The macOS packaging generator (`cli/bundle.lua`) strictly escapes XML characters (`&`, `<`, `>`, `"`, `'`) when formatting `Info.plist`.
+   - **Default Sandbox Scope:** Newly scaffolded projects (`lua-tauri create` and `lua-tauri init`) automatically configure a least-privilege sandbox scope (`$APPDATA/<identifier>/**`), isolating each app's data directory.
+   - **Release Fuse & XML Escaping:** Production builds compile with `-DTAURILUA_RELEASE_FUSE=ON` (locking out `TAURILUA_DEV` and CWD overrides), exclude `.env`/`.env.*` on all platforms, and strictly escape XML characters (`&`, `<`, `>`, `"`, `'`) in `cli/tauri.lua` when formatting `Info.plist`.
    - **Application Identifier Sanitization:** The native runtime (`src/entry.cpp`) sanitizes the application identifier to safe alphanumeric characters and dots/hyphens/underscores (`[a-zA-Z0-9._-]`), and safely flushes standard I/O streams before process termination.
 
 ---
@@ -1686,9 +1683,8 @@ end
 Because `ipc_command = "api:get_endpoint"` was declared above, your frontend can query the sidecar endpoint out of the box:
 
 ```typescript
-import { invoke } from "@tauri-apps/api/core"; // or local tauri-bridge
-
-const endpoint = await invoke<{ base_url: string; port: number; running: boolean }>("api:get_endpoint");
+// types/tauri-lua.d.ts provides full TypeScript declarations for window.__TAURI__
+const endpoint = await window.__TAURI__.core.invoke<{ base_url: string; port: number; running: boolean }>("api:get_endpoint");
 console.log("Connecting to backend at:", endpoint.base_url);
 ```
 

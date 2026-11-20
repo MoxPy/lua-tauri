@@ -532,6 +532,97 @@ test("Shell assert_program blocks path-prefixed binary when only bare name is wh
     assert(not ok_path, "Blocks /tmp/evil/git when only bare 'git' is in allowed_programs")
 end)
 
+print("\n15. Phase 2 Supply Chain, CLI & Packaging Hardening:")
+
+test("Pure-LuaJIT SHA-256 matches NIST FIPS 180-4 test vectors", function()
+    _G.TAURI_CLI_TEST_MODE = true
+    local cli = dofile("cli/tauri.lua")
+    assert(cli.sha256_hex("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    assert(cli.sha256_hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    assert(cli.sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
+end)
+
+test("LuaRocks file walker hashes nested subdirectories and rejects symlinks", function()
+    _G.TAURI_CLI_TEST_MODE = true
+    local cli = dofile("cli/tauri.lua")
+    local root = "build/test_p2_rocks_" .. tostring(os.time())
+    os.execute("mkdir -p " .. root .. "/lib/luarocks/rocks-5.1/demo/1.0-1 " .. root .. "/share/lua/5.1/socket")
+    local mf = io.open(root .. "/lib/luarocks/rocks-5.1/demo/1.0-1/rock_manifest", "wb")
+    mf:write('rock_manifest = { lua = { ["init.lua"] = "abc", socket = { ["http.lua"] = "def" } } }\n')
+    mf:close()
+    local f1 = io.open(root .. "/share/lua/5.1/init.lua", "wb"); f1:write("return 1"); f1:close()
+    local f2 = io.open(root .. "/share/lua/5.1/socket/http.lua", "wb"); f2:write("return 2"); f2:close()
+
+    local files = cli.get_installed_rock_files(root, "demo", "1.0-1")
+    local has_nested = false
+    for _, f in ipairs(files) do
+        if f:find("socket/http.lua", 1, true) then has_nested = true end
+    end
+    assert(has_nested, "Nested subdirectory file socket/http.lua must be included")
+    local sum1 = cli.compute_composite_checksum(files)
+    assert(#sum1 == 71 and sum1:match("^sha256:[0-9a-f]+$"))
+
+    local f2_mod = io.open(root .. "/share/lua/5.1/socket/http.lua", "wb"); f2_mod:write("return 999"); f2_mod:close()
+    local sum2 = cli.compute_composite_checksum(files)
+    assert(sum1 ~= sum2, "Modifying nested subdirectory file must change composite checksum")
+
+    os.remove(root .. "/share/lua/5.1/socket/http.lua")
+    os.execute("ln -s /etc/hosts " .. root .. "/share/lua/5.1/socket/http.lua 2>/dev/null")
+    local ok_sym = pcall(cli.get_installed_rock_files, root, "demo", "1.0-1")
+    os.execute("rm -rf " .. root)
+    assert(not ok_sym, "Symlink inside LuaRocks tree must be rejected")
+end)
+
+test("read_lockfile fails closed on corrupted JSON and validate_app_meta blocks injection", function()
+    _G.TAURI_CLI_TEST_MODE = true
+    local cli = dofile("cli/tauri.lua")
+    local bad_lock = "build/test_corrupt.lock"
+    local f = io.open(bad_lock, "wb"); f:write("{ broken json"); f:close()
+    local ok_corrupt = pcall(cli.read_lockfile, bad_lock)
+    os.remove(bad_lock)
+    assert(not ok_corrupt, "Corrupted lockfile must throw error")
+
+    assert(cli.validate_app_meta("My App", "1.2.3", "com.example.app") == "My App")
+    assert(not pcall(cli.validate_app_meta, "../evil", "1.0.0", "com.example.app"))
+    assert(not pcall(cli.validate_app_meta, "app\nDepends: backdoor", "1.0.0", "com.example.app"))
+    assert(not pcall(cli.validate_app_meta, "app", "1.0.0\nEvil: 1", "com.example.app"))
+    assert(not pcall(cli.validate_app_meta, "app", "1.0.0", "com..evil"))
+end)
+
+test("CLI validate_dev_url and shell_quote reject injection payloads", function()
+    _G.TAURI_CLI_TEST_MODE = true
+    local cli = dofile("cli/tauri.lua")
+    assert(cli.validate_dev_url("http://localhost:5173"))
+    assert(cli.validate_dev_url("http://[::1]:5173/"))
+    assert(not cli.validate_dev_url("http://localhost:5173; id"))
+    assert(not cli.validate_dev_url("http://localhost@evil.com:5173"))
+    assert(not pcall(cli.shell_quote, "safe\ninjected"))
+    assert(not pcall(cli.shell_quote, "safe\0injected"))
+end)
+
+print("\n16. Phase 3 Concurrency & State Type-Safety:")
+
+test("State preserves string 'true'/'false' separately from booleans and survives CAS errors without deadlock", function()
+    local app = tauri.new({ security = { capabilities = { "core:default" } } })
+    app.state:set("flag_bool", true)
+    app.state:set("flag_false", false)
+    app.state:set("str_true", "true")
+    app.state:set("str_false", "false")
+    assert(type(app.state:get("flag_bool")) == "boolean" and app.state:get("flag_bool") == true)
+    assert(type(app.state:get("flag_false")) == "boolean" and app.state:get("flag_false") == false)
+    assert(type(app.state:get("str_true")) == "string" and app.state:get("str_true") == "true")
+    assert(type(app.state:get("str_false")) == "string" and app.state:get("str_false") == "false")
+
+    local ok_err = pcall(function()
+        app.state:update("bad_cas", function()
+            return { broken = 0 / 0 }
+        end)
+    end)
+    assert(not ok_err, "NaN JSON encode inside State:update must fail")
+    app.state:set("post_err", 123)
+    assert(app.state:get("post_err") == 123, "State mutex must remain unlocked after State:update error")
+end)
+
 print("\n=======================================================")
 print(string.format("TEST RESULTS: %d / %d PASSED", passed_tests, total_tests))
 print("=======================================================\n")

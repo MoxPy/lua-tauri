@@ -20,22 +20,24 @@ namespace ResourceResolver {
 
 inline std::string get_executable_dir() {
 #if defined(__APPLE__)
-    char buf[1024];
-    uint32_t size = sizeof(buf);
-    if (_NSGetExecutablePath(buf, &size) == 0) {
-        std::string p(buf);
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    if (size == 0) return "";
+    std::vector<char> buf(size + 1, '\0');
+    if (_NSGetExecutablePath(buf.data(), &size) == 0) {
+        std::string p(buf.data());
         size_t last_slash = p.rfind('/');
         if (last_slash != std::string::npos) return p.substr(0, last_slash);
     }
     return "";
 #elif defined(_WIN32)
-    wchar_t buf[MAX_PATH];
-    DWORD len = GetModuleFileNameW(NULL, buf, MAX_PATH);
-    if (len > 0) {
-        int ulen = WideCharToMultiByte(CP_UTF8, 0, buf, len, NULL, 0, NULL, NULL);
+    std::vector<wchar_t> buf(32768, 0);
+    DWORD len = GetModuleFileNameW(NULL, buf.data(), static_cast<DWORD>(buf.size()));
+    if (len > 0 && len < buf.size()) {
+        int ulen = WideCharToMultiByte(CP_UTF8, 0, buf.data(), static_cast<int>(len), NULL, 0, NULL, NULL);
         if (ulen > 0) {
-            std::string u8(ulen, 0);
-            WideCharToMultiByte(CP_UTF8, 0, buf, len, &u8[0], ulen, NULL, NULL);
+            std::string u8(static_cast<size_t>(ulen), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, buf.data(), static_cast<int>(len), &u8[0], ulen, NULL, NULL);
             for (char &c : u8) if (c == '\\') c = '/';
             size_t last_slash = u8.rfind('/');
             if (last_slash != std::string::npos) return u8.substr(0, last_slash);
@@ -43,11 +45,11 @@ inline std::string get_executable_dir() {
     }
     return "";
 #else
-    char buf[1024];
-    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (len > 0) {
-        buf[len] = '\0';
-        std::string p(buf);
+    std::vector<char> buf(4096, '\0');
+    ssize_t len = readlink("/proc/self/exe", buf.data(), buf.size() - 1);
+    if (len > 0 && static_cast<size_t>(len) < buf.size() - 1) {
+        buf[static_cast<size_t>(len)] = '\0';
+        std::string p(buf.data());
         size_t last_slash = p.rfind('/');
         if (last_slash != std::string::npos) return p.substr(0, last_slash);
     }
@@ -56,6 +58,9 @@ inline std::string get_executable_dir() {
 }
 
 inline bool is_packaged() {
+#if defined(TAURILUA_RELEASE_FUSE)
+    return true;
+#else
     const char *env = getenv("TAURILUA_DEV");
     if (env && env[0] != '\0' && strcmp(env, "0") != 0) return false;
 
@@ -66,14 +71,19 @@ inline bool is_packaged() {
     }
     if (exe_dir.rfind("/usr/bin", 0) == 0 || exe_dir.rfind("/usr/local/bin", 0) == 0) return true;
     return false;
+#endif
 }
 
 inline bool is_dev_mode(bool config_dev_mode = false) {
+#if defined(TAURILUA_RELEASE_FUSE)
+    (void)config_dev_mode;
+    return false;
+#else
     const char *env = getenv("TAURILUA_DEV");
     if (env && env[0] != '\0' && strcmp(env, "0") != 0) return true;
     if (config_dev_mode) return true;
-    if (is_packaged()) return false;
     return false;
+#endif
 }
 
 inline bool file_exists(const std::string &path) {
@@ -103,11 +113,11 @@ inline std::string resolve_bundle_resource(const std::string &rel_path) {
 #endif
 
 #if !defined(_WIN32) && !defined(__APPLE__)
-    char exe_buf[1024];
-    ssize_t elen = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
-    if (elen > 0) {
-        exe_buf[elen] = '\0';
-        std::string ep(exe_buf);
+    std::vector<char> exe_buf(4096, '\0');
+    ssize_t elen = readlink("/proc/self/exe", exe_buf.data(), exe_buf.size() - 1);
+    if (elen > 0 && static_cast<size_t>(elen) < exe_buf.size() - 1) {
+        exe_buf[static_cast<size_t>(elen)] = '\0';
+        std::string ep(exe_buf.data());
         size_t slash = ep.rfind('/');
         if (slash != std::string::npos) {
             std::string exe_name = ep.substr(slash + 1);
@@ -147,7 +157,6 @@ inline std::string resolve_config_json(bool dev_mode, const unsigned char *embed
         if (file_exists("src-tauri/tauri.conf.json")) return read_file_string("src-tauri/tauri.conf.json");
     }
 
-    // In release mode (!dev_mode), strictly enforce embedded configuration from binary headers
     if (embedded_json && embedded_len > 0) {
         return std::string((const char *)embedded_json, embedded_len);
     }
@@ -178,6 +187,6 @@ inline std::string resolve_capabilities_dir(bool dev_mode) {
     return "";
 }
 
-} // namespace ResourceResolver
+}
 
 #endif

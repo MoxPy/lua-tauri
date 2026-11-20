@@ -40,6 +40,8 @@ TAURILUA_API void bridge_set_dev_mode(int dev);
 TAURILUA_API void bridge_set_dev_url(const char *url);
 
 TAURILUA_API int  platform_list_dir(const char *dir_path, char *out_buf, int max_len);
+TAURILUA_API int  platform_read_dir(const char *dir_path, char *out_buf, int max_len);
+TAURILUA_API int  platform_fs_write_file(const char *path, const char *data, int data_len);
 TAURILUA_API void platform_set_assets_path(const char *path);
 TAURILUA_API int  platform_is_origin_allowed(const char *url);
 TAURILUA_API int  platform_resolve_path(const char *in_path, char *out_path, int max_len);
@@ -98,13 +100,18 @@ TAURILUA_API void platform_theme_set_callback(theme_callback_fn cb);
 TAURILUA_API void platform_file_drop_set_callback(file_drop_callback_fn cb);
 TAURILUA_API void platform_notification_send(const char *title, const char *body);
 
+#include <stdint.h>
+
 TAURILUA_API void platform_state_set_string(const char *key, const char *val);
 TAURILUA_API int  platform_state_get_string(const char *key, char *out_val, int max_len);
 TAURILUA_API void platform_state_set_number(const char *key, double val);
 TAURILUA_API int  platform_state_get_number(const char *key, double *out_val);
+TAURILUA_API void platform_state_set_bool(const char *key, int val);
+TAURILUA_API int  platform_state_get_bool(const char *key, int *out_val);
 TAURILUA_API void platform_state_set_json(const char *key, const char *json_val);
 TAURILUA_API int  platform_state_get_json(const char *key, char *out_val, int max_len);
 TAURILUA_API int  platform_state_get_length(const char *key);
+TAURILUA_API uint64_t platform_state_get_version(const char *key);
 TAURILUA_API int  platform_state_has(const char *key);
 TAURILUA_API void platform_state_delete(const char *key);
 TAURILUA_API void platform_state_clear();
@@ -120,6 +127,10 @@ TAURILUA_API void *platform_process_spawn(const char *program, const char **args
 TAURILUA_API int   platform_process_read_line(void *handle, char *out_buf, int max_len);
 TAURILUA_API int   platform_process_wait(void *handle);
 TAURILUA_API void  platform_process_close(void *handle);
+
+TAURILUA_API long  platform_sidecar_spawn(const char *program, const char **args, int arg_count, const char **env_kv, int env_count, const char *cwd, const char *log_file);
+TAURILUA_API int   platform_sidecar_is_running(long pid);
+TAURILUA_API int   platform_sidecar_kill(long pid, int sig);
 
 #ifdef __cplusplus
 }

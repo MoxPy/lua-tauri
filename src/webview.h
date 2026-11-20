@@ -95,28 +95,46 @@ static bool g_has_main_window = false;
 @property (nonatomic, assign) WebviewImpl *impl;
 @end
 
+static inline NSString *webview_nsstring_utf8(const std::string &s) {
+    NSString *ns = [[NSString alloc] initWithBytes:s.data() length:s.size() encoding:NSUTF8StringEncoding];
+    if (!ns) {
+        ns = [[NSString alloc] initWithBytes:s.data() length:s.size() encoding:NSISOLatin1StringEncoding];
+    }
+    return ns ? ns : @"";
+}
+
 @implementation TauriBridgeScriptHandler
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message {
-    if (!message.frameInfo.isMainFrame) return; // REJECT SUBFRAMES!
+    if (!message.frameInfo.isMainFrame) return;
     if (!self.impl) return;
     if (![message.body isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *dict = (NSDictionary *)message.body;
-    NSString *name = dict[@"name"];
-    NSString *seq = dict[@"seq"];
-    NSString *req = dict[@"req"];
-    if (!name || !seq || !req) return;
-    if (!is_valid_seq_id([seq UTF8String])) return;
+    id rawName = dict[@"name"];
+    id rawSeq = dict[@"seq"];
+    id rawReq = dict[@"req"];
+    if (![rawName isKindOfClass:[NSString class]] ||
+        ![rawSeq isKindOfClass:[NSString class]] ||
+        ![rawReq isKindOfClass:[NSString class]]) {
+        return;
+    }
+    const char *c_name = [(NSString *)rawName UTF8String];
+    const char *c_seq = [(NSString *)rawSeq UTF8String];
+    const char *c_req = [(NSString *)rawReq UTF8String];
+    if (!c_name || !c_seq || !c_req) return;
+    if (!is_valid_seq_id(c_seq)) return;
 
-    auto it = self.impl->bindings.find([name UTF8String]);
+    auto it = self.impl->bindings.find(c_name);
     if (it != self.impl->bindings.end() && it->second.fn) {
-        it->second.fn([seq UTF8String], [req UTF8String], it->second.arg);
+        it->second.fn(c_seq, c_req, it->second.arg);
     }
 }
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     NSURL *url = navigationAction.request.URL;
-    std::string s_url = url ? [[url absoluteString] UTF8String] : "";
+    NSString *abs_str = url ? [url absoluteString] : nil;
+    const char *utf8_url = abs_str ? [abs_str UTF8String] : nullptr;
+    std::string s_url = utf8_url ? utf8_url : "";
     std::string d_url;
     {
         std::lock_guard<std::mutex> lk(g_config_mutex);
@@ -148,7 +166,7 @@ static bool g_has_main_window = false;
     [alert setMessageText:[[NSProcessInfo processInfo] processName]];
     [alert setInformativeText:message ? message : @""];
     [alert addButtonWithTitle:@"OK"];
-    [alert addButtonWithTitle:@"Annulla"];
+    [alert addButtonWithTitle:@"Cancel"];
     if ([alert.buttons count] > 1) {
         [[alert.buttons objectAtIndex:1] setKeyEquivalent:@"\033"];
     }
@@ -162,7 +180,7 @@ static bool g_has_main_window = false;
     [alert setMessageText:[[NSProcessInfo processInfo] processName]];
     [alert setInformativeText:prompt ? prompt : @""];
     [alert addButtonWithTitle:@"OK"];
-    [alert addButtonWithTitle:@"Annulla"];
+    [alert addButtonWithTitle:@"Cancel"];
     if ([alert.buttons count] > 1) {
         [[alert.buttons objectAtIndex:1] setKeyEquivalent:@"\033"];
     }
@@ -200,10 +218,26 @@ static bool g_has_main_window = false;
     return YES;
 }
 
+static inline void webview_macos_stop_loop() {
+    [NSApp stop:nil];
+    NSEvent *ev = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                     location:NSMakePoint(0, 0)
+                                modifierFlags:0
+                                    timestamp:0
+                                 windowNumber:0
+                                      context:nil
+                                      subtype:0
+                                        data1:0
+                                        data2:0];
+    if (ev) {
+        [NSApp postEvent:ev atStart:YES];
+    }
+}
+
 - (void)windowWillClose:(NSNotification *)notification {
     if (self.impl && self.impl->is_main) {
         platform_kill_child_processes();
-        exit(0);
+        webview_macos_stop_loop();
     }
 }
 @end
@@ -237,7 +271,7 @@ static bool g_has_main_window = false;
 
 - (void)terminateApp:(id)sender {
     platform_kill_child_processes();
-    exit(0);
+    webview_macos_stop_loop();
 }
 @end
 
@@ -255,9 +289,14 @@ static inline void run_on_main_async(void (^block)(void)) {
 
 static inline void platform_apply_app_name_macos(const char *name) {
     if (!name || name[0] == '\0') return;
-    g_app_name = name;
+    std::string name_copy(name);
+    {
+        std::lock_guard<std::mutex> lk(g_config_mutex);
+        g_app_name = name_copy;
+    }
     run_on_main_async(^{
-        NSString *appName = [NSString stringWithUTF8String:g_app_name.c_str()];
+        NSString *appName = webview_nsstring_utf8(name_copy);
+        if ([appName length] == 0) return;
         [[NSProcessInfo processInfo] setProcessName:appName];
 
         NSMenu *mainMenu = [NSApp mainMenu];
@@ -464,8 +503,20 @@ static inline void webview_destroy(webview_t w) {
     if (!w) return;
     run_on_main_sync(^{
         WebviewImpl *impl = static_cast<WebviewImpl *>(w);
-        [impl->window setDelegate:nil];
-        [impl->window close];
+        if (impl->handler) {
+            ((TauriBridgeScriptHandler *)impl->handler).impl = nullptr;
+        }
+        if (impl->ucc) {
+            [impl->ucc removeScriptMessageHandlerForName:@"__tauri_bridge__"];
+        }
+        if (impl->wk) {
+            [impl->wk setNavigationDelegate:nil];
+            [impl->wk setUIDelegate:nil];
+        }
+        if (impl->window) {
+            [impl->window setDelegate:nil];
+            [impl->window close];
+        }
         delete impl;
     });
 }
@@ -485,7 +536,8 @@ static inline void webview_force_close(webview_t w) {
         [impl->window setDelegate:nil];
         [impl->window close];
         if (impl->is_main) {
-            exit(0);
+            platform_kill_child_processes();
+            webview_macos_stop_loop();
         }
     });
 }
@@ -495,7 +547,7 @@ static inline void webview_set_title(webview_t w, const char *title) {
     std::string s_title(title);
     run_on_main_sync(^{
         WebviewImpl *impl = static_cast<WebviewImpl *>(w);
-        [impl->window setTitle:[NSString stringWithUTF8String:s_title.c_str()]];
+        [impl->window setTitle:webview_nsstring_utf8(s_title)];
     });
 }
 
@@ -529,7 +581,7 @@ static inline void webview_init(webview_t w, const char *js) {
     std::string s_js(js);
     run_on_main_sync(^{
         WebviewImpl *impl = static_cast<WebviewImpl *>(w);
-        NSString *src = [NSString stringWithUTF8String:s_js.c_str()];
+        NSString *src = webview_nsstring_utf8(s_js);
         WKUserScript *script = [[WKUserScript alloc] initWithSource:src
                                                       injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                                                    forMainFrameOnly:YES];
@@ -542,7 +594,7 @@ static inline void webview_eval(webview_t w, const char *js) {
     std::string s_js(js);
     run_on_main_async(^{
         WebviewImpl *impl = static_cast<WebviewImpl *>(w);
-        NSString *src = [NSString stringWithUTF8String:s_js.c_str()];
+        NSString *src = webview_nsstring_utf8(s_js);
         [impl->wk evaluateJavaScript:src completionHandler:nil];
     });
 }
@@ -611,6 +663,8 @@ static inline void webview_terminate(webview_t w) {
 #include <wrl.h>
 #include <WebView2.h>
 #include <map>
+#include <queue>
+#include <functional>
 #include <string>
 #include "security_policy.hpp"
 #include "ipc_envelope.hpp"
@@ -622,7 +676,10 @@ struct WebviewImpl {
     ICoreWebView2Controller *controller;
     ICoreWebView2 *webview;
     bool is_main;
+    bool init_failed = false;
     std::map<std::string, WebviewBinding> bindings;
+    std::mutex dispatch_mutex;
+    std::queue<std::function<void()>> dispatch_queue;
     webview_close_cb_fn close_cb = nullptr;
     void *close_arg = nullptr;
     bool force_closing = false;
@@ -658,15 +715,17 @@ static LRESULT CALLBACK WebviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             return 0;
         }
         case WM_USER + 101: {
-            struct WinDispatchArg {
-                webview_t w;
-                webview_dispatch_fn fn;
-                void *arg;
-            };
-            WinDispatchArg *p = reinterpret_cast<WinDispatchArg *>(lp);
-            if (p) {
-                p->fn(p->w, p->arg);
-                delete p;
+            if (impl) {
+                std::queue<std::function<void()>> pending;
+                {
+                    std::lock_guard<std::mutex> lk(impl->dispatch_mutex);
+                    std::swap(pending, impl->dispatch_queue);
+                }
+                while (!pending.empty()) {
+                    auto task = std::move(pending.front());
+                    pending.pop();
+                    if (task) task();
+                }
             }
             return 0;
         }
@@ -698,16 +757,25 @@ static inline webview_t webview_create(int debug, void *window) {
 
     SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(impl));
 
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
         nullptr, nullptr, nullptr,
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [impl, hwnd, debug](HRESULT result, ICoreWebView2Environment *env) -> HRESULT {
-                if (FAILED(result) || !env) return result;
-                env->CreateCoreWebView2Controller(
+                if (FAILED(result) || !env) {
+                    impl->init_failed = true;
+                    PostMessageW(hwnd, WM_NULL, 0, 0);
+                    return result;
+                }
+                HRESULT ctrl_hr = env->CreateCoreWebView2Controller(
                     hwnd,
                     Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
                         [impl, hwnd, debug](HRESULT res, ICoreWebView2Controller *ctrl) -> HRESULT {
-                            if (FAILED(res) || !ctrl) return res;
+                            if (FAILED(res) || !ctrl) {
+                                impl->init_failed = true;
+                                PostMessageW(hwnd, WM_NULL, 0, 0);
+                                return res;
+                            }
                             impl->controller = ctrl;
                             ctrl->AddRef();
 
@@ -734,34 +802,36 @@ static inline webview_t webview_create(int debug, void *window) {
                                             args->get_WebMessageAsJson(&json_str);
                                             if (json_str) {
                                                 LPWSTR source_w = nullptr;
-                                                if (SUCCEEDED(args->get_Source(&source_w)) && source_w) {
-                                                    int slen = WideCharToMultiByte(CP_UTF8, 0, source_w, -1, NULL, 0, NULL, NULL);
-                                                    std::string source_u8(slen > 0 ? slen : 0, '\0');
-                                                    if (slen > 0) {
-                                                        int swritten = WideCharToMultiByte(CP_UTF8, 0, source_w, -1, &source_u8[0], slen, NULL, NULL);
-                                                        if (swritten > 0) source_u8.resize(static_cast<size_t>(swritten - 1));
+                                                if (FAILED(args->get_Source(&source_w)) || !source_w) {
+                                                    CoTaskMemFree(json_str);
+                                                    return S_OK;
+                                                }
+                                                int slen = WideCharToMultiByte(CP_UTF8, 0, source_w, -1, NULL, 0, NULL, NULL);
+                                                std::string source_u8(slen > 0 ? slen : 0, '\0');
+                                                if (slen > 0) {
+                                                    int swritten = WideCharToMultiByte(CP_UTF8, 0, source_w, -1, &source_u8[0], slen, NULL, NULL);
+                                                    if (swritten > 0) source_u8.resize(static_cast<size_t>(swritten - 1));
+                                                }
+                                                CoTaskMemFree(source_w);
+                                                LPWSTR top_w = nullptr;
+                                                std::string top_u8;
+                                                if (SUCCEEDED(sender->get_Source(&top_w)) && top_w) {
+                                                    int tlen = WideCharToMultiByte(CP_UTF8, 0, top_w, -1, NULL, 0, NULL, NULL);
+                                                    if (tlen > 0) {
+                                                        top_u8.resize(tlen);
+                                                        int twritten = WideCharToMultiByte(CP_UTF8, 0, top_w, -1, &top_u8[0], tlen, NULL, NULL);
+                                                        if (twritten > 0) top_u8.resize(static_cast<size_t>(twritten - 1));
                                                     }
-                                                    CoTaskMemFree(source_w);
-                                                    LPWSTR top_w = nullptr;
-                                                    std::string top_u8;
-                                                    if (SUCCEEDED(sender->get_Source(&top_w)) && top_w) {
-                                                        int tlen = WideCharToMultiByte(CP_UTF8, 0, top_w, -1, NULL, 0, NULL, NULL);
-                                                        if (tlen > 0) {
-                                                            top_u8.resize(tlen);
-                                                            int twritten = WideCharToMultiByte(CP_UTF8, 0, top_w, -1, &top_u8[0], tlen, NULL, NULL);
-                                                            if (twritten > 0) top_u8.resize(static_cast<size_t>(twritten - 1));
-                                                        }
-                                                        CoTaskMemFree(top_w);
-                                                    }
-                                                    std::string d_url;
-                                                    {
-                                                        std::lock_guard<std::mutex> lk(g_config_mutex);
-                                                        d_url = g_dev_url;
-                                                    }
-                                                    if (!SecurityPolicy::is_frame_source_allowed(source_u8, top_u8, g_dev_mode.load(), d_url)) {
-                                                        CoTaskMemFree(json_str);
-                                                        return S_OK; // Reject cross-origin or untrusted subframe message
-                                                    }
+                                                    CoTaskMemFree(top_w);
+                                                }
+                                                std::string d_url;
+                                                {
+                                                    std::lock_guard<std::mutex> lk(g_config_mutex);
+                                                    d_url = g_dev_url;
+                                                }
+                                                if (!SecurityPolicy::is_frame_source_allowed(source_u8, top_u8, g_dev_mode.load(), d_url)) {
+                                                    CoTaskMemFree(json_str);
+                                                    return S_OK;
                                                 }
 
                                                 int len = WideCharToMultiByte(CP_UTF8, 0, json_str, -1, NULL, 0, NULL, NULL);
@@ -789,31 +859,34 @@ static inline webview_t webview_create(int debug, void *window) {
                                     &token);
 
                                 EventRegistrationToken navToken;
-                                impl->webview->add_NavigationStarting(
-                                    Callback<ICoreWebView2NavigationStartingEventHandler>(
-                                        [](ICoreWebView2 *sender, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
-                                            (void)sender;
-                                            LPWSTR uri_w = nullptr;
-                                            if (SUCCEEDED(args->get_Uri(&uri_w)) && uri_w) {
-                                                int len = WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, NULL, 0, NULL, NULL);
-                                                std::string u8(len > 0 ? len : 0, '\0');
-                                                if (len > 0) {
-                                                    int written = WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, &u8[0], len, NULL, NULL);
-                                                    if (written > 0) u8.resize(static_cast<size_t>(written - 1));
-                                                }
-                                                CoTaskMemFree(uri_w);
-                                                std::string d_url;
-                                                {
-                                                    std::lock_guard<std::mutex> lk(g_config_mutex);
-                                                    d_url = g_dev_url;
-                                                }
-                                                if (!SecurityPolicy::is_navigation_allowed(u8, g_dev_mode.load(), d_url)) {
-                                                    args->put_Cancel(TRUE);
-                                                }
-                                            }
+                                auto nav_cb = Callback<ICoreWebView2NavigationStartingEventHandler>(
+                                    [](ICoreWebView2 *sender, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
+                                        (void)sender;
+                                        LPWSTR uri_w = nullptr;
+                                        if (FAILED(args->get_Uri(&uri_w)) || !uri_w) {
+                                            args->put_Cancel(TRUE);
                                             return S_OK;
-                                        }).Get(),
-                                    &navToken);
+                                        }
+                                        int len = WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, NULL, 0, NULL, NULL);
+                                        std::string u8(len > 0 ? len : 0, '\0');
+                                        if (len > 0) {
+                                            int written = WideCharToMultiByte(CP_UTF8, 0, uri_w, -1, &u8[0], len, NULL, NULL);
+                                            if (written > 0) u8.resize(static_cast<size_t>(written - 1));
+                                        }
+                                        CoTaskMemFree(uri_w);
+                                        std::string d_url;
+                                        {
+                                            std::lock_guard<std::mutex> lk(g_config_mutex);
+                                            d_url = g_dev_url;
+                                        }
+                                        if (!SecurityPolicy::is_navigation_allowed(u8, g_dev_mode.load(), d_url)) {
+                                            args->put_Cancel(TRUE);
+                                        }
+                                        return S_OK;
+                                    });
+                                impl->webview->add_NavigationStarting(nav_cb.Get(), &navToken);
+                                EventRegistrationToken frameNavToken;
+                                impl->webview->add_FrameNavigationStarting(nav_cb.Get(), &frameNavToken);
 
                                 EventRegistrationToken newWinToken;
                                 impl->webview->add_NewWindowRequested(
@@ -830,10 +903,24 @@ static inline webview_t webview_create(int debug, void *window) {
                 return S_OK;
             }).Get());
 
+    if (FAILED(hr)) {
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+        DestroyWindow(hwnd);
+        delete impl;
+        return nullptr;
+    }
+
     MSG msg;
-    while (!impl->controller && GetMessage(&msg, NULL, 0, 0)) {
+    while (!impl->controller && !impl->init_failed) {
+        BOOL gm = GetMessage(&msg, NULL, 0, 0);
+        if (gm <= 0) break;
         TranslateMessage(&msg);
         DispatchMessage(&msg);
+    }
+
+    if (!impl->controller || impl->init_failed) {
+        webview_destroy(impl);
+        return nullptr;
     }
 
     ShowWindow(hwnd, SW_SHOW);
@@ -867,14 +954,24 @@ static inline webview_t webview_create(int debug, void *window) {
 static inline void webview_destroy(webview_t w) {
     if (!w) return;
     WebviewImpl *impl = static_cast<WebviewImpl *>(w);
+    if (impl->hwnd) {
+        SetWindowLongPtr(impl->hwnd, GWLP_USERDATA, 0);
+    }
     if (impl->controller) {
-        impl->controller->Close();
-        impl->controller->Release();
+        ICoreWebView2Controller *ctrl = impl->controller;
+        impl->controller = nullptr;
+        ctrl->Close();
+        ctrl->Release();
     }
     if (impl->webview) {
-        impl->webview->Release();
+        ICoreWebView2 *wv = impl->webview;
+        impl->webview = nullptr;
+        wv->Release();
     }
-    DestroyWindow(impl->hwnd);
+    if (impl->hwnd) {
+        DestroyWindow(impl->hwnd);
+        impl->hwnd = nullptr;
+    }
     delete impl;
 }
 
@@ -955,14 +1052,13 @@ static inline void webview_return(webview_t w, const char *seq, int status, cons
 }
 
 static inline void webview_dispatch(webview_t w, webview_dispatch_fn fn, void *arg) {
+    if (!w || !fn) return;
     WebviewImpl *impl = static_cast<WebviewImpl *>(w);
-    struct WinDispatchArg {
-        webview_t w;
-        webview_dispatch_fn fn;
-        void *arg;
-    };
-    WinDispatchArg *p = new WinDispatchArg{w, fn, arg};
-    PostMessageW(impl->hwnd, WM_USER + 101, 0, reinterpret_cast<LPARAM>(p));
+    {
+        std::lock_guard<std::mutex> lk(impl->dispatch_mutex);
+        impl->dispatch_queue.push([w, fn, arg]() { fn(w, arg); });
+    }
+    PostMessageW(impl->hwnd, WM_USER + 101, 0, 0);
 }
 
 static inline void webview_navigate(webview_t w, const char *url) {
@@ -1041,35 +1137,37 @@ static void on_gtk_script_message(WebKitUserContentManager *ucc, WebKitJavascrip
 }
 
 static void on_gtk_window_destroy(GtkWidget *widget, gpointer data) {
-    (void)widget; (void)data;
-    platform_kill_child_processes();
-    gtk_main_quit();
-    _exit(0);
+    (void)widget;
+    WebviewImpl *impl = static_cast<WebviewImpl *>(data);
+    if (impl && impl->is_main) {
+        platform_kill_child_processes();
+        gtk_main_quit();
+    }
 }
 
 static gboolean on_gtk_window_delete_event(GtkWidget *widget, GdkEvent *event, gpointer data) {
+    (void)event;
     WebviewImpl *impl = static_cast<WebviewImpl *>(data);
     if (impl) {
         if (!impl->force_closing && impl->close_cb) {
             int prevent = impl->close_cb(impl, impl->close_arg);
             if (prevent) {
-                return TRUE; // PREVENT DEFAULT in GTK!
+                return TRUE;
             }
         }
-        platform_kill_child_processes();
+        bool is_main = impl->is_main;
         gtk_widget_destroy(widget);
-        gtk_main_quit();
-        _exit(0);
+        if (is_main) {
+            platform_kill_child_processes();
+            gtk_main_quit();
+        }
+        return TRUE;
     }
-    _exit(0);
     return FALSE;
 }
 
 static inline webview_t webview_create(int debug, void *window) {
-#if defined(__linux__) || (!defined(_WIN32) && !defined(__APPLE__))
-    setenv("NO_AT_BRIDGE", "1", 0);
-    setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", 0);
-#endif
+    (void)window;
     if (!gtk_init_check(NULL, NULL)) {
         return nullptr;
     }
@@ -1092,6 +1190,7 @@ static inline webview_t webview_create(int debug, void *window) {
 
     impl->wk = webkit_web_view_new_with_user_content_manager(impl->ucc);
     webkit_web_view_set_settings(WEBKIT_WEB_VIEW(impl->wk), settings);
+    g_object_unref(settings);
 
     webkit_user_content_manager_register_script_message_handler(impl->ucc, "__tauri_bridge__");
     g_signal_connect(impl->ucc, "script-message-received::__tauri_bridge__", G_CALLBACK(on_gtk_script_message), impl);
@@ -1104,13 +1203,13 @@ static inline webview_t webview_create(int debug, void *window) {
             WebKitNavigationPolicyDecision *nav_decision = WEBKIT_NAVIGATION_POLICY_DECISION(decision);
             WebKitNavigationAction *action = webkit_navigation_policy_decision_get_navigation_action(nav_decision);
             WebKitURIRequest *req = webkit_navigation_action_get_request(action);
-            const gchar *uri = webkit_uri_request_get_uri(req);
+            const gchar *uri = req ? webkit_uri_request_get_uri(req) : nullptr;
             std::string d_url;
             {
                 std::lock_guard<std::mutex> lk(g_config_mutex);
                 d_url = g_dev_url;
             }
-            if (uri && !SecurityPolicy::is_navigation_allowed(uri, g_dev_mode.load(), d_url)) {
+            if (!uri || !SecurityPolicy::is_navigation_allowed(uri, g_dev_mode.load(), d_url)) {
                 webkit_policy_decision_ignore(decision);
                 return TRUE;
             }
@@ -1159,7 +1258,17 @@ static inline webview_t webview_create(int debug, void *window) {
 static inline void webview_destroy(webview_t w) {
     if (!w) return;
     WebviewImpl *impl = static_cast<WebviewImpl *>(w);
-    gtk_widget_destroy(impl->window);
+    if (impl->ucc) {
+        g_signal_handlers_disconnect_by_data(impl->ucc, impl);
+        webkit_user_content_manager_unregister_script_message_handler(impl->ucc, "__tauri_bridge__");
+        g_object_unref(impl->ucc);
+        impl->ucc = nullptr;
+    }
+    if (impl->window) {
+        g_signal_handlers_disconnect_by_data(impl->window, impl);
+        gtk_widget_destroy(impl->window);
+        impl->window = nullptr;
+    }
     delete impl;
 }
 

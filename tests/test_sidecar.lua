@@ -5,7 +5,8 @@ print("Running Sidecar Unit Tests...")
 
 local resolved = tauri.Sidecar.resolve_path("non_existent_binary_12345", "TestApp")
 assert(resolved == nil, "Non existent binary must return nil")
-print("  - Non-existent binary returns nil: PASS")
+assert(tauri.Sidecar.resolve_path("../bin/sh", "TestApp") == nil, "Traversal in sidecar name must return nil")
+print("  - Non-existent & traversal sidecar names return nil: PASS")
 
 local test_bin = "/bin/sh"
 local resolved_sh = tauri.Sidecar.resolve_path(test_bin, "TestApp")

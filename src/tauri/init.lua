@@ -8,7 +8,7 @@ local function filter_absolute_only(path_str)
         if clean and clean ~= "" then
             local is_absolute = false
             if ffi.os == "Windows" then
-                is_absolute = clean:match("^[a-zA-Z]:[/\\]") ~= nil or clean:match("^\\\\") ~= nil
+                is_absolute = clean:match("^[a-zA-Z]:[/\\]") ~= nil
             else
                 is_absolute = clean:match("^/") ~= nil
             end
@@ -18,6 +18,15 @@ local function filter_absolute_only(path_str)
         end
     end
     return table.concat(parts, ";")
+end
+
+local function is_runtime_dev_mode()
+    local g_dev = rawget(_G, "__TAURI_DEV__")
+    if g_dev ~= nil then
+        return g_dev == true
+    end
+    local ok, val = pcall(os.getenv, "TAURILUA_DEV")
+    return ok and val ~= nil and val ~= "" and val ~= "0"
 end
 
 -- ============================================================================
@@ -91,15 +100,7 @@ local function get_executable_dir()
 end
 
 local function setup_module_search_paths(extra_conf)
-    local function is_dev_mode()
-        local ok, val = pcall(os.getenv, "TAURILUA_DEV")
-        if ok and val and val ~= "" and val ~= "0" then
-            return true
-        end
-        return false
-    end
-
-    local dev_mode = is_dev_mode()
+    local dev_mode = is_runtime_dev_mode()
     local exec_dir, exe_name = get_executable_info()
 
     local extra_lua_paths = {}
@@ -343,6 +344,8 @@ void bridge_set_dev_mode(int dev);
 void bridge_set_dev_url(const char *url);
 
 int platform_list_dir(const char *dir_path, char *out_buf, int max_len);
+int platform_read_dir(const char *dir_path, char *out_buf, int max_len);
+int platform_fs_write_file(const char *path, const char *data, int data_len);
 void platform_set_assets_path(const char *path);
 int platform_is_origin_allowed(const char *url);
 int platform_resolve_path(const char *in_path, char *out_path, int max_len);
@@ -399,9 +402,12 @@ void platform_state_set_string(const char *key, const char *val);
 int platform_state_get_string(const char *key, char *out_val, int max_len);
 void platform_state_set_number(const char *key, double val);
 int platform_state_get_number(const char *key, double *out_val);
+void platform_state_set_bool(const char *key, int val);
+int platform_state_get_bool(const char *key, int *out_val);
 void platform_state_set_json(const char *key, const char *json_val);
 int platform_state_get_json(const char *key, char *out_val, int max_len);
 int platform_state_get_length(const char *key);
+uint64_t platform_state_get_version(const char *key);
 int platform_state_has(const char *key);
 void platform_state_delete(const char *key);
 void platform_state_clear();
@@ -414,45 +420,12 @@ int platform_process_read_line(void *handle, char *out_buf, int max_len);
 int platform_process_wait(void *handle);
 void platform_process_close(void *handle);
 
+long platform_sidecar_spawn(const char *program, const char **args, int arg_count, const char **env_kv, int env_count, const char *cwd, const char *log_file);
+int platform_sidecar_is_running(long pid);
+int platform_sidecar_kill(long pid, int sig);
+
 int mkdir(const char *pathname, unsigned int mode);
 int _mkdir(const char *pathname);
-
-typedef struct _FILETIME {
-    unsigned long dwLowDateTime;
-    unsigned long dwHighDateTime;
-} FILETIME;
-
-typedef struct _WIN32_FIND_DATAW {
-    unsigned long dwFileAttributes;
-    FILETIME ftCreationTime;
-    FILETIME ftLastAccessTime;
-    FILETIME ftLastWriteTime;
-    unsigned long nFileSizeHigh;
-    unsigned long nFileSizeLow;
-    unsigned long dwReserved0;
-    unsigned long dwReserved1;
-    uint16_t cFileName[260];
-    uint16_t cAlternateFileName[14];
-} WIN32_FIND_DATAW;
-
-void* FindFirstFileW(const uint16_t *lpFileName, WIN32_FIND_DATAW *lpFindFileData);
-int FindNextFileW(void *hFindFile, WIN32_FIND_DATAW *lpFindFileData);
-int FindClose(void *hFindFile);
-int MultiByteToWideChar(uint32_t CodePage, uint32_t dwFlags, const char* lpMultiByteStr, int cbMultiByte, uint16_t* lpWideCharStr, int cchWideChar);
-int WideCharToMultiByte(uint32_t CodePage, uint32_t dwFlags, const uint16_t* lpWideCharStr, int cchWideChar, char* lpMultiByteStr, int cbMultiByte, const char* lpDefaultChar, int* lpUsedDefaultChar);
-
-typedef struct DIR DIR;
-typedef long off_t;
-struct dirent {
-    unsigned long d_ino;
-    off_t d_off;
-    unsigned short d_reclen;
-    unsigned char d_type;
-    char d_name[256];
-};
-DIR *opendir(const char *name);
-struct dirent *readdir(DIR *dirp);
-int closedir(DIR *dirp);
 int remove(const char *pathname);
 int usleep(unsigned int usec);
 void Sleep(unsigned long dwMilliseconds);
@@ -465,12 +438,18 @@ if not has_sym then
     pcall(function()
         local candidates = {
             "libtaurilua",
-            "./build/libtaurilua.dylib",
-            "./build/libtaurilua.so",
-            "./build/Release/taurilua.dll",
-            "./build/taurilua.dll",
             "taurilua"
         }
+        if rawget(_G, "__TAURI_DEV__") ~= false then
+            candidates = {
+                "libtaurilua",
+                "./build/libtaurilua.dylib",
+                "./build/libtaurilua.so",
+                "./build/Release/taurilua.dll",
+                "./build/taurilua.dll",
+                "taurilua"
+            }
+        end
         for _, name in ipairs(candidates) do
             local ok, lib = pcall(ffi.load, name)
             if ok and lib then
@@ -485,6 +464,8 @@ local has_state_sym = pcall(function() return clib.platform_state_has end)
 if not has_state_sym then
     local _state_store = {}
     local _state_types = {}
+    local _state_versions = {}
+    local _state_epoch = 0
     local real_clib = clib
     clib = setmetatable({
         platform_state_lock = function() end,
@@ -497,21 +478,31 @@ if not has_state_sym then
             local sk = type(k) == "string" and k or ffi.string(k)
             _state_store[sk] = nil
             _state_types[sk] = nil
+            _state_versions[sk] = (_state_versions[sk] or 0) + 1
         end,
         platform_state_set_number = function(k, v)
             local sk = type(k) == "string" and k or ffi.string(k)
             _state_store[sk] = tonumber(v)
             _state_types[sk] = "number"
+            _state_versions[sk] = (_state_versions[sk] or 0) + 1
+        end,
+        platform_state_set_bool = function(k, v)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            _state_store[sk] = (v ~= 0)
+            _state_types[sk] = "bool"
+            _state_versions[sk] = (_state_versions[sk] or 0) + 1
         end,
         platform_state_set_string = function(k, v)
             local sk = type(k) == "string" and k or ffi.string(k)
             _state_store[sk] = type(v) == "string" and v or ffi.string(v)
             _state_types[sk] = "string"
+            _state_versions[sk] = (_state_versions[sk] or 0) + 1
         end,
         platform_state_set_json = function(k, v)
             local sk = type(k) == "string" and k or ffi.string(k)
             _state_store[sk] = type(v) == "string" and v or ffi.string(v)
             _state_types[sk] = "json"
+            _state_versions[sk] = (_state_versions[sk] or 0) + 1
         end,
         platform_state_get_number = function(k, buf)
             local sk = type(k) == "string" and k or ffi.string(k)
@@ -520,6 +511,18 @@ if not has_state_sym then
                 return 1
             end
             return 0
+        end,
+        platform_state_get_bool = function(k, buf)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            if _state_types[sk] == "bool" then
+                buf[0] = _state_store[sk] and 1 or 0
+                return 1
+            end
+            return 0
+        end,
+        platform_state_get_version = function(k)
+            local sk = type(k) == "string" and k or ffi.string(k)
+            return (_state_epoch * 4294967296) + (_state_versions[sk] or 0)
         end,
         platform_state_get_string = function(k, buf, maxlen)
             local sk = type(k) == "string" and k or ffi.string(k)
@@ -566,6 +569,8 @@ if not has_state_sym then
         platform_state_clear = function()
             _state_store = {}
             _state_types = {}
+            _state_versions = {}
+            _state_epoch = _state_epoch + 1
         end,
         platform_window_eval = function(...) end,
         platform_resolve_path = function(in_path, out_buf, maxlen)
@@ -573,9 +578,29 @@ if not has_state_sym then
             if not out_buf or maxlen <= 0 then return 0 end
             local ok, rp = pcall(function() return real_clib.realpath(p, out_buf) end)
             if ok and rp ~= nil then
+                out_buf[maxlen - 1] = 0
                 return 1
             end
-            ffi.copy(out_buf, p, math.min(#p + 1, maxlen))
+            local probe = p:gsub("\\", "/")
+            local suffix = {}
+            while probe ~= "" and probe ~= "/" do
+                local parent, leaf = probe:match("^(.*)/([^/]+)$")
+                if not leaf then break end
+                table.insert(suffix, 1, leaf)
+                probe = (parent == "" and "/" or parent)
+                local ok_p, rp_p = pcall(function() return real_clib.realpath(probe, out_buf) end)
+                if ok_p and rp_p ~= nil then
+                    out_buf[maxlen - 1] = 0
+                    local base = ffi.string(out_buf)
+                    local joined = base == "/" and ("/" .. table.concat(suffix, "/")) or (base .. "/" .. table.concat(suffix, "/"))
+                    if #joined >= maxlen then return 0 end
+                    ffi.copy(out_buf, joined, #joined + 1)
+                    return 1
+                end
+            end
+            if #p >= maxlen then return 0 end
+            ffi.copy(out_buf, p, #p + 1)
+            out_buf[maxlen - 1] = 0
             return 1
         end,
     }, {
@@ -637,8 +662,12 @@ local function encode_string(s)
     end) .. '"'
 end
 
-function json.encode(val, visited)
+function json.encode(val, visited, depth)
     visited = visited or {}
+    depth = depth or 0
+    if depth > 128 then
+        error("JSON encode error: maximum nesting depth exceeded")
+    end
     local t = type(val)
     if val == nil or val == json.null or (t == "table" and getmetatable(val) and getmetatable(val).__is_json_null) then
         return "null"
@@ -687,16 +716,20 @@ function json.encode(val, visited)
         end
 
         if (is_array and max_idx == count) or (is_explicit_array and is_array) then
+            if max_idx > count and max_idx > 4096 then
+                visited[val] = nil
+                error("JSON encode error: sparse array index exceeds limit")
+            end
             local parts = {}
             for i = 1, max_idx do
-                parts[i] = json.encode(val[i], visited)
+                parts[i] = json.encode(val[i], visited, depth + 1)
             end
             visited[val] = nil
             return "[" .. table.concat(parts, ",") .. "]"
         else
             local parts = {}
             for k, v in pairs(val) do
-                table.insert(parts, encode_string(tostring(k)) .. ":" .. json.encode(v, visited))
+                table.insert(parts, encode_string(tostring(k)) .. ":" .. json.encode(v, visited, depth + 1))
             end
             visited[val] = nil
             return "{" .. table.concat(parts, ",") .. "}"
@@ -988,20 +1021,22 @@ function Security.new(config)
     local self = setmetatable({}, Security)
     local sec = (config.app and config.app.security) or (config.tauri and config.tauri.security) or config.security or {}
     self.capabilities = {}
+    local function add_cap(cap)
+        if type(cap) == "string" and cap ~= "" then
+            self.capabilities[cap] = true
+            local stripped = cap:gsub("^tauri:", "")
+            if stripped ~= "" then
+                self.capabilities[stripped] = true
+            end
+        end
+    end
     if sec.capabilities then
         for _, cap in ipairs(sec.capabilities) do
-            self.capabilities[cap] = true
+            add_cap(cap)
         end
     end
 
-    -- Support capability files:
-    -- In release mode, NEVER scan CWD! Only scan bundle directory if provided.
-    -- In dev mode, scan explicit dev capability dirs: src-tauri/capabilities and capabilities.
-    local is_dev = rawget(_G, "__TAURI_DEV__")
-    if is_dev == nil then
-        local env_dev = os.getenv("TAURILUA_DEV")
-        is_dev = (env_dev and env_dev ~= "" and env_dev ~= "0")
-    end
+    local is_dev = is_runtime_dev_mode()
 
     local cap_dirs = {}
     if is_dev then
@@ -1045,7 +1080,7 @@ function Security.new(config)
                     end
                     for _, perm in ipairs(list) do
                         if type(perm) == "string" and perm ~= "" then
-                            self.capabilities[perm] = true
+                            add_cap(perm)
                         else
                             error(string.format("Capability discovery error: invalid permission in '%s'", full_path))
                         end
@@ -1057,11 +1092,7 @@ function Security.new(config)
 
     self.scopes = sec.scope or {}
 
-    -- allowed_programs: list of strings or tables {name="cmd", args={"--allowed-flag", ...}}
-    -- String entry means: program allowed (subject to dangerous flag blocking).
-    -- Table entry means: program allowed ONLY with args from the given list.
     self.allowed_programs = sec.allowed_programs or sec.allowed_commands or {}
-    -- Build a fast-lookup map: program_name -> arg_policy (false = explicit opt-in for any args, table = strict args)
     self._program_map = {}
     for _, entry in ipairs(self.allowed_programs) do
         if type(entry) == "string" then
@@ -1074,7 +1105,7 @@ function Security.new(config)
             local prog = entry.name or entry.program or entry.cmd
             if prog then
                 if entry.any_args == true or entry.args == "*" or entry.args == false then
-                    self._program_map[prog] = false  -- explicit opt-in for any arguments
+                    self._program_map[prog] = false
                 elseif type(entry.args) == "table" then
                     self._program_map[prog] = entry.args
                 else
@@ -1095,24 +1126,32 @@ function Security:assert_capability(name)
         return true
     end
     local prefix = stripped:match("^([^:]+):")
-    if prefix and (self.capabilities[prefix .. ":*"] or self.capabilities[prefix .. ":all"] or self.capabilities[prefix .. ":default"]) then
-        if prefix ~= "fs" then
-            if stripped == "window:create:external" and (self.capabilities["window:default"] or self.capabilities["core:default"]) then
-            elseif (stripped == "state:set" or stripped == "state:write") and self.capabilities["state:default"] and not self.capabilities["state:*"] and not self.capabilities["state:all"] and not self.capabilities["state:set"] and not self.capabilities["state:write"] then
-            else
+    if prefix and (self.capabilities[prefix .. ":*"] or self.capabilities[prefix .. ":all"]) then
+        return true
+    end
+    if prefix and self.capabilities[prefix .. ":default"] then
+        if prefix == "fs" then
+            if stripped == "fs:read-text-file" or stripped == "fs:read-file" or stripped == "fs:read-dir" or stripped == "fs:exists" or stripped == "fs:stat" then
                 return true
             end
+        elseif prefix == "state" then
+            if stripped == "state:get" or stripped == "state:has" or stripped == "state:read" then
+                return true
+            end
+        elseif prefix == "window" then
+            if stripped ~= "window:create:external" then
+                return true
+            end
+        elseif prefix == "dialog" or prefix == "notification" or prefix == "path" or prefix == "theme" or prefix == "event" or prefix == "shortcut" or prefix == "tray" or prefix == "menu" then
+            return true
         end
-    end
-    if self.capabilities["fs:default"] and (stripped == "fs:read-text-file" or stripped == "fs:read-file" or stripped == "fs:read-dir" or stripped == "fs:exists" or stripped == "fs:stat") then
-        return true
     end
     if self.capabilities["core:default"] and stripped ~= "window:create:external" and (prefix == "core" or
        stripped:match("^window:") or
        stripped:match("^shortcut:") or
        stripped:match("^tray:") or
        stripped == "menu:set" or
-       (stripped:match("^state:") and stripped ~= "state:set" and stripped ~= "state:write") or
+       (stripped:match("^state:") and stripped ~= "state:set" and stripped ~= "state:write" and stripped ~= "state:delete" and stripped ~= "state:clear") or
        stripped:match("^store:") or
        stripped:match("^path:") or
        stripped == "theme:get" or
@@ -1129,8 +1168,16 @@ function Security:assert_program(program)
     if prog_str == "" or prog_str:find("%z") then
         error("Shell: invalid program name")
     end
-    local lower_prog = prog_str:lower()
-    if lower_prog:match("%.bat$") or lower_prog:match("%.cmd$") then
+    local lower_prog = prog_str:lower():gsub("[%.%s]+$", "")
+    if lower_prog:find(":", 3, true) then
+        error(string.format("Shell: alternate data stream path is blocked for security: %s", prog_str))
+    end
+    if lower_prog:match("%.bat$") or lower_prog:match("%.cmd$") or
+       lower_prog:match("%.com$") or lower_prog:match("%.vbs$") or
+       lower_prog:match("%.vbe$") or lower_prog:match("%.ps1$") or
+       lower_prog:match("%.hta$") or lower_prog:match("%.wsf$") or
+       lower_prog:match("%.jse?$") or lower_prog:match("%.scr$") or
+       lower_prog:match("%.pif$") then
         error(string.format("Shell: direct execution of .bat / .cmd files is blocked for security (CWE-78): %s", prog_str))
     end
     if not self.allowed_programs or #self.allowed_programs == 0 then
@@ -1138,11 +1185,11 @@ function Security:assert_program(program)
     end
     local has_sep = prog_str:find("[/\\]") ~= nil
     local rule = self._program_map[prog_str]
-    if not rule and not has_sep then
+    if rule == nil and not has_sep then
         local base_name = prog_str:match("[^/\\]+$") or prog_str
         rule = self._program_map[base_name]
     end
-    if not rule then
+    if rule == nil then
         error(string.format("Shell: program not in allowlist: %s", prog_str))
     end
     return rule
@@ -1154,26 +1201,32 @@ function Security:assert_args(program, args)
 
     for _, arg in ipairs(args) do
         local a = tostring(arg)
+        if a:find("%z") then
+            error(string.format("Shell: blocked dangerous argument containing NUL byte for '%s'", tostring(program)))
+        end
         if prog_base == "git" then
             if a == "-c" or a:match("^%-c")
+               or a == "-C" or a:match("^%-C")
                or a == "--exec-path" or a:match("^%-%-exec%-path")
                or a == "--upload-pack" or a:match("^%-%-upload%-pack")
                or a == "--receive-pack" or a:match("^%-%-receive%-pack")
                or a == "--config-env" or a:match("^%-%-config%-env")
                or a == "--pager" or a:match("^%-%-pager")
+               or a == "--git-dir" or a:match("^%-%-git%-dir")
+               or a == "--work-tree" or a:match("^%-%-work%-tree")
+               or a == "--template" or a:match("^%-%-template")
                or a:match("^ext::") then
                 error(string.format("Shell: blocked dangerous argument for '%s': %s", tostring(program), a))
             end
-        elseif (prog_base == "find" and (a == "-exec" or a == "-execdir" or a == "-ok")) or
+        elseif (prog_base == "find" and (a == "-exec" or a == "-execdir" or a == "-ok" or a == "-okdir")) or
                (prog_base == "xargs" and (a:match("^%-I") or a:match("^%-%-replace"))) or
-               (prog_base == "ssh" and (a:lower():match("proxycommand"))) then
+               (prog_base == "ssh" and (a:lower():match("proxycommand") or a:lower():match("localcommand") or a:lower():match("remotecommand") or a == "-F" or a:match("^%-F"))) then
             error(string.format("Shell: blocked dangerous argument for '%s': %s", tostring(program), a))
         end
     end
 
-    -- 2. Whitelist check
     if self._program_map["*"] == false then
-        return -- wildcard any program and any args
+        return
     end
 
     local arg_policy = self._program_map[program]
@@ -1181,7 +1234,6 @@ function Security:assert_args(program, args)
         arg_policy = self._program_map[prog_base]
     end
     if arg_policy == false then
-        -- Explicit opt-in for any arguments on this program
         return
     end
 
@@ -1199,7 +1251,6 @@ function Security:assert_args(program, args)
         return
     end
 
-    -- If no arguments allowlist was configured, default deny non-empty arguments
     if #args > 0 then
         error(string.format("Shell: arguments not permitted for program '%s' (no arg allowlist defined)", tostring(program)))
     end
@@ -1289,45 +1340,81 @@ function Security:assert_scope(target_path, base_paths)
     end
 
     local function substitute_base(str)
-        return str:gsub("%$([A-Z_]+)", function(var)
-            if var == "APPDATA" then return base_paths and base_paths.appData or ""
-            elseif var == "HOME" then return base_paths and base_paths.home or ""
-            elseif var == "DESKTOP" then return base_paths and base_paths.desktop or ""
+        local empty_var = false
+        local out = str:gsub("%$([A-Z_]+)", function(var)
+            local v = nil
+            if var == "APPDATA" then v = base_paths and base_paths.appData
+            elseif var == "HOME" then v = base_paths and base_paths.home
+            elseif var == "DESKTOP" then v = base_paths and base_paths.desktop
+            else return "$" .. var end
+            if type(v) ~= "string" or v == "" then
+                empty_var = true
+                return ""
             end
-            return "$" .. var
+            return v
         end)
+        if empty_var then return nil end
+        return out
     end
 
     local expanded_target = substitute_base(target_path)
+    if not expanded_target or expanded_target == "" then
+        error(string.format("Accesso negato dallo Scope: %s", target_path))
+    end
     local normalized = real_filesystem_path(expanded_target)
 
     for _, pattern in ipairs(self.scopes) do
         if type(pattern) == "string" and pattern ~= "" then
-            local resolved = substitute_base(pattern):gsub("\\", "/")
-            local is_recursive = resolved:match("%*%*$") ~= nil
-            local is_direct = (resolved:match("%*$") ~= nil) and not is_recursive
-            local base_str = resolved:gsub("/%*%*?$", "")
-            local canonical_base = real_filesystem_path(base_str)
-            local escaped_base = canonical_base:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1")
-
-            if is_recursive then
-                if normalized == canonical_base or normalized:match("^" .. escaped_base .. "/.*$") then
-                    return normalized
-                end
-            elseif is_direct then
-                if normalized:match("^" .. escaped_base .. "/[^/]+$") then
-                    return normalized
-                end
-            else
-                local canonical_pat = real_filesystem_path(resolved)
-                local pat = glob_to_lua_pattern(canonical_pat)
-                if normalized == canonical_pat or normalized:match(pat) then
-                    return normalized
+            local expanded_pat = substitute_base(pattern)
+            if expanded_pat and expanded_pat ~= "" then
+                local resolved = expanded_pat:gsub("\\", "/")
+                local is_recursive = resolved:match("/%*%*$") ~= nil
+                local is_direct = (resolved:match("/%*$") ~= nil) and not is_recursive
+                if is_recursive or is_direct then
+                    local base_str = is_recursive and resolved:sub(1, -4) or resolved:sub(1, -3)
+                    if base_str ~= "" then
+                        local ok_base, canonical_base = pcall(real_filesystem_path, base_str)
+                        if ok_base and canonical_base and canonical_base ~= "" then
+                            local escaped_base = canonical_base:gsub("([%(%)%.%%%+%-%*%?%[%^%$])", "%%%1")
+                            if is_recursive then
+                                if normalized == canonical_base or normalized:match("^" .. escaped_base .. "/.*$") then
+                                    return normalized
+                                end
+                            else
+                                if normalized:match("^" .. escaped_base .. "/[^/]+$") then
+                                    return normalized
+                                end
+                            end
+                        end
+                    end
+                else
+                    local ok_pat, canonical_pat = pcall(real_filesystem_path, resolved)
+                    if ok_pat and canonical_pat and canonical_pat ~= "" then
+                        local pat = glob_to_lua_pattern(canonical_pat)
+                        if normalized == canonical_pat or normalized:match(pat) then
+                            return normalized
+                        end
+                    end
                 end
             end
         end
     end
     error(string.format("Accesso negato dallo Scope: %s", target_path))
+end
+
+local function with_state_lock(fn)
+    local has_lock = clib and clib.platform_state_lock and clib.platform_state_unlock
+    if has_lock then
+        clib.platform_state_lock()
+    end
+    local ok, res, err = pcall(fn)
+    if has_lock then
+        clib.platform_state_unlock()
+    end
+    if not ok then
+        error(res)
+    end
+    return res, err
 end
 
 local State = {}
@@ -1336,7 +1423,6 @@ State.__index = State
 function State.new(json_codec)
     local self = setmetatable({}, State)
     self.json = json_codec
-    self._versions = {}
     return self
 end
 
@@ -1348,33 +1434,30 @@ function State:update(key, callback, max_retries)
     local skey = tostring(key)
 
     for _ = 1, max_retries do
-        -- 1. Read current value and version snapshot under brief lock
-        clib.platform_state_lock()
-        local current = self:get(skey)
-        local ver = self._versions[skey] or 0
-        clib.platform_state_unlock()
+        local current, ver = with_state_lock(function()
+            return self:get(skey), clib.platform_state_get_version(skey)
+        end)
 
-        -- 2. Execute user callback strictly WITHOUT holding the mutex (prevents deadlocks during I/O)
         local ok, next_val = pcall(callback, current)
         if not ok then
             error(next_val)
         end
 
-        -- 3. Atomic CAS commit: verify version hasn't changed, then write and increment version
-        clib.platform_state_lock()
-        local current_ver = self._versions[skey] or 0
-        if current_ver == ver then
-            if next_val ~= nil then
-                self:set(skey, next_val)
-            else
-                self:delete(skey)
+        local committed = with_state_lock(function()
+            local current_ver = clib.platform_state_get_version(skey)
+            if current_ver == ver then
+                if next_val ~= nil then
+                    self:set(skey, next_val)
+                else
+                    self:delete(skey)
+                end
+                return true
             end
-            self._versions[skey] = current_ver + 1
-            clib.platform_state_unlock()
+            return false
+        end)
+        if committed then
             return next_val
         end
-        clib.platform_state_unlock()
-        -- Version changed: conflict detected, retry CAS loop
     end
 
     error(string.format("State:update failed: CAS conflict retry limit exceeded (%d attempts) for key '%s'", max_retries, skey))
@@ -1390,7 +1473,7 @@ function State:set(key, value)
     elseif vtype == "table" then
         clib.platform_state_set_json(skey, self.json.encode(value))
     elseif vtype == "boolean" then
-        clib.platform_state_set_string(skey, value and "true" or "false")
+        clib.platform_state_set_bool(skey, value and 1 or 0)
     elseif vtype == "nil" then
         clib.platform_state_delete(skey)
     end
@@ -1398,41 +1481,43 @@ end
 
 function State:get(key)
     local k = tostring(key)
-    if clib.platform_state_has(k) == 0 then
+    return with_state_lock(function()
+        if clib.platform_state_has(k) == 0 then
+            return nil
+        end
+
+        local num_buf = ffi.new("double[1]")
+        if clib.platform_state_get_number(k, num_buf) == 1 then
+            return tonumber(num_buf[0])
+        end
+
+        local bool_buf = ffi.new("int[1]")
+        if clib.platform_state_get_bool(k, bool_buf) == 1 then
+            return bool_buf[0] ~= 0
+        end
+
+        local buf_size = 65536
+        local s_buf = ffi.new("char[?]", buf_size)
+        local rc_j = clib.platform_state_get_json(k, s_buf, buf_size)
+        if rc_j > 1 then
+            s_buf = ffi.new("char[?]", rc_j)
+            rc_j = clib.platform_state_get_json(k, s_buf, rc_j)
+        end
+        if rc_j == 1 then
+            return self.json.decode(ffi.string(s_buf))
+        end
+
+        local rc_s = clib.platform_state_get_string(k, s_buf, buf_size)
+        if rc_s > 1 then
+            s_buf = ffi.new("char[?]", rc_s)
+            rc_s = clib.platform_state_get_string(k, s_buf, rc_s)
+        end
+        if rc_s == 1 then
+            return ffi.string(s_buf)
+        end
+
         return nil
-    end
-
-    local num_buf = ffi.new("double[1]")
-    if clib.platform_state_get_number(k, num_buf) == 1 then
-        return tonumber(num_buf[0])
-    end
-
-    local buf_size = 65536
-    local s_buf = ffi.new("char[?]", buf_size)
-    local rc_j = clib.platform_state_get_json(k, s_buf, buf_size)
-    if rc_j > 1 then
-        s_buf = ffi.new("char[?]", rc_j)
-        rc_j = clib.platform_state_get_json(k, s_buf, rc_j)
-    end
-    if rc_j == 1 then
-        local raw = ffi.string(s_buf)
-        if raw == "true" then return true end
-        if raw == "false" then return false end
-        return self.json.decode(raw)
-    end
-    local rc_s = clib.platform_state_get_string(k, s_buf, buf_size)
-    if rc_s > 1 then
-        s_buf = ffi.new("char[?]", rc_s)
-        rc_s = clib.platform_state_get_string(k, s_buf, rc_s)
-    end
-    if rc_s == 1 then
-        local raw = ffi.string(s_buf)
-        if raw == "true" then return true end
-        if raw == "false" then return false end
-        return raw
-    end
-
-    return nil
+    end)
 end
 
 function State:has(key)
@@ -1475,21 +1560,6 @@ local function safe_mkdir_p(target_path)
     return true
 end
 
-local function with_state_lock(fn)
-    local has_lock = clib and clib.platform_state_lock and clib.platform_state_unlock
-    if has_lock then
-        clib.platform_state_lock()
-    end
-    local ok, res, err = pcall(fn)
-    if has_lock then
-        clib.platform_state_unlock()
-    end
-    if not ok then
-        error(res)
-    end
-    return res, err
-end
-
 local Store = {}
 Store.__index = Store
 
@@ -1522,18 +1592,27 @@ function Store:save()
         if parent and parent ~= "" then
             safe_mkdir_p(parent)
         end
+        local encoded = self.json.encode(self.data)
         local tmp_path = self.path .. ".tmp"
         local f = io.open(tmp_path, "wb")
         if f then
-            f:write(self.json.encode(self.data))
-            f:flush()
+            local w_ok = f:write(encoded)
+            local fl_ok = w_ok and f:flush()
             f:close()
+            if not w_ok or not fl_ok then
+                pcall(os.remove, tmp_path)
+                return false
+            end
             local ok = os.rename(tmp_path, self.path)
             if not ok then
                 os.remove(self.path)
                 ok = os.rename(tmp_path, self.path)
             end
-            return ok == true or ok == 0
+            if not (ok == true or ok == 0) then
+                pcall(os.remove, tmp_path)
+                return false
+            end
+            return true
         end
         return false
     end)
@@ -2119,11 +2198,12 @@ local TAURI_CLIENT_SCRIPT = [[
 ]]
 
 
--- ============================================================================
--- Native Sidecar Process Manager
--- Spawns, manages, and terminates background native binaries bundled with the app.
--- Automatically resolves target architecture, platform bundles, and lifecycle.
--- ============================================================================
+local Tauri = {}
+Tauri.__index = Tauri
+Tauri._filter_absolute_only = filter_absolute_only
+
+local g_tauri_instance = nil
+
 local Sidecar = {}
 Sidecar.__index = Sidecar
 
@@ -2149,18 +2229,26 @@ local function sh_quote(s)
 end
 
 local FORBIDDEN_ENV_KEYS = {
-    LD_PRELOAD = true, LD_LIBRARY_PATH = true, LD_AUDIT = true,
-    DYLD_INSERT_LIBRARIES = true, DYLD_LIBRARY_PATH = true, DYLD_FRAMEWORK_PATH = true,
     PATH = true, IFS = true, BASH_ENV = true, ENV = true,
     NODE_OPTIONS = true, PYTHONSTARTUP = true, PYTHONPATH = true,
-    LUA_PATH = true, LUA_CPATH = true, LUA_INIT = true
+    LUA_PATH = true, LUA_CPATH = true, LUA_INIT = true,
+    JAVA_TOOL_OPTIONS = true, _JAVA_OPTIONS = true,
+    GIT_SSH_COMMAND = true, GIT_EXEC_PATH = true,
+    PERL5OPT = true, PERL5LIB = true, RUBYOPT = true,
+    GCONV_PATH = true, HOSTALIASES = true, MALLOC_TRACE = true,
+    SSLKEYLOGFILE = true, SHELLOPTS = true, PS4 = true,
+    ZDOTDIR = true, DOTNET_STARTUP_HOOKS = true, CDPATH = true
 }
 
 local function is_safe_env_key(k)
     if type(k) ~= "string" or not k:match("^[a-zA-Z_][a-zA-Z0-9_]*$") then
         return false
     end
-    if FORBIDDEN_ENV_KEYS[k:upper()] then
+    local ku = k:upper()
+    if ku:match("^LD_") or ku:match("^DYLD_") then
+        return false
+    end
+    if FORBIDDEN_ENV_KEYS[ku] then
         return false
     end
     return true
@@ -2188,10 +2276,13 @@ local function parse_env_file(path)
 end
 
 function Sidecar.resolve_path(name, app_name)
-    if not name or name == '' then return nil end
+    if type(name) ~= "string" or name == "" or name:find("%z") or name:find("%.%.") then return nil end
     app_name = app_name or 'tauri-lua-app'
 
-    local is_dev = (os.getenv("TAURILUA_DEV") == "1") or (rawget(_G, "__TAURI_DEV__") == true)
+    local is_dev = is_runtime_dev_mode()
+    if not is_dev and name:find("[/\\]") then
+        return nil
+    end
     local os_name = ffi.os
     local arch_name = ffi.arch
     local norm_arch = (arch_name == 'arm64' or arch_name == 'aarch64') and 'arm64' or 'amd64'
@@ -2240,7 +2331,7 @@ function Sidecar.resolve_path(name, app_name)
         table.insert(search_dirs, '/opt/' .. clean_name .. '/binaries')
         table.insert(search_dirs, '/opt/' .. slug_name .. '/binaries')
         local appdir = os.getenv('APPDIR')
-        if appdir and appdir ~= '' then
+        if appdir and appdir ~= '' and appdir:sub(1, 1) == '/' and not appdir:find('%.%.') and exec_dir and exec_dir:sub(1, #appdir) == appdir then
             table.insert(search_dirs, appdir .. '/usr/share/' .. clean_name .. '/binaries')
             table.insert(search_dirs, appdir .. '/usr/share/' .. slug_name .. '/binaries')
         end
@@ -2293,18 +2384,21 @@ function Sidecar.find_env_file(explicit_path, binary_path, app_name)
     if explicit and explicit ~= "" and file_exists(explicit) then
         return explicit
     end
-    local is_dev = (os.getenv("TAURILUA_DEV") == "1") or (_G.__TAURI_DEV__ == true)
+    local is_dev = is_runtime_dev_mode()
     local candidates = {}
     if is_dev then
         table.insert(candidates, "src-tauri/binaries/.env")
         table.insert(candidates, ".env")
     end
     local home = os.getenv("HOME") or os.getenv("USERPROFILE")
-    if home and app and app ~= "" then
+    if home and home ~= "" and app and app ~= "" then
         if ffi.os == "OSX" then
             table.insert(candidates, home .. "/Library/Application Support/" .. app .. "/.env")
         elseif ffi.os == "Windows" then
-            local appdata = os.getenv("APPDATA") or (home .. "\\AppData\\Roaming")
+            local appdata = os.getenv("APPDATA")
+            if not appdata or appdata == "" then
+                appdata = home .. "\\AppData\\Roaming"
+            end
             table.insert(candidates, appdata .. "\\" .. app .. "\\.env")
         else
             table.insert(candidates, home .. "/.config/" .. app .. "/.env")
@@ -2313,15 +2407,18 @@ function Sidecar.find_env_file(explicit_path, binary_path, app_name)
     if bin and bin ~= "" then
         local bin_dir = bin:match("^(.*)[/\\][^/\\]+$")
         if bin_dir then
-            table.insert(candidates, bin_dir .. "/.env")
+            if is_dev then
+                table.insert(candidates, bin_dir .. "/.env")
+            end
+            table.insert(candidates, bin_dir .. "/sidecar.defaults.env")
         end
     end
     local exe_dir = get_executable_dir()
     if exe_dir then
-        table.insert(candidates, exe_dir .. "/../Resources/binaries/.env")
-        table.insert(candidates, exe_dir .. "/binaries/.env")
+        table.insert(candidates, exe_dir .. "/../Resources/binaries/sidecar.defaults.env")
+        table.insert(candidates, exe_dir .. "/binaries/sidecar.defaults.env")
         if app and app ~= "" then
-            table.insert(candidates, "/usr/share/" .. app .. "/binaries/.env")
+            table.insert(candidates, "/usr/share/" .. app .. "/binaries/sidecar.defaults.env")
         end
     end
     for _, c in ipairs(candidates) do
@@ -2364,8 +2461,8 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
 
     local port = opts.port or tonumber(env_vars['PORT']) or 8060
     env_vars['PORT'] = tostring(port)
-    if not env_vars['FRONTEND_URL'] or env_vars['FRONTEND_URL'] == '' or env_vars['FRONTEND_URL'] == 'http://localhost:5173' then
-        env_vars['FRONTEND_URL'] = '*'
+    if not env_vars['FRONTEND_URL'] or env_vars['FRONTEND_URL'] == '' then
+        env_vars['FRONTEND_URL'] = opts.frontend_url or (ffi.os == 'Windows' and 'https://tauri.localhost' or 'tauri://localhost')
     end
 
     local host = opts.host or '127.0.0.1'
@@ -2375,11 +2472,20 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
         if ffi.os == 'Windows' then
             log_file = 'NUL'
         else
-            local tmp_f = string.format('/tmp/%s_%s.log', app_name:lower():gsub('[^%w_]', '_'), tostring(name):lower():gsub('[^%w_]', '_'))
-            local f_try = io.open(tmp_f, 'w')
-            if f_try then
-                f_try:close()
-                log_file = tmp_f
+            local safe_app = app_name:lower():gsub('[^%w_]', '_')
+            local safe_name = tostring(name):lower():gsub('[^%w_]', '_')
+            local log_base = (app_instance and app_instance.base_paths and app_instance.base_paths.appData)
+            if log_base and log_base ~= '' then
+                local log_dir = log_base .. '/' .. safe_app
+                safe_mkdir_p(log_dir)
+                local cand = string.format('%s/%s.log', log_dir, safe_name)
+                local f_try = io.open(cand, 'a')
+                if f_try then
+                    f_try:close()
+                    log_file = cand
+                else
+                    log_file = '/dev/null'
+                end
             else
                 log_file = '/dev/null'
             end
@@ -2400,32 +2506,58 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
         auto_kill = opts.auto_kill ~= false
     }, Sidecar)
 
-    local env_parts = {}
-    for k, v in pairs(env_vars) do
-        if is_safe_env_key(k) then
-            table.insert(env_parts, k .. '=' .. sh_quote(v))
-        end
-    end
-    local env_str = table.concat(env_parts, ' ')
-    if env_str ~= '' then env_str = env_str .. ' ' end
-
-    local args_parts = {}
+    local raw_args = {}
     if opts.args and type(opts.args) == 'table' then
         for _, a in ipairs(opts.args) do
-            table.insert(args_parts, sh_quote(a))
+            local sa = tostring(a)
+            if sa:find("%z") then error("Sidecar: invalid argument containing NUL byte") end
+            table.insert(raw_args, sa)
         end
     elseif opts.port then
-        table.insert(args_parts, '--port')
-        table.insert(args_parts, sh_quote(port))
+        table.insert(raw_args, '--port')
+        table.insert(raw_args, tostring(port))
     end
-    local args_str = #args_parts > 0 and (' ' .. table.concat(args_parts, ' ')) or ''
 
-    if ffi.os == 'Windows' then
-        local win_args = ''
-        if #args_parts > 0 then win_args = ' ' .. table.concat(args_parts, ' ') end
-        local cmd = string.format('start /B "" %s%s > %s 2>&1', sh_quote((bin_path:gsub("/", [[\]]))), win_args, sh_quote((log_file:gsub("/", [[\]]))))
-        os.execute(cmd)
-    else
+    local safe_env_kv = {}
+    for k, v in pairs(env_vars) do
+        local sv = tostring(v)
+        if is_safe_env_key(k) and not sv:find("%z") then
+            table.insert(safe_env_kv, k .. '=' .. sv)
+        end
+    end
+
+    local has_native_spawn, fn_native_spawn = pcall(function() return clib and clib.platform_sidecar_spawn end)
+    if has_native_spawn and fn_native_spawn then
+        local c_args = nil
+        if #raw_args > 0 then
+            c_args = ffi.new("const char*[?]", #raw_args)
+            for i = 1, #raw_args do c_args[i - 1] = raw_args[i] end
+        end
+        local c_env = nil
+        if #safe_env_kv > 0 then
+            c_env = ffi.new("const char*[?]", #safe_env_kv)
+            for i = 1, #safe_env_kv do c_env[i - 1] = safe_env_kv[i] end
+        end
+        local spawned_pid = tonumber(fn_native_spawn(bin_path, c_args, #raw_args, c_env, #safe_env_kv, bin_dir, log_file))
+        if spawned_pid and spawned_pid > 0 then
+            sc.pid = spawned_pid
+        end
+    elseif ffi.os ~= 'Windows' then
+        local env_parts = {}
+        for k, v in pairs(env_vars) do
+            if is_safe_env_key(k) then
+                table.insert(env_parts, k .. '=' .. sh_quote(v))
+            end
+        end
+        local env_str = table.concat(env_parts, ' ')
+        if env_str ~= '' then env_str = env_str .. ' ' end
+
+        local args_parts = {}
+        for _, a in ipairs(raw_args) do
+            table.insert(args_parts, sh_quote(a))
+        end
+        local args_str = #args_parts > 0 and (' ' .. table.concat(args_parts, ' ')) or ''
+
         local cmd = string.format('cd %s && %s%s%s > %s 2>&1 & echo $!',
             sh_quote(bin_dir),
             env_str,
@@ -2442,6 +2574,8 @@ function Sidecar.spawn(self_or_name, name_or_opts, maybe_opts)
                 pcall(clib.platform_register_child_pid, sc.pid)
             end
         end
+    else
+        error("Sidecar.spawn requires native bridge on Windows")
     end
 
     if app_instance then
@@ -2460,20 +2594,27 @@ end
 
 function Sidecar:is_running()
     if not self.pid or self.pid <= 0 then return false end
-    if ffi.os == 'Windows' then return true end
-    local code = os.execute(string.format('kill -0 %d 2>/dev/null', self.pid))
+    local has_fn, fn = pcall(function() return clib and clib.platform_sidecar_is_running end)
+    if has_fn and fn then
+        return fn(self.pid) == 1
+    end
+    if ffi.os == 'Windows' then return false end
+    local code = os.execute(string.format('kill -0 %d 2>/dev/null', math.floor(self.pid)))
     return code == 0
 end
 
 function Sidecar:kill(sig)
     if self.pid and self.pid > 0 then
-        if clib and clib.platform_unregister_child_pid then
-            pcall(clib.platform_unregister_child_pid, self.pid)
-        end
-        local s = sig or 15
-        pcall(os.execute, string.format('kill -%d %d 2>/dev/null', s, self.pid))
-        if not sig then
-            pcall(os.execute, string.format('(sleep 0.1 && kill -9 %d 2>/dev/null) &', self.pid))
+        local has_fn, fn = pcall(function() return clib and clib.platform_sidecar_kill end)
+        if has_fn and fn then
+            pcall(fn, self.pid, sig or 0)
+        else
+            if clib and clib.platform_unregister_child_pid then
+                pcall(clib.platform_unregister_child_pid, self.pid)
+            end
+            local s = math.floor(sig or 15)
+            local p = math.floor(self.pid)
+            pcall(os.execute, string.format('kill -%d %d 2>/dev/null', s, p))
         end
         self.pid = nil
     end
@@ -2496,12 +2637,6 @@ function Sidecar:to_table()
         log_file = self.log_file
     }
 end
-
-local Tauri = {}
-Tauri.__index = Tauri
-Tauri._filter_absolute_only = filter_absolute_only
-
-local g_tauri_instance = nil
 
 function Tauri.new(config)
     local self = setmetatable({}, Tauri)
@@ -2701,10 +2836,16 @@ end
 
 function Tauri.sleep(ms)
     ms = tonumber(ms) or 0
+    if ms <= 0 then return end
     if ffi.os == "Windows" then
-        clib.Sleep(ms)
+        clib.Sleep(math.floor(ms))
     else
-        clib.usleep(ms * 1000)
+        local remaining = math.floor(ms * 1000)
+        while remaining > 0 do
+            local chunk = remaining > 500000 and 500000 or remaining
+            clib.usleep(chunk)
+            remaining = remaining - chunk
+        end
     end
 end
 
@@ -2713,7 +2854,16 @@ function Tauri:_resolve_paths()
     if not home or home == "" then
         error("Impossibile risolvere la directory utente: variabili HOME e USERPROFILE mancanti (fail-closed)")
     end
-    local app_data = os.getenv("APPDATA") or (home .. "/.config")
+    local app_data = os.getenv("APPDATA")
+    if not app_data or app_data == "" then
+        if ffi.os == "OSX" then
+            app_data = home .. "/Library/Application Support"
+        elseif ffi.os == "Windows" then
+            app_data = home .. "/AppData/Roaming"
+        else
+            app_data = home .. "/.config"
+        end
+    end
     local desktop = home .. "/Desktop"
     self.base_paths = {
         home = home:gsub("\\", "/"),
@@ -2728,38 +2878,44 @@ function Tauri:_setup_asset_scheme()
     local bundle_conf = tauri_conf.bundle or self.config.bundle or {}
 
     local dist_dir = build_conf.frontendDist or build_conf.distDir or bundle_conf.distDir or "dist"
-    -- Strip leading "../" if running from root
     if dist_dir:sub(1, 3) == "../" then
         dist_dir = dist_dir:sub(4)
     end
 
+    local is_dev = is_runtime_dev_mode()
     local exec_dir, exe_name = get_executable_info()
     local app_name = (self.config.package and self.config.package.name) or self.config.productName or "app"
     local slug_name = slugify_package_name(app_name)
-    local candidates = {
-        dist_dir,
-        "/usr/share/" .. slug_name .. "/" .. dist_dir,
-        "/usr/share/" .. slug_name,
-        "/usr/local/share/" .. slug_name .. "/" .. dist_dir,
-        "/usr/local/share/" .. slug_name
-    }
-    if exe_name then
-        table.insert(candidates, "/usr/share/" .. exe_name .. "/" .. dist_dir)
-        table.insert(candidates, "/usr/share/" .. exe_name)
-        table.insert(candidates, "/usr/local/share/" .. exe_name .. "/" .. dist_dir)
-        table.insert(candidates, "/usr/local/share/" .. exe_name)
+    local candidates = {}
+    if is_dev then
+        table.insert(candidates, dist_dir)
     end
     if exec_dir then
+        if exec_dir:match("/Contents/MacOS$") then
+            local res_dir = exec_dir:gsub("/MacOS$", "/Resources")
+            table.insert(candidates, res_dir .. "/" .. dist_dir)
+            table.insert(candidates, res_dir)
+        end
+        table.insert(candidates, exec_dir .. "/" .. dist_dir)
+        table.insert(candidates, exec_dir)
         table.insert(candidates, exec_dir .. "/../share/" .. slug_name .. "/" .. dist_dir)
         table.insert(candidates, exec_dir .. "/../share/" .. slug_name)
         if exe_name then
             table.insert(candidates, exec_dir .. "/../share/" .. exe_name .. "/" .. dist_dir)
             table.insert(candidates, exec_dir .. "/../share/" .. exe_name)
         end
-        table.insert(candidates, exec_dir .. "/" .. dist_dir)
-        table.insert(candidates, exec_dir)
     end
-    local chosen_dist = dist_dir
+    table.insert(candidates, "/usr/share/" .. slug_name .. "/" .. dist_dir)
+    table.insert(candidates, "/usr/share/" .. slug_name)
+    table.insert(candidates, "/usr/local/share/" .. slug_name .. "/" .. dist_dir)
+    table.insert(candidates, "/usr/local/share/" .. slug_name)
+    if exe_name then
+        table.insert(candidates, "/usr/share/" .. exe_name .. "/" .. dist_dir)
+        table.insert(candidates, "/usr/share/" .. exe_name)
+        table.insert(candidates, "/usr/local/share/" .. exe_name .. "/" .. dist_dir)
+        table.insert(candidates, "/usr/local/share/" .. exe_name)
+    end
+    local chosen_dist = is_dev and dist_dir or (candidates[1] or dist_dir)
     for _, c in ipairs(candidates) do
         local f = io.open(c .. "/index.html", "r")
         if f then
@@ -2774,7 +2930,7 @@ function Tauri:_setup_asset_scheme()
     if dev_url and dev_url ~= "" then
         pcall(function() clib.bridge_set_dev_url(dev_url) end)
     end
-    if __TAURI_DEV__ and dev_url and dev_url ~= "" then
+    if is_dev and dev_url and dev_url ~= "" then
         self.default_origin = dev_url
         if not self.default_origin:match("/$") and not self.default_origin:match("%.html$") then
             self.default_origin = self.default_origin .. "/"
@@ -2927,30 +3083,36 @@ function Tauri:_register_builtins()
         local buf = ffi.new("char[?]", buf_size)
         local lines = {}
         local total_bytes = 0
-        local max_bytes = 1048576 -- 1MB output cap
-        local max_lines = 10000   -- 10,000 lines cap
+        local max_bytes = 1048576
+        local max_lines = 10000
         local capped = false
 
-        while true do
-            local n = clib.platform_process_read_line(handle, buf, buf_size)
-            if n <= 0 then
-                break
+        local read_ok, read_err = pcall(function()
+            while true do
+                local n = clib.platform_process_read_line(handle, buf, buf_size)
+                if n < 0 then
+                    break
+                end
+                local line = ffi.string(buf, n)
+                total_bytes = total_bytes + n
+                if #lines < max_lines and total_bytes <= max_bytes then
+                    table.insert(lines, line)
+                elseif not capped then
+                    capped = true
+                    table.insert(lines, "[output truncated: limit exceeded]")
+                end
+                if ch then
+                    ch:send({ line = line, type = "stdout" })
+                end
             end
-            local line = ffi.string(buf, n)
-            total_bytes = total_bytes + n
-            if #lines < max_lines and total_bytes <= max_bytes then
-                table.insert(lines, line)
-            elseif not capped then
-                capped = true
-                table.insert(lines, "[output truncated: limit exceeded]")
-            end
-            if ch then
-                ch:send({ line = line, type = "stdout" })
-            end
-        end
+        end)
 
         local exit_code = clib.platform_process_wait(handle)
         clib.platform_process_close(handle)
+
+        if not read_ok then
+            error(read_err)
+        end
 
         return {
             code = exit_code,
@@ -3142,83 +3304,65 @@ function Tauri:_register_builtins()
         if not f then
             error("Impossibile leggere il file: " .. tostring(err))
         end
-        local size = f:seek("end")
-        if size and size > 52428800 then
-            f:close()
-            error("File exceeds maximum read_text_file size limit (50MB)")
+        local max_bytes = 52428800
+        local chunks = {}
+        local total = 0
+        while true do
+            local chunk = f:read(65536)
+            if not chunk then break end
+            total = total + #chunk
+            if total > max_bytes then
+                f:close()
+                error("File exceeds maximum read_text_file size limit (50MB)")
+            end
+            table.insert(chunks, chunk)
         end
-        f:seek("set", 0)
-        local content = f:read("*a")
         f:close()
-        return content
+        return table.concat(chunks)
     end)
 
     self:register("tauri:fs:write_text_file", function(payload)
         self.security:assert_capability("fs:write-text-file")
-        local safe_path = self.security:assert_scope(payload.path, self.base_paths)
-        local f, err = io.open(safe_path, "w")
+        local safe_path = self.security:assert_scope(payload and payload.path, self.base_paths)
+        local data = tostring((payload and payload.contents) or "")
+        local has_native_write, fn_write = pcall(function() return clib and clib.platform_fs_write_file end)
+        if has_native_write and fn_write then
+            local rc = fn_write(safe_path, data, #data)
+            if rc ~= 1 then
+                error("Impossibile scrivere il file: " .. tostring(payload and payload.path))
+            end
+            return true
+        end
+        local f, err = io.open(safe_path, "wb")
         if not f then error(err) end
-        f:write(tostring(payload.contents or ""))
+        f:write(data)
         f:close()
         return true
     end)
 
     self:register("tauri:fs:read_dir", function(payload)
         self.security:assert_capability("fs:read-dir")
-        local safe_path = self.security:assert_scope(payload.path, self.base_paths)
-        local entries = {}
-        if ffi.os == "Windows" then
-            local search_path = safe_path:gsub("[/\\]+$", "") .. "\\*"
-            local k32 = clib
-            pcall(function() k32 = ffi.load("kernel32") end)
-            local mb2wc = (k32 and k32.MultiByteToWideChar) or clib.MultiByteToWideChar
-            local wc2mb = (k32 and k32.WideCharToMultiByte) or clib.WideCharToMultiByte
-            local fn_first = (k32 and k32.FindFirstFileW) or clib.FindFirstFileW
-            local fn_next = (k32 and k32.FindNextFileW) or clib.FindNextFileW
-            local fn_close = (k32 and k32.FindClose) or clib.FindClose
-
-            local wlen = mb2wc(65001, 0, search_path, #search_path, nil, 0)
-            local wsearch = ffi.new("uint16_t[?]", wlen + 1)
-            mb2wc(65001, 0, search_path, #search_path, wsearch, wlen)
-            wsearch[wlen] = 0
-
-            local find_data = ffi.new("WIN32_FIND_DATAW")
-            local hFind = fn_first(wsearch, find_data)
-            if hFind ~= ffi.cast("void*", -1) and hFind ~= nil then
-                while true do
-                    local nlen = 0
-                    while find_data.cFileName[nlen] ~= 0 do nlen = nlen + 1 end
-                    local ulen = wc2mb(65001, 0, find_data.cFileName, nlen, nil, 0, nil, nil)
-                    local ubuf = ffi.new("char[?]", ulen + 1)
-                    wc2mb(65001, 0, find_data.cFileName, nlen, ubuf, ulen, nil, nil)
-                    ubuf[ulen] = 0
-                    local name = ffi.string(ubuf, ulen)
-                    if name ~= "." and name ~= ".." then
-                        local is_dir = (bit.band(find_data.dwFileAttributes, 0x10) ~= 0)
-                        table.insert(entries, { name = name, isDirectory = is_dir })
-                    end
-                    if fn_next(hFind, find_data) == 0 then
-                        break
-                    end
-                end
-                fn_close(hFind)
-            else
-                error("Impossibile aprire la directory: " .. payload.path)
-            end
-        else
-            local dir = clib.opendir(safe_path)
-            if dir == nil then error("Impossibile aprire la directory: " .. payload.path) end
-            while true do
-                local entry = clib.readdir(dir)
-                if entry == nil then break end
-                local name = ffi.string(entry.d_name)
-                if name ~= "." and name ~= ".." then
-                    table.insert(entries, { name = name, isDirectory = (entry.d_type == 4) })
-                end
-            end
-            clib.closedir(dir)
+        local safe_path = self.security:assert_scope(payload and payload.path, self.base_paths)
+        local has_read_dir, fn_read_dir = pcall(function() return clib and clib.platform_read_dir end)
+        if not has_read_dir or not fn_read_dir then
+            error("Impossibile aprire la directory: native bridge unavailable")
         end
-        return entries
+        local buf_size = 65536
+        local buf = ffi.new("char[?]", buf_size)
+        local rc = fn_read_dir(safe_path, buf, buf_size)
+        if rc > 1 then
+            buf_size = rc
+            buf = ffi.new("char[?]", buf_size)
+            rc = fn_read_dir(safe_path, buf, buf_size)
+        end
+        if rc ~= 1 then
+            error("Impossibile aprire la directory: " .. tostring(payload and payload.path))
+        end
+        local decoded, dec_err = json.decode(ffi.string(buf))
+        if dec_err or type(decoded) ~= "table" then
+            error("Impossibile decodificare il contenuto della directory: " .. tostring(dec_err))
+        end
+        return decoded
     end)
 
     self:register("tauri:fs:remove", function(payload)
@@ -3407,14 +3551,15 @@ function Tauri:create_main_window()
         win_conf = self.config.tauri.window
     end
 
-    local title = win_conf.title or (self.config.package and self.config.package.name) or self.config.productName or "Tauri App"
-    local width = win_conf.width or 960
-    local height = win_conf.height or 640
-    local resizable = win_conf.resizable ~= false and 1 or 0
+    local host_ov = rawget(_G, "__TAURI_HOST_OVERRIDES__")
+    local title = (host_ov and host_ov.title) or win_conf.title or (self.config.package and self.config.package.name) or self.config.productName or "Tauri App"
+    local width = (host_ov and host_ov.width) or win_conf.width or 960
+    local height = (host_ov and host_ov.height) or win_conf.height or 640
+    local resizable = ((host_ov and host_ov.resizable ~= nil) and host_ov.resizable or (win_conf.resizable ~= false)) and 1 or 0
     local decorations = win_conf.decorations ~= false and 1 or 0
     local transparent = win_conf.transparent and 1 or 0
 
-    local url = win_conf.url
+    local url = (host_ov and host_ov.url) or win_conf.url
     if not url or url == "" then
         url = self.default_origin
     elseif not url:match("^https?://") and not url:match("^tauri://") then
@@ -3460,6 +3605,24 @@ function __TAURI_DISPATCH_IPC__(label, seq, req)
 
     local handler = g_tauri_instance.commands[cmd]
     if not handler then
+        local host_invoke = rawget(_G, "__TAURI_INVOKE_HOST_CMD__")
+        if type(host_invoke) == "function" then
+            local payload_str = type(raw_args) == "string" and raw_args or json.encode(args or {})
+            local found, is_err, out_json = host_invoke(tostring(cmd), payload_str, tostring(label or "main"))
+            if found then
+                if is_err then
+                    clib.platform_window_return_async(label, seq, 1, json.encode({ error = out_json or "Host command error" }))
+                else
+                    local decoded_out, dec_err = json.decode(out_json or "null")
+                    if dec_err then
+                        clib.platform_window_return_async(label, seq, 0, json.encode({ data = out_json }))
+                    else
+                        clib.platform_window_return_async(label, seq, 0, json.encode({ data = decoded_out }))
+                    end
+                end
+                return
+            end
+        end
         clib.platform_window_return_async(label, seq, 1, json.encode({ error = "Command not found: " .. tostring(cmd) }))
         return
     end
@@ -3601,7 +3764,7 @@ local function resolve_single_instance_socket_path(app_name)
 end
 
 local function parse_and_normalize_url(raw_url)
-    if type(raw_url) ~= "string" or raw_url == "" or raw_url:find("%z") then
+    if type(raw_url) ~= "string" or raw_url == "" or raw_url:find("[%z%c%s\\]") then
         error("Invalid URL")
     end
     local scheme, authority, raw_path = raw_url:match("^([a-zA-Z][a-zA-Z0-9%+%-%.]*)://([^/%?#]+)(.*)$")
@@ -3626,11 +3789,21 @@ local function parse_and_normalize_url(raw_url)
         end
         host = host:lower()
     end
-    host = host:gsub("%.$", "")
+    host = host:gsub("%.+$", "")
+    if host == "" then
+        error("Invalid URL authority")
+    end
+    local port = nil
+    if port_str ~= "" then
+        port = tonumber(port_str)
+        if not port or port < 1 or port > 65535 then
+            error("Invalid URL port")
+        end
+    end
     local path_only = (raw_path or ""):match("^([^%?#]*)") or ""
     if path_only == "" then path_only = "/" end
     local decoded_path = path_only:gsub("%%2[eE]", "."):gsub("%%2[fF]", "/"):gsub("%%5[cC]", "/")
-    if decoded_path:find("%%00") then
+    if decoded_path:lower():find("%%00", 1, true) then
         error("Invalid URL: NUL byte in path")
     end
     local segments = {}
@@ -3645,9 +3818,65 @@ local function parse_and_normalize_url(raw_url)
     return {
         scheme = scheme,
         host = host,
-        port = port_str ~= "" and tonumber(port_str) or nil,
+        port = port,
         path = norm_path
     }
+end
+
+local function parse_ipv6_groups(addr)
+    local clean = addr:gsub("%%.*$", "")
+    if clean == "" then return nil end
+    local double_count = 0
+    local idx = 1
+    while true do
+        local s = clean:find("::", idx, true)
+        if not s then break end
+        double_count = double_count + 1
+        if double_count > 1 then return nil end
+        idx = s + 2
+    end
+    local function parse_side(side)
+        local out = {}
+        if side == "" then return out end
+        local parts = {}
+        for p in (side .. ":"):gmatch("([^:]*):") do
+            table.insert(parts, p)
+        end
+        for i, p in ipairs(parts) do
+            if p == "" then return nil end
+            if i == #parts and p:find("%.", 1, true) then
+                local o1, o2, o3, o4 = p:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+                if not o1 then return nil end
+                local a, b, c, d = tonumber(o1), tonumber(o2), tonumber(o3), tonumber(o4)
+                if not a or not b or not c or not d or a > 255 or b > 255 or c > 255 or d > 255 then
+                    return nil
+                end
+                table.insert(out, a * 256 + b)
+                table.insert(out, c * 256 + d)
+            else
+                if #p > 4 or not p:match("^[0-9a-f]+$") then return nil end
+                table.insert(out, tonumber(p, 16))
+            end
+        end
+        return out
+    end
+    if double_count == 1 then
+        local pos = clean:find("::", 1, true)
+        local left = parse_side(clean:sub(1, pos - 1))
+        local right = parse_side(clean:sub(pos + 2))
+        if not left or not right then return nil end
+        local missing = 8 - (#left + #right)
+        if missing < 1 then return nil end
+        local groups = {}
+        for _, v in ipairs(left) do table.insert(groups, v) end
+        for _ = 1, missing do table.insert(groups, 0) end
+        for _, v in ipairs(right) do table.insert(groups, v) end
+        return groups
+    else
+        local groups = parse_side(clean)
+        if not groups or #groups ~= 8 then return nil end
+        return groups
+    end
 end
 
 local function is_ssrf_forbidden(raw_host)
@@ -3655,35 +3884,74 @@ local function is_ssrf_forbidden(raw_host)
         return true
     end
     local h = raw_host:lower():gsub("^%s+", ""):gsub("%s+$", "")
+    if h == "" or h:find("[%z%c%s\\@]") then
+        return true
+    end
+    local is_bracketed = false
     if h:sub(1, 1) == "[" then
-        h = h:match("^%[([^%]]+)%]") or h
+        local inner = h:match("^%[([^%]]+)%]")
+        if not inner then return true end
+        h = inner
+        is_bracketed = true
     else
-        h = h:match("^([^:]+)") or h
+        local _, colons = h:gsub(":", ":")
+        if colons == 1 then
+            h = h:match("^([^:]+)") or h
+        end
     end
-    h = h:gsub("%.$", "")
-    if h == "" or h == "localhost" or h:match("%.localhost$") or h:match("%.local$") or h == "metadata.google.internal" or h == "169.254.169.254" or h == "100.100.100.200" then
+    h = h:gsub("%.+$", "")
+    if h == "" or h == "localhost" or h:match("%.localhost$") or h:match("%.local$") or
+       h == "metadata.google.internal" or h == "metadata.goog" or h == "metadata" or
+       h == "instance-data" or h == "169.254.169.254" or h == "100.100.100.200" then
         return true
     end
-    if h == "::1" or h == "::" or h == "0:0:0:0:0:0:0:1" or h == "0:0:0:0:0:0:0:0" then
-        return true
-    end
-    if h:match("^::ffff:") or h:match("^fe[89ab][0-9a-f]:") or h:match("^f[cd][0-9a-f][0-9a-f]:") then
-        return true
-    end
-    if h:match("^0[xX][0-9a-f]+$") or h:match("^%d+$") then
-        return true
-    end
-    local o1, o2, o3, o4 = h:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
-    if o1 then
-        if o1:match("^0%d") or o2:match("^0%d") or o3:match("^0%d") or o4:match("^0%d") then
+    if is_bracketed or h:find(":", 1, true) then
+        local g = parse_ipv6_groups(h)
+        if not g then return true end
+        local all_zero_prefix = (g[1] == 0 and g[2] == 0 and g[3] == 0 and g[4] == 0 and g[5] == 0)
+        if all_zero_prefix and g[6] == 0 and g[7] == 0 and (g[8] == 0 or g[8] == 1) then
             return true
         end
-        local a, b = tonumber(o1), tonumber(o2)
-        local c, d = tonumber(o3), tonumber(o4)
+        if all_zero_prefix and (g[6] == 0 or g[6] == 0xffff) then
+            return true
+        end
+        if g[1] == 0x0064 and g[2] == 0xff9b and ((g[3] == 0 and g[4] == 0 and g[5] == 0 and g[6] == 0) or g[3] == 0x0001) then
+            return true
+        end
+        if g[1] == 0x2002 then return true end
+        if g[1] == 0x2001 and (g[2] == 0x0000 or g[2] == 0x0db8) then return true end
+        if g[1] == 0x0100 and g[2] == 0 and g[3] == 0 and g[4] == 0 then return true end
+        if bit.band(g[1], 0xfe00) == 0xfc00 then return true end
+        if bit.band(g[1], 0xffc0) == 0xfe80 then return true end
+        if bit.band(g[1], 0xffc0) == 0xfec0 then return true end
+        if bit.band(g[1], 0xff00) == 0xff00 then return true end
+        return false
+    end
+    local ipv4_parts = {}
+    local all_numeric_ipv4 = true
+    for part in (h .. "."):gmatch("([^%.]*)%.") do
+        if part == "" or not (part:match("^%d+$") or part:match("^0x[0-9a-f]+$")) then
+            all_numeric_ipv4 = false
+            break
+        end
+        table.insert(ipv4_parts, part)
+    end
+    if all_numeric_ipv4 and #ipv4_parts >= 1 and #ipv4_parts <= 4 then
+        if #ipv4_parts ~= 4 then
+            return true
+        end
+        for i = 1, 4 do
+            local p = ipv4_parts[i]
+            if p:match("^0x") or p:match("^0%d") then
+                return true
+            end
+        end
+        local a, b = tonumber(ipv4_parts[1]), tonumber(ipv4_parts[2])
+        local c, d = tonumber(ipv4_parts[3]), tonumber(ipv4_parts[4])
         if not a or not b or not c or not d or a > 255 or b > 255 or c > 255 or d > 255 then
             return true
         end
-        if a == 0 or a == 10 or a == 127 then
+        if a == 0 or a == 10 or a == 127 or a >= 224 then
             return true
         end
         if a == 169 and b == 254 then
@@ -3695,6 +3963,12 @@ local function is_ssrf_forbidden(raw_host)
         if a == 192 and b == 168 then
             return true
         end
+        if a == 192 and b == 0 and (c == 0 or c == 2) then
+            return true
+        end
+        if a == 198 and (b == 18 or b == 19) then
+            return true
+        end
         if a == 100 and b >= 64 and b <= 127 then
             return true
         end
@@ -3704,11 +3978,23 @@ end
 
 local function mask_db_uri(uri)
     if type(uri) ~= "string" then return uri end
-    return uri:gsub("(%w+://)([^:]+):([^@]+)@", "%1%2:***@")
+    local prefix, authority, rest = uri:match("^([a-zA-Z][a-zA-Z0-9%+%-%.]*://)([^/%?#]+)(.*)$")
+    if not prefix or not authority then
+        return uri
+    end
+    local userinfo, hostport = authority:match("^(.*)@([^@]+)$")
+    if not userinfo then
+        return uri
+    end
+    local user = userinfo:match("^([^:]+):")
+    if user then
+        return prefix .. user .. ":***@" .. hostport .. rest
+    end
+    return prefix .. "***@" .. hostport .. rest
 end
 
 local function is_db_allowed(uri, allowed_scopes)
-    if type(uri) ~= "string" or uri == "" or uri:find("%z") then
+    if type(uri) ~= "string" or uri == "" or uri:find("[%z%c%s]") then
         return false
     end
     if type(allowed_scopes) ~= "table" or #allowed_scopes == 0 then
@@ -3720,13 +4006,16 @@ local function is_db_allowed(uri, allowed_scopes)
     end
     if lower_uri:match("^sqlite:") then
         local db_path = uri:sub(8)
-        if db_path == "" or db_path:find("%.%.") or db_path:find("\\") or db_path:match("^/") or db_path:match("^[a-zA-Z]:") then
+        local lower_db = db_path:lower()
+        if db_path == "" or lower_db:match("^file:") or db_path:find("%.%.") or
+           db_path:find("\\") or db_path:find("?", 1, true) or db_path:find("#", 1, true) or
+           db_path:match("^/") or db_path:match("^[a-zA-Z]:") then
             return false
         end
     end
     for _, pattern in ipairs(allowed_scopes) do
         if type(pattern) == "string" and pattern ~= "" then
-            local pat = pattern:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1"):gsub("%*", ".*")
+            local pat = pattern:gsub("([%(%)%.%%%+%-%?%[%^%$])", "%%%1"):gsub("%*", "[^@?#]*")
             if uri:match("^" .. pat .. "$") then
                 return true
             end

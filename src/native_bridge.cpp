@@ -3,6 +3,7 @@
 #include "asset_resolver.hpp"
 #include "security_policy.hpp"
 #include "ipc_envelope.hpp"
+#include "json_parser.hpp"
 
 #include <iostream>
 #include <string>
@@ -20,6 +21,8 @@
 #include <random>
 #include <cstring>
 #include <cstdlib>
+#include <cerrno>
+#include <limits>
 
 #if defined(__APPLE__)
 #import <Cocoa/Cocoa.h>
@@ -50,6 +53,7 @@ TAURILUA_INTERNAL std::mutex g_config_mutex;
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <sddl.h>
 #include <wrl.h>
 #include "WebView2.h"
 using namespace Microsoft::WRL;
@@ -60,6 +64,8 @@ using namespace Microsoft::WRL;
 
 #if !defined(_WIN32)
 #include <spawn.h>
+#include <signal.h>
+#include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -141,16 +147,20 @@ static std::string get_isolation_bootstrap_script() {
 enum class StateType {
     String,
     Number,
-    Json
+    Json,
+    Bool
 };
 
 struct StateValue {
     StateType type;
     std::string str_data;
     double num_data;
+    bool bool_data;
 };
 
 static std::unordered_map<std::string, StateValue> g_shared_state;
+static std::unordered_map<std::string, uint64_t> g_state_versions;
+static uint64_t g_state_epoch = 0;
 static std::recursive_mutex g_state_mutex;
 
 class NativeThreadPool {
@@ -236,12 +246,37 @@ static inline std::string get_mime(const std::string &path) {
 }
 
 static bool read_file_bytes(const std::string &full_path, std::string &out_data) {
+    static constexpr uintmax_t MAX_ASSET_BYTES = 64ULL * 1024ULL * 1024ULL;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(full_path, ec) || ec) return false;
+    uintmax_t sz = std::filesystem::file_size(full_path, ec);
+    if (ec || sz > MAX_ASSET_BYTES) return false;
     std::ifstream file(full_path, std::ios::binary);
     if (!file.is_open()) return false;
-    std::ostringstream ss;
-    ss << file.rdbuf();
-    out_data = ss.str();
+    out_data.resize(static_cast<size_t>(sz));
+    if (sz > 0 && !file.read(&out_data[0], static_cast<std::streamsize>(sz))) {
+        out_data.clear();
+        return false;
+    }
     return true;
+}
+
+static std::string get_assets_root_copy() {
+    std::lock_guard<std::mutex> lk(g_config_mutex);
+    return g_assets_root;
+}
+
+[[maybe_unused]] static std::string sanitize_app_segment(const std::string &raw) {
+    std::string out;
+    for (unsigned char c : raw) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.') {
+            out.push_back(static_cast<char>(c));
+        }
+    }
+    if (out.empty() || out == "." || out == ".." || out.find("..") != std::string::npos) {
+        return "";
+    }
+    return out;
 }
 
 static file_drop_callback_fn g_file_drop_cb = nullptr;
@@ -270,16 +305,34 @@ static void platform_dispatch_file_drop(const char *label, const char *event_typ
 - (void)webView:(WKWebView *)webView startURLSchemeTask:(id<WKURLSchemeTask>)urlSchemeTask {
     NSURL *url = urlSchemeTask.request.URL;
     NSString *path = [url path];
-    std::string req_path = path ? [path UTF8String] : "/index.html";
+    const char *utf8_path = path ? [path UTF8String] : nullptr;
+    std::string req_path = utf8_path ? utf8_path : "/index.html";
+    std::string assets_root = get_assets_root_copy();
+    bool dev_mode = g_dev_mode.load();
 
     std::string full_path;
-    bool found = resolve_contained_asset(g_assets_root, req_path, full_path);
+    bool found = false;
+    if (dev_mode) {
+        found = resolve_contained_asset(assets_root, req_path, full_path);
+    }
     if (!found) {
         NSString *resPath = [[NSBundle mainBundle] resourcePath];
-        if (resPath) {
-            std::string bundle_root = std::string([resPath UTF8String]) + "/" + g_assets_root;
-            found = resolve_contained_asset(bundle_root, req_path, full_path);
+        const char *res_utf8 = resPath ? [resPath UTF8String] : nullptr;
+        if (res_utf8) {
+            std::string rel_assets = assets_root;
+            while (!rel_assets.empty() && rel_assets[0] == '/') rel_assets.erase(0, 1);
+            if (!rel_assets.empty() && rel_assets.find("..") == std::string::npos) {
+                std::string bundle_root = std::string(res_utf8) + "/" + rel_assets;
+                found = resolve_contained_asset(bundle_root, req_path, full_path);
+            }
+            if (!found) {
+                std::string bundle_dist = std::string(res_utf8) + "/dist";
+                found = resolve_contained_asset(bundle_dist, req_path, full_path);
+            }
         }
+    }
+    if (!found && !assets_root.empty() && assets_root[0] == '/') {
+        found = resolve_contained_asset(assets_root, req_path, full_path);
     }
 
     if (!found) {
@@ -322,9 +375,9 @@ static void platform_dispatch_file_drop(const char *label, const char *event_typ
                                                           statusCode:200
                                                          HTTPVersion:@"HTTP/1.1"
                                                         headerFields:@{
-                                                            @"Content-Type": [NSString stringWithUTF8String:mime.c_str()],
+                                                            @"Content-Type": webview_nsstring_utf8(mime),
                                                             @"X-Content-Type-Options": @"nosniff",
-                                                            @"Content-Security-Policy": [NSString stringWithUTF8String:csp.c_str()]
+                                                            @"Content-Security-Policy": webview_nsstring_utf8(csp)
                                                         }];
 
     [urlSchemeTask didReceiveResponse:response];
@@ -350,7 +403,11 @@ static void platform_dispatch_file_drop(const char *label, const char *event_typ
         std::vector<std::string> paths;
         for (NSURL *url in urls) {
             if ([url isFileURL]) {
-                paths.push_back([[url path] UTF8String]);
+                NSString *up = [url path];
+                const char *utf8_p = up ? [up UTF8String] : nullptr;
+                if (utf8_p && utf8_p[0] != '\0') {
+                    paths.push_back(utf8_p);
+                }
             }
         }
         if (!paths.empty()) {
@@ -370,42 +427,62 @@ static void platform_dispatch_file_drop(const char *label, const char *event_typ
 
 #if !defined(_WIN32) && !defined(__APPLE__)
 static void gtk_uri_scheme_request_cb(WebKitURISchemeRequest *request, gpointer user_data) {
+    (void)user_data;
     const gchar *path_str = webkit_uri_scheme_request_get_path(request);
     std::string req_path = (path_str && strlen(path_str) > 0) ? path_str : "/index.html";
+    std::string assets_root = get_assets_root_copy();
+    bool dev_mode = g_dev_mode.load();
 
     std::string full_path;
-    bool found = resolve_contained_asset(g_assets_root, req_path, full_path);
+    bool found = false;
+    if (dev_mode) {
+        found = resolve_contained_asset(assets_root, req_path, full_path);
+    }
     if (!found) {
         std::vector<std::string> search_roots;
-        char exe_buf[1024];
-        ssize_t elen = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
-        if (elen > 0) {
-            exe_buf[elen] = '\0';
-            std::string ep(exe_buf);
+        std::string rel_assets = assets_root;
+        while (!rel_assets.empty() && rel_assets[0] == '/') rel_assets.erase(0, 1);
+        if (rel_assets.empty() || rel_assets.find("..") != std::string::npos) {
+            rel_assets = "dist";
+        }
+        if (!assets_root.empty() && assets_root[0] == '/') {
+            search_roots.push_back(assets_root);
+        }
+        std::vector<char> exe_buf(4096, '\0');
+        ssize_t elen = readlink("/proc/self/exe", exe_buf.data(), exe_buf.size() - 1);
+        if (elen > 0 && static_cast<size_t>(elen) < exe_buf.size() - 1) {
+            exe_buf[static_cast<size_t>(elen)] = '\0';
+            std::string ep(exe_buf.data());
             size_t slash = ep.rfind('/');
             if (slash != std::string::npos) {
-                std::string exe_name = ep.substr(slash + 1);
+                std::string exe_name = sanitize_app_segment(ep.substr(slash + 1));
                 std::string exe_dir = ep.substr(0, slash);
-                search_roots.push_back("/usr/share/" + exe_name + "/" + g_assets_root);
-                search_roots.push_back("/usr/share/" + exe_name);
-                search_roots.push_back("/usr/local/share/" + exe_name + "/" + g_assets_root);
-                search_roots.push_back("/usr/local/share/" + exe_name);
-                search_roots.push_back(exe_dir + "/../share/" + exe_name + "/" + g_assets_root);
-                search_roots.push_back(exe_dir + "/../share/" + exe_name);
-                search_roots.push_back(exe_dir + "/" + g_assets_root);
-                search_roots.push_back(exe_dir);
+                if (!exe_name.empty()) {
+                    search_roots.push_back("/usr/share/" + exe_name + "/" + rel_assets);
+                    search_roots.push_back("/usr/local/share/" + exe_name + "/" + rel_assets);
+                    search_roots.push_back(exe_dir + "/../share/" + exe_name + "/" + rel_assets);
+                }
+                search_roots.push_back(exe_dir + "/" + rel_assets);
             }
         }
-        if (!g_app_name.empty()) {
-            std::string slug = g_app_name;
-            for (char &c : slug) c = tolower(c);
+        std::string app_copy;
+        {
+            std::lock_guard<std::mutex> lk(g_config_mutex);
+            app_copy = g_app_name;
+        }
+        if (!app_copy.empty()) {
+            std::string slug = app_copy;
+            for (char &c : slug) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             for (char &c : slug) if (c == ' ' || c == '_') c = '-';
-            search_roots.push_back("/usr/share/" + slug + "/" + g_assets_root);
-            search_roots.push_back("/usr/share/" + slug);
-            search_roots.push_back("/usr/share/" + g_app_name + "/" + g_assets_root);
-            search_roots.push_back("/usr/share/" + g_app_name);
-            search_roots.push_back("/usr/local/share/" + slug + "/" + g_assets_root);
-            search_roots.push_back("/usr/local/share/" + slug);
+            slug = sanitize_app_segment(slug);
+            std::string safe_app = sanitize_app_segment(app_copy);
+            if (!slug.empty()) {
+                search_roots.push_back("/usr/share/" + slug + "/" + rel_assets);
+                search_roots.push_back("/usr/local/share/" + slug + "/" + rel_assets);
+            }
+            if (!safe_app.empty() && safe_app != slug) {
+                search_roots.push_back("/usr/share/" + safe_app + "/" + rel_assets);
+            }
         }
 
         for (const auto &root : search_roots) {
@@ -438,8 +515,26 @@ static void gtk_uri_scheme_request_cb(WebKitURISchemeRequest *request, gpointer 
         inject_csp_meta(data, csp);
     }
 
-    GInputStream *stream = g_memory_input_stream_new_from_data(data.data(), data.size(), NULL);
-    webkit_uri_scheme_request_finish(request, stream, data.size(), mime.c_str());
+    gpointer owned_buf = g_malloc(data.empty() ? 1 : data.size());
+    if (!data.empty()) {
+        std::memcpy(owned_buf, data.data(), data.size());
+    }
+    GInputStream *stream = g_memory_input_stream_new_from_data(owned_buf, static_cast<gssize>(data.size()), g_free);
+#if defined(WEBKIT_CHECK_VERSION) && WEBKIT_CHECK_VERSION(2, 36, 0)
+    WebKitURISchemeResponse *resp = webkit_uri_scheme_response_new(stream, static_cast<gint64>(data.size()));
+    webkit_uri_scheme_response_set_status(resp, 200, "OK");
+    webkit_uri_scheme_response_set_content_type(resp, mime.c_str());
+    SoupMessageHeaders *headers = soup_message_headers_new(SOUP_MESSAGE_HEADERS_RESPONSE);
+    soup_message_headers_append(headers, "X-Content-Type-Options", "nosniff");
+    if (!csp.empty()) {
+        soup_message_headers_append(headers, "Content-Security-Policy", csp.c_str());
+    }
+    webkit_uri_scheme_response_set_http_headers(resp, headers);
+    webkit_uri_scheme_request_finish_with_response(request, resp);
+    g_object_unref(resp);
+#else
+    webkit_uri_scheme_request_finish(request, stream, static_cast<gint64>(data.size()), mime.c_str());
+#endif
     g_object_unref(stream);
 }
 #endif
@@ -500,17 +595,12 @@ static bool get_native_window_origin(webview_t w, std::string &out_origin) {
     return ok;
 
 #else
-    GtkWidget *gtk_win = GTK_WIDGET(h);
-    GList *children = gtk_container_get_children(GTK_CONTAINER(gtk_win));
-    if (children) {
-        GtkWidget *widget = GTK_WIDGET(children->data);
-        g_list_free(children);
-        if (WEBKIT_IS_WEB_VIEW(widget)) {
-            const gchar *uri = webkit_web_view_get_uri(WEBKIT_WEB_VIEW(widget));
-            if (uri) {
-                out_origin = std::string(uri);
-                return true;
-            }
+    void *wk_ptr = webview_get_native_handle(w, WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET);
+    if (wk_ptr && WEBKIT_IS_WEB_VIEW(GTK_WIDGET(wk_ptr))) {
+        const gchar *uri = webkit_web_view_get_uri(WEBKIT_WEB_VIEW(wk_ptr));
+        if (uri) {
+            out_origin = std::string(uri);
+            return true;
         }
     }
     return false;
@@ -521,6 +611,7 @@ extern "C" {
 
 void platform_set_assets_path(const char *path) {
     if (path && strlen(path) > 0) {
+        std::lock_guard<std::mutex> lk(g_config_mutex);
         g_assets_root = path;
     }
 }
@@ -563,11 +654,106 @@ int platform_list_dir(const char *dir_path, char *out_buf, int max_len) {
     }
 }
 
+int platform_read_dir(const char *dir_path, char *out_buf, int max_len) {
+    if (!dir_path || !out_buf || max_len <= 0) return -1;
+    out_buf[0] = '\0';
+    try {
+        std::filesystem::path p(dir_path);
+        std::error_code ec;
+        if (!std::filesystem::exists(p, ec) || !std::filesystem::is_directory(p, ec)) {
+            return -1;
+        }
+        std::string json = "[";
+        size_t count = 0;
+        static constexpr size_t MAX_DIR_ENTRIES = 100000;
+        for (const auto &entry : std::filesystem::directory_iterator(p, ec)) {
+            if (ec) break;
+            if (count >= MAX_DIR_ENTRIES) break;
+            std::string name = entry.path().filename().string();
+            if (name == "." || name == "..") continue;
+            std::error_code dec;
+            bool is_dir = entry.is_directory(dec) && !dec;
+            if (count > 0) json += ",";
+            json += "{\"name\":" + json_escape_string(name) + ",\"isDirectory\":" + (is_dir ? "true" : "false") + "}";
+            count++;
+        }
+        json += "]";
+        if (json.size() >= static_cast<size_t>(max_len)) {
+            return static_cast<int>(json.size() + 1);
+        }
+        memcpy(out_buf, json.data(), json.size());
+        out_buf[json.size()] = '\0';
+        return 1;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int platform_fs_write_file(const char *path, const char *data, int data_len) {
+    if (!path || path[0] == '\0' || data_len < 0) return 0;
+    try {
+        std::error_code ec;
+        std::filesystem::path p(path);
+        std::filesystem::file_status st = std::filesystem::symlink_status(p, ec);
+        if (!ec && std::filesystem::is_symlink(st)) {
+            return 0;
+        }
+#if defined(_WIN32)
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+        if (wlen <= 0) return 0;
+        std::wstring wpath(static_cast<size_t>(wlen), 0);
+        MultiByteToWideChar(CP_UTF8, 0, path, -1, &wpath[0], wlen);
+        DWORD attrs = GetFileAttributesW(wpath.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            return 0;
+        }
+        HANDLE h = CreateFileW(wpath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) return 0;
+        DWORD total_written = 0;
+        while (total_written < static_cast<DWORD>(data_len)) {
+            DWORD chunk = 0;
+            if (!WriteFile(h, data + total_written, static_cast<DWORD>(data_len) - total_written, &chunk, NULL)) {
+                CloseHandle(h);
+                return 0;
+            }
+            total_written += chunk;
+        }
+        CloseHandle(h);
+        return 1;
+#else
+        int flags = O_WRONLY | O_CREAT | O_TRUNC;
+#if defined(O_NOFOLLOW)
+        flags |= O_NOFOLLOW;
+#endif
+        int fd = ::open(path, flags, 0600);
+        if (fd < 0) return 0;
+        size_t total = 0;
+        size_t target = static_cast<size_t>(data_len);
+        while (total < target) {
+            ssize_t w = ::write(fd, data + total, target - total);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                ::close(fd);
+                return 0;
+            }
+            total += static_cast<size_t>(w);
+        }
+        ::close(fd);
+        return 1;
+#endif
+    } catch (...) {
+        return 0;
+    }
+}
+
 static constexpr size_t MAX_TRACKED_PIDS = 64;
 static std::atomic<long> g_tracked_pids[MAX_TRACKED_PIDS] = {};
 
 extern "C" void platform_register_child_pid(long pid) {
-    if (pid <= 0) return;
+    if (pid <= 0 || pid > static_cast<long>(std::numeric_limits<int32_t>::max())) return;
+    for (size_t i = 0; i < MAX_TRACKED_PIDS; ++i) {
+        if (g_tracked_pids[i].load(std::memory_order_relaxed) == pid) return;
+    }
     for (size_t i = 0; i < MAX_TRACKED_PIDS; ++i) {
         long expected = 0;
         if (g_tracked_pids[i].compare_exchange_strong(expected, pid, std::memory_order_relaxed)) {
@@ -577,7 +763,7 @@ extern "C" void platform_register_child_pid(long pid) {
 }
 
 extern "C" void platform_unregister_child_pid(long pid) {
-    if (pid <= 0) return;
+    if (pid <= 0 || pid > static_cast<long>(std::numeric_limits<int32_t>::max())) return;
     for (size_t i = 0; i < MAX_TRACKED_PIDS; ++i) {
         long expected = pid;
         g_tracked_pids[i].compare_exchange_strong(expected, 0, std::memory_order_relaxed);
@@ -587,16 +773,16 @@ extern "C" void platform_unregister_child_pid(long pid) {
 extern "C" void platform_kill_child_processes() {
     for (size_t i = 0; i < MAX_TRACKED_PIDS; ++i) {
         long pid = g_tracked_pids[i].exchange(0, std::memory_order_relaxed);
-        if (pid > 0) {
+        if (pid > 0 && pid <= static_cast<long>(std::numeric_limits<int32_t>::max())) {
 #if defined(_WIN32)
-            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
             if (h) {
                 TerminateProcess(h, 1);
                 CloseHandle(h);
             }
 #else
-            ::kill((pid_t)pid, SIGTERM);
-            ::kill((pid_t)pid, SIGKILL);
+            ::kill(static_cast<pid_t>(pid), SIGTERM);
+            ::kill(static_cast<pid_t>(pid), SIGKILL);
 #endif
         }
     }
@@ -672,13 +858,13 @@ static void common_bind_handler(const char *seq, const char *req, void *arg) {
         dev_url_copy = g_dev_url;
     }
     if (!get_native_window_origin(target_w, current_origin) || !OriginValidator::is_allowed(current_origin, g_dev_mode.load(), dev_url_copy)) {
-        std::string err_payload = "{\"error\":\"Accesso negato: Origin non autorizzato (" + current_origin + ")\"}";
+        std::string err_payload = "{\"error\":\"ERR_ORIGIN_DENIED: Unauthorized origin (" + current_origin + ")\"}";
         platform_window_return_async(label.c_str(), s_seq.c_str(), 1, err_payload.c_str());
         return;
     }
 
     if (!verify_envelope_token(s_req, g_session_token)) {
-        std::string err_payload = "{\"error\":\"Accesso negato: Token di isolamento mancante o non valido\"}";
+        std::string err_payload = "{\"error\":\"ERR_TOKEN_INVALID: Missing or invalid isolation token\"}";
         platform_window_return_async(label.c_str(), s_seq.c_str(), 1, err_payload.c_str());
         return;
     }
@@ -713,11 +899,42 @@ void platform_set_client_script(const char *js) {
     }
 }
 
-int platform_window_create(const char *label, const char *title, const char *url, int width, int height, int resizable, int decorations, int transparent) {
+#if !defined(_WIN32) && !defined(__APPLE__)
+static void run_on_gtk_main(std::function<void()> fn) {
+    if (g_main_context_is_owner(g_main_context_default())) {
+        fn();
+        return;
+    }
+    auto *heap_fn = new std::function<void()>(std::move(fn));
+    g_main_context_invoke(NULL, +[](gpointer data) -> gboolean {
+        auto *f = static_cast<std::function<void()> *>(data);
+        if (f) {
+            (*f)();
+            delete f;
+        }
+        return G_SOURCE_REMOVE;
+    }, heap_fn);
+}
+#endif
+
+static webview_t lookup_window_webview(const char *label, bool fallback_first = false) {
     std::lock_guard<std::mutex> lock(g_windows_mutex);
+    auto it = g_windows.find(label ? label : "main");
+    if (it == g_windows.end() && fallback_first && !g_windows.empty()) {
+        it = g_windows.begin();
+    }
+    return (it != g_windows.end()) ? it->second.w : nullptr;
+}
+
+int platform_window_create(const char *label, const char *title, const char *url, int width, int height, int resizable, int decorations, int transparent) {
     std::string s_label = label ? label : "main";
-    if (g_windows.find(s_label) != g_windows.end()) {
-        return -1;
+    std::string default_client_script_copy;
+    {
+        std::lock_guard<std::mutex> lock(g_windows_mutex);
+        if (g_windows.find(s_label) != g_windows.end()) {
+            return -1;
+        }
+        default_client_script_copy = g_default_client_script;
     }
 
     webview_t w = webview_create(g_dev_mode.load() ? 1 : 0, nullptr);
@@ -728,13 +945,21 @@ int platform_window_create(const char *label, const char *title, const char *url
     webview_set_title(w, title);
     webview_set_size(w, width, height, resizable ? 0 : 3);
 
-    webview_init(w, get_isolation_bootstrap_script().c_str());
-    if (!g_default_client_script.empty()) {
-        webview_init(w, g_default_client_script.c_str());
+    std::string target_url = url ? url : "";
+    std::string d_url;
+    {
+        std::lock_guard<std::mutex> lk(g_config_mutex);
+        d_url = g_dev_url;
     }
-
-    char *label_ctx = strdup(s_label.c_str());
-    webview_bind(w, "__TAURI_RAW_INVOKE__", common_bind_handler, label_ctx);
+    bool is_trusted_window = target_url.empty() || OriginValidator::is_allowed(target_url, g_dev_mode.load(), d_url);
+    if (is_trusted_window) {
+        webview_init(w, get_isolation_bootstrap_script().c_str());
+        if (!default_client_script_copy.empty()) {
+            webview_init(w, default_client_script_copy.c_str());
+        }
+        char *label_ctx = strdup(s_label.c_str());
+        webview_bind(w, "__TAURI_RAW_INVOKE__", common_bind_handler, label_ctx);
+    }
 
     void *native_handle = webview_get_window(w);
 
@@ -759,9 +984,13 @@ int platform_window_create(const char *label, const char *title, const char *url
             ICoreWebView2_3 *core3 = nullptr;
             core->QueryInterface(IID_PPV_ARGS(&core3));
             if (core3) {
-                wchar_t wroot[MAX_PATH];
-                MultiByteToWideChar(CP_UTF8, 0, g_assets_root.c_str(), -1, wroot, MAX_PATH);
-                core3->SetVirtualHostNameToFolderMapping(L"tauri.localhost", wroot, COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+                std::string root_copy = get_assets_root_copy();
+                int wlen = MultiByteToWideChar(CP_UTF8, 0, root_copy.c_str(), -1, NULL, 0);
+                if (wlen > 0) {
+                    std::wstring wroot(static_cast<size_t>(wlen), 0);
+                    MultiByteToWideChar(CP_UTF8, 0, root_copy.c_str(), -1, &wroot[0], wlen);
+                    core3->SetVirtualHostNameToFolderMapping(L"tauri.localhost", wroot.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
+                }
                 core3->Release();
             }
             core->Release();
@@ -777,7 +1006,6 @@ int platform_window_create(const char *label, const char *title, const char *url
             [nswin setOpaque:NO];
             [nswin setBackgroundColor:[NSColor clearColor]];
         }
-
     });
 #else
     GtkWindow *gtkwin = GTK_WINDOW(native_handle);
@@ -794,8 +1022,12 @@ int platform_window_create(const char *label, const char *title, const char *url
     }
 #endif
 
+    {
+        std::lock_guard<std::mutex> lock(g_windows_mutex);
+        g_windows[s_label] = WindowInstance{s_label, w};
+    }
+
     webview_navigate(w, url);
-    g_windows[s_label] = WindowInstance{s_label, w};
 
 #if defined(_WIN32)
     win32_attach_current_menu(static_cast<HWND>(native_handle));
@@ -817,143 +1049,148 @@ int platform_window_create(const char *label, const char *title, const char *url
 }
 
 void platform_window_close(const char *label) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label ? label : "main");
-    if (it != g_windows.end()) {
-        void *h = webview_get_window(it->second.w);
+    webview_t w = lookup_window_webview(label);
+    if (!w) return;
+    void *h = webview_get_window(w);
 #if defined(__APPLE__)
-        run_on_main_async(^{
-            [(__bridge NSWindow *)h performClose:nil];
-        });
+    run_on_main_async(^{
+        [(__bridge NSWindow *)h performClose:nil];
+    });
 #elif defined(_WIN32)
-        PostMessage(static_cast<HWND>(h), WM_CLOSE, 0, 0);
+    PostMessage(static_cast<HWND>(h), WM_CLOSE, 0, 0);
 #else
+    run_on_gtk_main([h]() {
         gtk_window_close(GTK_WINDOW(h));
+    });
 #endif
-    }
 }
 
 void platform_window_force_close(const char *label) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label ? label : "main");
-    if (it != g_windows.end()) {
-        webview_force_close(it->second.w);
-        g_windows.erase(it);
+    webview_t w = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_windows_mutex);
+        auto it = g_windows.find(label ? label : "main");
+        if (it != g_windows.end()) {
+            w = it->second.w;
+            g_windows.erase(it);
+        }
+    }
+    if (w) {
+#if !defined(_WIN32) && !defined(__APPLE__)
+        run_on_gtk_main([w]() { webview_force_close(w); });
+#else
+        webview_force_close(w);
+#endif
     }
 }
 
 void platform_window_set_title(const char *label, const char *title) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label);
-    if (it != g_windows.end()) {
-        webview_set_title(it->second.w, title);
-    }
+    webview_t w = lookup_window_webview(label);
+    if (!w || !title) return;
+    std::string s_title(title);
+#if !defined(_WIN32) && !defined(__APPLE__)
+    run_on_gtk_main([w, s_title]() { webview_set_title(w, s_title.c_str()); });
+#else
+    webview_set_title(w, s_title.c_str());
+#endif
 }
 
 void platform_window_set_size(const char *label, int width, int height) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label);
-    if (it != g_windows.end()) {
-        webview_set_size(it->second.w, width, height, 0);
-    }
+    webview_t w = lookup_window_webview(label);
+    if (!w) return;
+#if !defined(_WIN32) && !defined(__APPLE__)
+    run_on_gtk_main([w, width, height]() { webview_set_size(w, width, height, 0); });
+#else
+    webview_set_size(w, width, height, 0);
+#endif
 }
 
 void platform_window_minimize(const char *label) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label);
-    if (it == g_windows.end()) return;
-    void *h = webview_get_window(it->second.w);
+    webview_t w = lookup_window_webview(label);
+    if (!w) return;
+    void *h = webview_get_window(w);
 #if defined(_WIN32)
-    ShowWindow(static_cast<HWND>(h), SW_MINIMIZE);
+    ShowWindowAsync(static_cast<HWND>(h), SW_MINIMIZE);
 #elif defined(__APPLE__)
-    run_on_main_sync(^{
+    run_on_main_async(^{
         [(__bridge NSWindow *)h miniaturize:nil];
     });
 #else
-    gtk_window_iconify(GTK_WINDOW(h));
+    run_on_gtk_main([h]() { gtk_window_iconify(GTK_WINDOW(h)); });
 #endif
 }
 
 void platform_window_maximize(const char *label) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label);
-    if (it == g_windows.end()) return;
-    void *h = webview_get_window(it->second.w);
+    webview_t w = lookup_window_webview(label);
+    if (!w) return;
+    void *h = webview_get_window(w);
 #if defined(_WIN32)
-    ShowWindow(static_cast<HWND>(h), SW_MAXIMIZE);
+    ShowWindowAsync(static_cast<HWND>(h), SW_MAXIMIZE);
 #elif defined(__APPLE__)
-    run_on_main_sync(^{
+    run_on_main_async(^{
         [(__bridge NSWindow *)h zoom:nil];
     });
 #else
-    gtk_window_maximize(GTK_WINDOW(h));
+    run_on_gtk_main([h]() { gtk_window_maximize(GTK_WINDOW(h)); });
 #endif
 }
 
 void platform_window_unmaximize(const char *label) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label);
-    if (it == g_windows.end()) return;
-    void *h = webview_get_window(it->second.w);
+    webview_t w = lookup_window_webview(label);
+    if (!w) return;
+    void *h = webview_get_window(w);
 #if defined(_WIN32)
-    ShowWindow(static_cast<HWND>(h), SW_RESTORE);
+    ShowWindowAsync(static_cast<HWND>(h), SW_RESTORE);
 #elif defined(__APPLE__)
-    run_on_main_sync(^{
+    run_on_main_async(^{
         [(__bridge NSWindow *)h zoom:nil];
     });
 #else
-    gtk_window_unmaximize(GTK_WINDOW(h));
+    run_on_gtk_main([h]() { gtk_window_unmaximize(GTK_WINDOW(h)); });
 #endif
 }
 
 void platform_window_show(const char *label) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label);
-    if (it == g_windows.end()) return;
-    void *h = webview_get_window(it->second.w);
+    webview_t w = lookup_window_webview(label);
+    if (!w) return;
+    void *h = webview_get_window(w);
 #if defined(_WIN32)
-    ShowWindow(static_cast<HWND>(h), SW_SHOW);
+    ShowWindowAsync(static_cast<HWND>(h), SW_SHOW);
 #elif defined(__APPLE__)
-    run_on_main_sync(^{
+    run_on_main_async(^{
         [(__bridge NSWindow *)h makeKeyAndOrderFront:nil];
     });
 #else
-    gtk_widget_show_all(GTK_WIDGET(h));
+    run_on_gtk_main([h]() { gtk_widget_show_all(GTK_WIDGET(h)); });
 #endif
 }
 
 void platform_window_hide(const char *label) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label);
-    if (it == g_windows.end()) return;
-    void *h = webview_get_window(it->second.w);
+    webview_t w = lookup_window_webview(label);
+    if (!w) return;
+    void *h = webview_get_window(w);
 #if defined(_WIN32)
-    ShowWindow(static_cast<HWND>(h), SW_HIDE);
+    ShowWindowAsync(static_cast<HWND>(h), SW_HIDE);
 #elif defined(__APPLE__)
-    run_on_main_sync(^{
+    run_on_main_async(^{
         [(__bridge NSWindow *)h orderOut:nil];
     });
 #else
-    gtk_widget_hide(GTK_WIDGET(h));
+    run_on_gtk_main([h]() { gtk_widget_hide(GTK_WIDGET(h)); });
 #endif
 }
 
 void platform_window_set_focus(const char *label) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label ? label : "main");
-    if (it == g_windows.end() && !g_windows.empty()) {
-        it = g_windows.begin();
-    }
-    if (it == g_windows.end()) return;
-    void *h = webview_get_window(it->second.w);
+    webview_t w = lookup_window_webview(label, true);
+    if (!w) return;
+    void *h = webview_get_window(w);
 #if defined(_WIN32)
     HWND hwnd = static_cast<HWND>(h);
-    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
-    ShowWindow(hwnd, SW_SHOW);
+    if (IsIconic(hwnd)) ShowWindowAsync(hwnd, SW_RESTORE);
+    ShowWindowAsync(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
-    SetFocus(hwnd);
 #elif defined(__APPLE__)
-    run_on_main_sync(^{
+    run_on_main_async(^{
         NSWindow *win = (__bridge NSWindow *)h;
         [NSApp activateIgnoringOtherApps:YES];
         if ([win isMiniaturized]) {
@@ -962,22 +1199,22 @@ void platform_window_set_focus(const char *label) {
         [win makeKeyAndOrderFront:nil];
     });
 #else
-    gtk_window_deiconify(GTK_WINDOW(h));
-    gtk_window_present(GTK_WINDOW(h));
+    run_on_gtk_main([h]() {
+        gtk_window_deiconify(GTK_WINDOW(h));
+        gtk_window_present(GTK_WINDOW(h));
+    });
 #endif
 }
 
 void platform_window_start_dragging(const char *label) {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    auto it = g_windows.find(label);
-    if (it == g_windows.end()) return;
-    void *h = webview_get_window(it->second.w);
+    webview_t w = lookup_window_webview(label);
+    if (!w) return;
+    void *h = webview_get_window(w);
 #if defined(_WIN32)
     HWND hwnd = static_cast<HWND>(h);
-    ReleaseCapture();
-    SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    PostMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
 #elif defined(__APPLE__)
-    run_on_main_sync(^{
+    run_on_main_async(^{
         NSWindow *nswin = (__bridge NSWindow *)h;
         NSEvent *event = [NSApp currentEvent];
         if (event) {
@@ -985,8 +1222,10 @@ void platform_window_start_dragging(const char *label) {
         }
     });
 #else
-    GtkWindow *gtkwin = GTK_WINDOW(h);
-    gtk_window_begin_move_drag(gtkwin, 1, 0, 0, GDK_CURRENT_TIME);
+    run_on_gtk_main([h]() {
+        GtkWindow *gtkwin = GTK_WINDOW(h);
+        gtk_window_begin_move_drag(gtkwin, 1, 0, 0, GDK_CURRENT_TIME);
+    });
 #endif
 }
 
@@ -1018,17 +1257,28 @@ static void dispatch_eval_cb(webview_t w, void *arg) {
 
 void platform_window_init_script(const char *label, const char *js) {
     if (!js) return;
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    if (label && strcmp(label, "*") == 0) {
-        for (auto &pair : g_windows) {
-            webview_init(pair.second.w, js);
+    std::vector<webview_t> targets;
+    {
+        std::lock_guard<std::mutex> lock(g_windows_mutex);
+        if (label && strcmp(label, "*") == 0) {
+            for (auto &pair : g_windows) {
+                targets.push_back(pair.second.w);
+            }
+        } else {
+            std::string s_label = label ? label : "main";
+            auto it = g_windows.find(s_label);
+            if (it != g_windows.end()) {
+                targets.push_back(it->second.w);
+            }
         }
-        return;
     }
-    std::string s_label = label ? label : "main";
-    auto it = g_windows.find(s_label);
-    if (it != g_windows.end()) {
-        webview_init(it->second.w, js);
+    std::string s_js(js);
+    for (webview_t w : targets) {
+#if !defined(_WIN32) && !defined(__APPLE__)
+        run_on_gtk_main([w, s_js]() { webview_init(w, s_js.c_str()); });
+#else
+        webview_init(w, s_js.c_str());
+#endif
     }
 }
 
@@ -1048,7 +1298,6 @@ void platform_window_eval(const char *label, const char *js) {
             }
         }
     }
-    // Lock is released! No lock inversion, no deadlock!
     for (auto &tgt : targets) {
         EvalPayload *p = new EvalPayload();
         p->w = tgt.first;
@@ -1059,16 +1308,23 @@ void platform_window_eval(const char *label, const char *js) {
 }
 
 void bridge_run_loop() {
-    if (!g_windows.empty()) {
-        webview_run(g_windows.begin()->second.w);
+    webview_t first_w = lookup_window_webview("main", true);
+    if (first_w) {
+        webview_run(first_w);
     }
 }
 
 void bridge_terminate() {
     platform_single_instance_cleanup();
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    for (auto &pair : g_windows) {
-        webview_terminate(pair.second.w);
+    std::vector<webview_t> targets;
+    {
+        std::lock_guard<std::mutex> lock(g_windows_mutex);
+        for (auto &pair : g_windows) {
+            targets.push_back(pair.second.w);
+        }
+    }
+    for (webview_t w : targets) {
+        webview_terminate(w);
     }
 }
 
@@ -1118,7 +1374,7 @@ int platform_tray_create(const char *tooltip, const char *icon_path) {
     std::string s_tip = tooltip ? tooltip : "T";
     run_on_main_sync(^{
         g_status_item = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
-        g_status_item.button.title = [NSString stringWithUTF8String:s_tip.c_str()];
+        g_status_item.button.title = webview_nsstring_utf8(s_tip);
     });
     return 1;
 #else
@@ -1131,9 +1387,9 @@ void platform_tray_set_menu(const char *json_menu) {
     if (!g_tray_menu) return;
     DestroyMenu(g_tray_menu);
     g_tray_menu = CreatePopupMenu();
-    AppendMenuA(g_tray_menu, MF_STRING, 1, "Apri Finestra");
+    AppendMenuA(g_tray_menu, MF_STRING, 1, "Open Window");
     AppendMenuA(g_tray_menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(g_tray_menu, MF_STRING, 2, "Esci");
+    AppendMenuA(g_tray_menu, MF_STRING, 2, "Quit");
 #endif
 }
 
@@ -1171,22 +1427,44 @@ void platform_shortcut_unregister(const char *shortcut) {
 }
 
 int platform_deeplink_register(const char *scheme) {
+    if (!scheme || scheme[0] == '\0') return 0;
+    std::string s_scheme(scheme);
+    if (s_scheme.size() > 64 || !std::isalpha(static_cast<unsigned char>(s_scheme[0]))) return 0;
+    std::string lower_scheme;
+    for (unsigned char c : s_scheme) {
+        if (!std::isalnum(c) && c != '+' && c != '.' && c != '-') return 0;
+        lower_scheme.push_back(static_cast<char>(std::tolower(c)));
+    }
+    static const char *blocked_schemes[] = {
+        "http", "https", "file", "javascript", "data", "vbscript", "about",
+        "exefile", "mscfile", "ms-settings", "cmdfile", "batfile", "comfile", "regfile", "htafile", "mailto"
+    };
+    for (const char *b : blocked_schemes) {
+        if (lower_scheme == b) return 0;
+    }
 #if defined(_WIN32)
-    wchar_t exe_path_w[MAX_PATH];
-    GetModuleFileNameW(NULL, exe_path_w, MAX_PATH);
-    std::wstring scheme_w(scheme, scheme + strlen(scheme));
+    std::vector<wchar_t> exe_path_w(32768, 0);
+    DWORD exe_len = GetModuleFileNameW(NULL, exe_path_w.data(), static_cast<DWORD>(exe_path_w.size()));
+    if (exe_len == 0 || exe_len >= exe_path_w.size()) return 0;
+    std::wstring scheme_w(lower_scheme.begin(), lower_scheme.end());
     std::wstring key_w = L"Software\\Classes\\" + scheme_w;
-    HKEY hKey;
+    HKEY hKey = NULL;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, key_w.c_str(), 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
         std::wstring desc_w = L"URL:" + scheme_w + L" Protocol";
-        RegSetValueExW(hKey, L"", 0, REG_SZ, (const BYTE *)desc_w.c_str(), (DWORD)(desc_w.size() + 1) * sizeof(wchar_t));
-        std::wstring cmd_w = L"\"" + std::wstring(exe_path_w) + L"\" \"%1\"";
-        HKEY hCmd;
-        RegCreateKeyExW(hKey, L"shell\\open\\command", 0, NULL, 0, KEY_WRITE, NULL, &hCmd, NULL);
-        RegSetValueExW(hCmd, L"", 0, REG_SZ, (const BYTE *)cmd_w.c_str(), (DWORD)(cmd_w.size() + 1) * sizeof(wchar_t));
-        RegCloseKey(hCmd);
+        RegSetValueExW(hKey, L"", 0, REG_SZ, (const BYTE *)desc_w.c_str(), static_cast<DWORD>((desc_w.size() + 1) * sizeof(wchar_t)));
+        const wchar_t empty_proto[] = L"";
+        RegSetValueExW(hKey, L"URL Protocol", 0, REG_SZ, (const BYTE *)empty_proto, sizeof(empty_proto));
+        std::wstring cmd_w = L"\"" + std::wstring(exe_path_w.data(), exe_len) + L"\" \"%1\"";
+        HKEY hCmd = NULL;
+        int ok = 0;
+        if (RegCreateKeyExW(hKey, L"shell\\open\\command", 0, NULL, 0, KEY_WRITE, NULL, &hCmd, NULL) == ERROR_SUCCESS) {
+            if (RegSetValueExW(hCmd, L"", 0, REG_SZ, (const BYTE *)cmd_w.c_str(), static_cast<DWORD>((cmd_w.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS) {
+                ok = 1;
+            }
+            RegCloseKey(hCmd);
+        }
         RegCloseKey(hKey);
-        return 1;
+        return ok;
     }
     return 0;
 #elif defined(__APPLE__)
@@ -1203,6 +1481,8 @@ int platform_updater_install(const char *archive_path) {
 }
 
 int platform_dialog_open(const char *title, const char *filter, char *out_path, int max_len) {
+    if (!out_path || max_len <= 0) return 0;
+    out_path[0] = '\0';
 #if defined(_WIN32)
     OPENFILENAMEA ofn;
     char szFile[MAX_PATH] = {0};
@@ -1210,18 +1490,27 @@ int platform_dialog_open(const char *title, const char *filter, char *out_path, 
     ofn.lStructSize = sizeof(ofn);
     ofn.lpstrFile = szFile;
     ofn.nMaxFile = sizeof(szFile);
-    ofn.lpstrFilter = filter ? filter : "All Files\0*.*\0";
+    std::string filter_buf;
+    if (filter && filter[0] != '\0') {
+        filter_buf.append("Files");
+        filter_buf.push_back('\0');
+        filter_buf.append(filter);
+        filter_buf.push_back('\0');
+        filter_buf.push_back('\0');
+        ofn.lpstrFilter = filter_buf.data();
+    } else {
+        ofn.lpstrFilter = "All Files\0*.*\0\0";
+    }
     ofn.nFilterIndex = 1;
     ofn.lpstrTitle = title;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn)) {
-        strncpy(out_path, ofn.lpstrFile, max_len);
+        strncpy(out_path, ofn.lpstrFile, static_cast<size_t>(max_len - 1));
+        out_path[max_len - 1] = '\0';
         return 1;
     }
     return 0;
 #elif defined(__APPLE__)
-    if (!out_path || max_len <= 0) return 0;
-    out_path[0] = '\0';
     __block int res = 0;
     std::string s_title = title ? title : "";
     run_on_main_sync(^{
@@ -1231,8 +1520,8 @@ int platform_dialog_open(const char *title, const char *filter, char *out_path, 
             [panel setCanChooseDirectories:NO];
             [panel setAllowsMultipleSelection:NO];
             if (!s_title.empty()) {
-                NSString *nsTitle = [NSString stringWithUTF8String:s_title.c_str()];
-                if (nsTitle) {
+                NSString *nsTitle = webview_nsstring_utf8(s_title);
+                if ([nsTitle length] > 0) {
                     [panel setMessage:nsTitle];
                 }
             }
@@ -1247,7 +1536,7 @@ int platform_dialog_open(const char *title, const char *filter, char *out_path, 
                 if (url) {
                     const char *fs_rep = [url fileSystemRepresentation];
                     if (fs_rep) {
-                        strncpy(out_path, fs_rep, max_len - 1);
+                        strncpy(out_path, fs_rep, static_cast<size_t>(max_len - 1));
                         out_path[max_len - 1] = '\0';
                         res = 1;
                     } else {
@@ -1255,7 +1544,7 @@ int platform_dialog_open(const char *title, const char *filter, char *out_path, 
                         if (path) {
                             const char *utf8 = [path UTF8String];
                             if (utf8) {
-                                strncpy(out_path, utf8, max_len - 1);
+                                strncpy(out_path, utf8, static_cast<size_t>(max_len - 1));
                                 out_path[max_len - 1] = '\0';
                                 res = 1;
                             }
@@ -1274,9 +1563,12 @@ int platform_dialog_open(const char *title, const char *filter, char *out_path, 
     int res = 0;
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-        strncpy(out_path, filename, max_len);
-        g_free(filename);
-        res = 1;
+        if (filename) {
+            strncpy(out_path, filename, static_cast<size_t>(max_len - 1));
+            out_path[max_len - 1] = '\0';
+            g_free(filename);
+            res = 1;
+        }
     }
     gtk_widget_destroy(dialog);
     while (g_main_context_iteration(NULL, FALSE));
@@ -1285,6 +1577,8 @@ int platform_dialog_open(const char *title, const char *filter, char *out_path, 
 }
 
 int platform_dialog_save(const char *title, const char *filter, char *out_path, int max_len) {
+    if (!out_path || max_len <= 0) return 0;
+    out_path[0] = '\0';
 #if defined(_WIN32)
     OPENFILENAMEA ofn;
     char szFile[MAX_PATH] = {0};
@@ -1292,25 +1586,34 @@ int platform_dialog_save(const char *title, const char *filter, char *out_path, 
     ofn.lStructSize = sizeof(ofn);
     ofn.lpstrFile = szFile;
     ofn.nMaxFile = sizeof(szFile);
-    ofn.lpstrFilter = filter ? filter : "All Files\0*.*\0";
+    std::string filter_buf;
+    if (filter && filter[0] != '\0') {
+        filter_buf.append("Files");
+        filter_buf.push_back('\0');
+        filter_buf.append(filter);
+        filter_buf.push_back('\0');
+        filter_buf.push_back('\0');
+        ofn.lpstrFilter = filter_buf.data();
+    } else {
+        ofn.lpstrFilter = "All Files\0*.*\0\0";
+    }
     ofn.lpstrTitle = title;
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
     if (GetSaveFileNameA(&ofn)) {
-        strncpy(out_path, ofn.lpstrFile, max_len);
+        strncpy(out_path, ofn.lpstrFile, static_cast<size_t>(max_len - 1));
+        out_path[max_len - 1] = '\0';
         return 1;
     }
     return 0;
 #elif defined(__APPLE__)
-    if (!out_path || max_len <= 0) return 0;
-    out_path[0] = '\0';
     __block int res = 0;
     std::string s_title = title ? title : "";
     run_on_main_sync(^{
         @try {
             NSSavePanel *panel = [NSSavePanel savePanel];
             if (!s_title.empty()) {
-                NSString *nsTitle = [NSString stringWithUTF8String:s_title.c_str()];
-                if (nsTitle) {
+                NSString *nsTitle = webview_nsstring_utf8(s_title);
+                if ([nsTitle length] > 0) {
                     [panel setMessage:nsTitle];
                 }
             }
@@ -1319,7 +1622,7 @@ int platform_dialog_save(const char *title, const char *filter, char *out_path, 
                 if (url) {
                     const char *fs_rep = [url fileSystemRepresentation];
                     if (fs_rep) {
-                        strncpy(out_path, fs_rep, max_len - 1);
+                        strncpy(out_path, fs_rep, static_cast<size_t>(max_len - 1));
                         out_path[max_len - 1] = '\0';
                         res = 1;
                     } else {
@@ -1327,7 +1630,7 @@ int platform_dialog_save(const char *title, const char *filter, char *out_path, 
                         if (path) {
                             const char *utf8 = [path UTF8String];
                             if (utf8) {
-                                strncpy(out_path, utf8, max_len - 1);
+                                strncpy(out_path, utf8, static_cast<size_t>(max_len - 1));
                                 out_path[max_len - 1] = '\0';
                                 res = 1;
                             }
@@ -1347,9 +1650,12 @@ int platform_dialog_save(const char *title, const char *filter, char *out_path, 
     int res = 0;
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-        strncpy(out_path, filename, max_len);
-        g_free(filename);
-        res = 1;
+        if (filename) {
+            strncpy(out_path, filename, static_cast<size_t>(max_len - 1));
+            out_path[max_len - 1] = '\0';
+            g_free(filename);
+            res = 1;
+        }
     }
     gtk_widget_destroy(dialog);
     while (g_main_context_iteration(NULL, FALSE));
@@ -1368,8 +1674,8 @@ int platform_dialog_message(const char *title, const char *message, int is_quest
     std::string s_msg = message ? message : "";
     run_on_main_sync(^{
         NSAlert *alert = [[NSAlert alloc] init];
-        [alert setMessageText:[NSString stringWithUTF8String:s_title.c_str()]];
-        [alert setInformativeText:[NSString stringWithUTF8String:s_msg.c_str()]];
+        [alert setMessageText:webview_nsstring_utf8(s_title)];
+        [alert setInformativeText:webview_nsstring_utf8(s_msg)];
         if (is_question) {
             [alert addButtonWithTitle:@"Yes"];
             [alert addButtonWithTitle:@"No"];
@@ -1412,7 +1718,7 @@ int platform_clipboard_write(const char *text) {
     run_on_main_sync(^{
         NSPasteboard *pb = [NSPasteboard generalPasteboard];
         [pb clearContents];
-        [pb setString:[NSString stringWithUTF8String:s_text.c_str()] forType:NSPasteboardTypeString];
+        [pb setString:webview_nsstring_utf8(s_text) forType:NSPasteboardTypeString];
     });
     return 1;
 #else
@@ -1424,19 +1730,45 @@ int platform_clipboard_write(const char *text) {
 }
 
 int platform_clipboard_read(char *out_text, int max_len) {
+    if (!out_text || max_len <= 0) return 0;
+    out_text[0] = '\0';
 #if defined(_WIN32)
     if (!OpenClipboard(NULL)) return 0;
-    HANDLE hData = GetClipboardData(CF_TEXT);
-    if (!hData) {
-        CloseClipboard();
-        return 0;
+    HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+    if (hData) {
+        SIZE_T gsize = GlobalSize(hData);
+        const wchar_t *wstr = static_cast<const wchar_t *>(GlobalLock(hData));
+        if (wstr && gsize >= sizeof(wchar_t)) {
+            size_t max_wchars = gsize / sizeof(wchar_t);
+            size_t wlen = wcsnlen(wstr, max_wchars);
+            int ulen = WideCharToMultiByte(CP_UTF8, 0, wstr, static_cast<int>(wlen), NULL, 0, NULL, NULL);
+            if (ulen > 0) {
+                std::string u8(static_cast<size_t>(ulen), '\0');
+                WideCharToMultiByte(CP_UTF8, 0, wstr, static_cast<int>(wlen), &u8[0], ulen, NULL, NULL);
+                size_t copy_len = std::min(static_cast<size_t>(max_len - 1), u8.size());
+                memcpy(out_text, u8.data(), copy_len);
+                out_text[copy_len] = '\0';
+            }
+            GlobalUnlock(hData);
+            CloseClipboard();
+            return 1;
+        }
+        if (wstr) GlobalUnlock(hData);
     }
-    char *pszText = static_cast<char *>(GlobalLock(hData));
-    if (pszText) {
-        strncpy(out_text, pszText, max_len);
-        GlobalUnlock(hData);
-        CloseClipboard();
-        return 1;
+    HANDLE hAnsi = GetClipboardData(CF_TEXT);
+    if (hAnsi) {
+        SIZE_T gsize = GlobalSize(hAnsi);
+        const char *pszText = static_cast<const char *>(GlobalLock(hAnsi));
+        if (pszText && gsize > 0) {
+            size_t slen = strnlen(pszText, gsize);
+            size_t copy_len = std::min(static_cast<size_t>(max_len - 1), slen);
+            memcpy(out_text, pszText, copy_len);
+            out_text[copy_len] = '\0';
+            GlobalUnlock(hAnsi);
+            CloseClipboard();
+            return 1;
+        }
+        if (pszText) GlobalUnlock(hAnsi);
     }
     CloseClipboard();
     return 0;
@@ -1446,8 +1778,12 @@ int platform_clipboard_read(char *out_text, int max_len) {
         NSPasteboard *pb = [NSPasteboard generalPasteboard];
         NSString *str = [pb stringForType:NSPasteboardTypeString];
         if (str) {
-            strncpy(out_text, [str UTF8String], max_len);
-            ok = 1;
+            const char *utf8 = [str UTF8String];
+            if (utf8) {
+                strncpy(out_text, utf8, static_cast<size_t>(max_len - 1));
+                out_text[max_len - 1] = '\0';
+                ok = 1;
+            }
         }
     });
     return ok;
@@ -1455,7 +1791,8 @@ int platform_clipboard_read(char *out_text, int max_len) {
     GtkClipboard *clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
     gchar *text = gtk_clipboard_wait_for_text(clipboard);
     if (text) {
-        strncpy(out_text, text, max_len);
+        strncpy(out_text, text, static_cast<size_t>(max_len - 1));
+        out_text[max_len - 1] = '\0';
         g_free(text);
         return 1;
     }
@@ -1506,7 +1843,7 @@ int platform_clipboard_write_html(const char *html) {
     run_on_main_sync(^{
         NSPasteboard *pb = [NSPasteboard generalPasteboard];
         [pb clearContents];
-        [pb setString:[NSString stringWithUTF8String:s_html.c_str()] forType:NSPasteboardTypeHTML];
+        [pb setString:webview_nsstring_utf8(s_html) forType:NSPasteboardTypeHTML];
     });
     return 1;
 #elif defined(_WIN32)
@@ -1537,9 +1874,12 @@ int platform_clipboard_read_html(char *out_html, int max_len) {
         NSPasteboard *pb = [NSPasteboard generalPasteboard];
         NSString *str = [pb stringForType:NSPasteboardTypeHTML];
         if (str) {
-            strncpy(out_html, [str UTF8String], max_len - 1);
-            out_html[max_len - 1] = '\0';
-            ok = 1;
+            const char *utf8 = [str UTF8String];
+            if (utf8) {
+                strncpy(out_html, utf8, static_cast<size_t>(max_len - 1));
+                out_html[max_len - 1] = '\0';
+                ok = 1;
+            }
         }
     });
     return ok;
@@ -1726,18 +2066,27 @@ void platform_theme_set_callback(theme_callback_fn cb) {
 @end
 #endif
 
+static std::string truncate_utf8_safe(const std::string &s, size_t max_bytes) {
+    if (s.size() <= max_bytes) return s;
+    size_t len = max_bytes;
+    while (len > 0 && (static_cast<unsigned char>(s[len]) & 0xC0) == 0x80) {
+        --len;
+    }
+    return s.substr(0, len);
+}
+
 void platform_notification_send(const char *title, const char *body) {
     if (!title && !body) return;
     std::string s_title = title ? title : "";
     std::string s_body = body ? body : "";
 
-    // Strip NUL bytes and apply length limits
     s_title.erase(std::remove(s_title.begin(), s_title.end(), '\0'), s_title.end());
     s_body.erase(std::remove(s_body.begin(), s_body.end(), '\0'), s_body.end());
-    if (s_title.size() > 256) s_title = s_title.substr(0, 256);
-    if (s_body.size() > 1024) s_body = s_body.substr(0, 1024);
+    s_title = truncate_utf8_safe(s_title, 256);
+    s_body = truncate_utf8_safe(s_body, 1024);
 
 #if defined(__APPLE__)
+    __block bool delivered = false;
     if ([NSBundle mainBundle].bundleIdentifier != nil) {
         run_on_main_sync(^{
             if (@available(macOS 10.14, *)) {
@@ -1751,33 +2100,37 @@ void platform_notification_send(const char *title, const char *body) {
                 });
 
                 UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
-                content.title = [NSString stringWithUTF8String:s_title.c_str()];
-                content.body = [NSString stringWithUTF8String:s_body.c_str()];
+                content.title = webview_nsstring_utf8(s_title);
+                content.body = webview_nsstring_utf8(s_body);
                 content.sound = [UNNotificationSound defaultSound];
 
                 NSString *identifier = [[NSUUID UUID] UUIDString];
                 UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:identifier content:content trigger:nil];
                 [[UNUserNotificationCenter currentNotificationCenter] addNotificationRequest:request withCompletionHandler:nil];
-                return;
+                delivered = true;
             }
         });
     }
+    if (delivered) return;
 
-    // Discrete fallback: pass title and body as positional argv arguments to a fixed osascript
-    // NEVER concatenate user text into AppleScript syntax!
     std::thread([s_title, s_body]() {
         static const char *fixed_script = "on run argv\n  display notification (item 2 of argv) with title (item 1 of argv)\nend run";
-        pid_t pid;
-        const char *argv[] = {"osascript", "-e", fixed_script, s_title.c_str(), s_body.c_str(), NULL};
-        if (posix_spawnp(&pid, "/usr/bin/osascript", NULL, NULL, (char *const *)argv, environ) == 0) {
-            int status;
-            waitpid(pid, &status, 0);
+        pid_t pid = -1;
+        const char *argv[] = {"osascript", "-e", fixed_script, "--", s_title.c_str(), s_body.c_str(), NULL};
+        posix_spawnattr_t attr;
+        posix_spawnattr_init(&attr);
+#if defined(POSIX_SPAWN_CLOEXEC_DEFAULT)
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#endif
+        int rc = posix_spawn(&pid, "/usr/bin/osascript", NULL, &attr, const_cast<char *const *>(argv), environ);
+        posix_spawnattr_destroy(&attr);
+        if (rc == 0 && pid > 0) {
+            int status = 0;
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
         }
     }).detach();
 
 #elif defined(_WIN32)
-    // Windows: Use Shell_NotifyIconW with NOTIFYICONDATAW directly taking wide string buffers.
-    // Zero powershell execution! Zero script concatenation!
     std::thread([s_title, s_body]() {
         NOTIFYICONDATAW nid;
         ZeroMemory(&nid, sizeof(nid));
@@ -1803,13 +2156,12 @@ void platform_notification_send(const char *title, const char *body) {
     }).detach();
 
 #else
-    // Linux: notify-send with explicit "--" option terminator before positional parameters
     std::thread([s_title, s_body]() {
-        pid_t pid;
+        pid_t pid = -1;
         const char *argv[] = {"notify-send", "--", s_title.c_str(), s_body.c_str(), NULL};
-        if (posix_spawnp(&pid, "notify-send", NULL, NULL, (char *const *)argv, environ) == 0) {
-            int status;
-            waitpid(pid, &status, 0);
+        if (posix_spawnp(&pid, "notify-send", NULL, NULL, const_cast<char *const *>(argv), environ) == 0 && pid > 0) {
+            int status = 0;
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
         }
     }).detach();
 #endif
@@ -1818,6 +2170,7 @@ void platform_notification_send(const char *title, const char *body) {
 static single_instance_callback_fn g_single_instance_cb = nullptr;
 static std::thread g_single_instance_thread;
 static std::atomic<bool> g_single_instance_running{false};
+static std::atomic<bool> g_single_instance_initialized{false};
 static std::string g_single_instance_sock_path;
 #if !defined(_WIN32)
 static int g_single_instance_server_fd = -1;
@@ -1833,8 +2186,12 @@ void platform_single_instance_cleanup() {
     g_single_instance_running = false;
 #if !defined(_WIN32)
     if (g_single_instance_server_fd >= 0) {
+        shutdown(g_single_instance_server_fd, SHUT_RDWR);
         close(g_single_instance_server_fd);
         g_single_instance_server_fd = -1;
+    }
+    if (g_single_instance_thread.joinable()) {
+        g_single_instance_thread.join();
     }
     if (!g_single_instance_sock_path.empty()) {
         unlink(g_single_instance_sock_path.c_str());
@@ -1842,19 +2199,23 @@ void platform_single_instance_cleanup() {
     }
 #else
     if (g_single_instance_pipe != INVALID_HANDLE_VALUE) {
+        CancelIoEx(g_single_instance_pipe, NULL);
         CloseHandle(g_single_instance_pipe);
         g_single_instance_pipe = INVALID_HANDLE_VALUE;
     }
+    if (g_single_instance_thread.joinable()) {
+        g_single_instance_thread.detach();
+    }
 #endif
+    g_single_instance_initialized = false;
 }
 
 int platform_single_instance_init(const char *app_id, const char *payload_json) {
-    static bool g_single_instance_initialized = false;
-    if (g_single_instance_initialized) return 1;
+    if (g_single_instance_initialized.load()) return 1;
 
     std::string safe_id = (app_id && strlen(app_id) > 0) ? app_id : "com.tauri.lua";
     for (char &c : safe_id) {
-        if (!isalnum((unsigned char)c) && c != '-' && c != '.' && c != '_') {
+        if (!isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '.' && c != '_') {
             c = '_';
         }
     }
@@ -1866,20 +2227,23 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     if (runtime_dir && strlen(runtime_dir) > 0) {
         sock_path = std::string(runtime_dir) + "/" + safe_id + ".sock";
     } else {
-        // No XDG_RUNTIME_DIR (e.g. macOS or stripped env): fall back to
-        // user-private ~/.local/run/<id>.sock (mode 0700). Refuse world-writable /tmp.
         const char *home = getenv("HOME");
         if (home && strlen(home) > 0) {
-            std::string run_dir = std::string(home) + "/.local/run";
+            std::string local_dir = std::string(home) + "/.local";
+            std::string run_dir = local_dir + "/run";
+            ::mkdir(local_dir.c_str(), 0700);
             ::mkdir(run_dir.c_str(), 0700);
+            struct stat st;
+            if (lstat(run_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid()) {
+                return -1;
+            }
+            ::chmod(run_dir.c_str(), 0700);
             sock_path = run_dir + "/" + safe_id + ".sock";
         } else {
-            ::fprintf(stderr, "[tauri-lua] error: single-instance requires XDG_RUNTIME_DIR or HOME; refusing /tmp fallback\n");
             return -1;
         }
     }
 
-    // Try connecting as a secondary instance first
     int client_sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (client_sock >= 0) {
 #if defined(FD_CLOEXEC)
@@ -1887,27 +2251,27 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
 #endif
         struct sockaddr_un addr;
         memset(&addr, 0, sizeof(addr));
-        addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
+        if (sock_path.size() < sizeof(addr.sun_path)) {
+            addr.sun_family = AF_UNIX;
+            strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
+            addr.sun_path[sizeof(addr.sun_path) - 1] = '\0';
 
-        struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 300000; // 300ms timeout
-        setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            struct timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 300000;
+            setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        if (connect(client_sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-            // Secondary instance: connected to active primary instance!
-            std::string msg = payload + "\n";
-            send(client_sock, msg.c_str(), msg.length(), 0);
-            close(client_sock);
-            return 0; // Signal: secondary instance, should exit immediately
+            if (connect(client_sock, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) == 0) {
+                std::string msg = payload + "\n";
+                send(client_sock, msg.c_str(), msg.length(), 0);
+                close(client_sock);
+                return 0;
+            }
         }
         close(client_sock);
     }
 
-    // If connect failed, remove any stale dead socket file.
-    // Use lstat + verify it is a socket before unlinking (symlink safety).
     {
         struct stat st;
         if (lstat(sock_path.c_str(), &st) == 0 && S_ISSOCK(st.st_mode)) {
@@ -1915,7 +2279,6 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
         }
     }
 
-    // Become primary instance server
     int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd < 0) return -1;
 #if defined(FD_CLOEXEC)
@@ -1927,10 +2290,15 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
 
     struct sockaddr_un saddr;
     memset(&saddr, 0, sizeof(saddr));
+    if (sock_path.size() >= sizeof(saddr.sun_path)) {
+        close(server_fd);
+        return -1;
+    }
     saddr.sun_family = AF_UNIX;
     strncpy(saddr.sun_path, sock_path.c_str(), sizeof(saddr.sun_path) - 1);
+    saddr.sun_path[sizeof(saddr.sun_path) - 1] = '\0';
 
-    if (bind(server_fd, (struct sockaddr *)&saddr, sizeof(saddr)) < 0) {
+    if (bind(server_fd, reinterpret_cast<struct sockaddr *>(&saddr), sizeof(saddr)) < 0) {
         close(server_fd);
         return -1;
     }
@@ -1938,7 +2306,7 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
     if (chmod(sock_path.c_str(), 0600) != 0) {
         close(server_fd);
         unlink(sock_path.c_str());
-        return 0;
+        return -1;
     }
 
     if (listen(server_fd, 5) < 0) {
@@ -1954,17 +2322,34 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
 
     g_single_instance_thread = std::thread([server_fd]() {
         const uid_t owner_uid = geteuid();
-        while (g_single_instance_running) {
+        while (g_single_instance_running.load()) {
+            struct pollfd pfd;
+            pfd.fd = server_fd;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            int pr = poll(&pfd, 1, 250);
+            if (pr <= 0) {
+                if (!g_single_instance_running.load()) break;
+                continue;
+            }
+            if (!(pfd.revents & POLLIN)) {
+                if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+                continue;
+            }
             struct sockaddr_un client_addr;
             socklen_t client_len = sizeof(client_addr);
-            int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+            int client_fd = accept(server_fd, reinterpret_cast<struct sockaddr *>(&client_addr), &client_len);
             if (client_fd < 0) {
-                if (!g_single_instance_running) break;
+                if (!g_single_instance_running.load()) break;
                 continue;
             }
 #if defined(FD_CLOEXEC)
             fcntl(client_fd, F_SETFD, FD_CLOEXEC);
 #endif
+            struct timeval tv;
+            tv.tv_sec = 2;
+            tv.tv_usec = 0;
+            setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 #if defined(__APPLE__)
             uid_t peer_uid;
@@ -1976,28 +2361,35 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
 #elif defined(SO_PEERCRED)
             struct ucred peer_cred;
             socklen_t cred_len = sizeof(peer_cred);
-            if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer_cred, &cred_len) == 0) {
-                if (peer_cred.uid != owner_uid) {
-                    close(client_fd);
-                    continue;
-                }
+            if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer_cred, &cred_len) != 0 ||
+                cred_len != sizeof(peer_cred) || peer_cred.uid != owner_uid) {
+                close(client_fd);
+                continue;
             }
+#else
+            close(client_fd);
+            continue;
 #endif
 
             std::string buffer;
             char chunk[512];
             ssize_t bytes_read = 0;
-            const size_t MAX_MSG_BYTES = 65536; // Cap incoming payload at 64KB
-            while ((bytes_read = recv(client_fd, chunk, sizeof(chunk) - 1, 0)) > 0) {
-                chunk[bytes_read] = '\0';
-                buffer += chunk;
-                if (buffer.size() > MAX_MSG_BYTES) {
-                    buffer.clear();
+            size_t total_read = 0;
+            bool oversized = false;
+            const size_t MAX_MSG_BYTES = 65536;
+            while ((bytes_read = recv(client_fd, chunk, sizeof(chunk), 0)) > 0) {
+                total_read += static_cast<size_t>(bytes_read);
+                if (total_read > MAX_MSG_BYTES) {
+                    oversized = true;
                     break;
                 }
+                buffer.append(chunk, static_cast<size_t>(bytes_read));
                 if (buffer.find('\n') != std::string::npos) break;
             }
             close(client_fd);
+            if (oversized || buffer.find('\0') != std::string::npos) {
+                continue;
+            }
 
             while (!buffer.empty() && (buffer.back() == '\n' || buffer.back() == '\r')) {
                 buffer.pop_back();
@@ -2011,66 +2403,115 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
             }
         }
     });
-    g_single_instance_thread.detach();
 
-    return 1; // Primary instance initialized!
+    return 1;
 
-#else // Windows
+#else
+    std::wstring sid_suffix;
+    HANDLE hToken = NULL;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        DWORD needed = 0;
+        GetTokenInformation(hToken, TokenUser, NULL, 0, &needed);
+        if (needed > 0) {
+            std::vector<BYTE> tok_buf(needed);
+            if (GetTokenInformation(hToken, TokenUser, tok_buf.data(), needed, &needed)) {
+                TOKEN_USER *tu = reinterpret_cast<TOKEN_USER *>(tok_buf.data());
+                LPWSTR sid_str = NULL;
+                if (ConvertSidToStringSidW(tu->User.Sid, &sid_str) && sid_str) {
+                    sid_suffix = L"-" + std::wstring(sid_str);
+                    LocalFree(sid_str);
+                }
+            }
+        }
+        CloseHandle(hToken);
+    }
+
     std::wstring safe_id_w(safe_id.begin(), safe_id.end());
-    std::wstring pipe_name_w = L"\\\\.\\pipe\\" + safe_id_w + L"-single-instance";
+    std::wstring pipe_name_w = L"\\\\.\\pipe\\" + safe_id_w + sid_suffix + L"-single-instance";
 
     HANDLE hPipe = CreateFileW(pipe_name_w.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (hPipe != INVALID_HANDLE_VALUE) {
         std::string msg = payload + "\n";
         DWORD bytesWritten = 0;
-        WriteFile(hPipe, msg.c_str(), (DWORD)msg.length(), &bytesWritten, NULL);
+        WriteFile(hPipe, msg.c_str(), static_cast<DWORD>(msg.length()), &bytesWritten, NULL);
         CloseHandle(hPipe);
-        return 0; // Secondary instance!
+        return 0;
     }
 
-    HANDLE server_pipe = CreateNamedPipeW(
-        pipe_name_w.c_str(),
-        PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-        PIPE_UNLIMITED_INSTANCES,
-        4096, 4096, 0, NULL
-    );
-    if (server_pipe == INVALID_HANDLE_VALUE) return -1;
+    auto create_secure_pipe = [&](bool first_instance) -> HANDLE {
+        SECURITY_ATTRIBUTES sa;
+        ZeroMemory(&sa, sizeof(sa));
+        sa.nLength = sizeof(sa);
+        PSECURITY_DESCRIPTOR pSD = NULL;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;OW)", SDDL_REVISION_1, &pSD, NULL)) {
+            return INVALID_HANDLE_VALUE;
+        }
+        sa.lpSecurityDescriptor = pSD;
+        DWORD open_mode = PIPE_ACCESS_DUPLEX | (first_instance ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0);
+        HANDLE hp = CreateNamedPipeW(
+            pipe_name_w.c_str(),
+            open_mode,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_UNLIMITED_INSTANCES,
+            4096, 4096, 2000, &sa
+        );
+        LocalFree(pSD);
+        return hp;
+    };
 
-    g_single_instance_pipe = server_pipe;
+    HANDLE first_pipe = create_secure_pipe(true);
+    if (first_pipe == INVALID_HANDLE_VALUE) return -1;
+
+    g_single_instance_pipe = first_pipe;
     g_single_instance_running = true;
     g_single_instance_initialized = true;
 
-    g_single_instance_thread = std::thread([pipe_name_w]() {
-        while (g_single_instance_running) {
-            HANDLE hInstPipe = CreateNamedPipeW(
-                pipe_name_w.c_str(),
-                PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                PIPE_UNLIMITED_INSTANCES,
-                4096, 4096, 0, NULL
-            );
-            if (hInstPipe == INVALID_HANDLE_VALUE) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                continue;
+    g_single_instance_thread = std::thread([pipe_name_w, first_pipe]() {
+        HANDLE current_pipe = first_pipe;
+        while (g_single_instance_running.load()) {
+            if (current_pipe == INVALID_HANDLE_VALUE) {
+                SECURITY_ATTRIBUTES sa;
+                ZeroMemory(&sa, sizeof(sa));
+                sa.nLength = sizeof(sa);
+                PSECURITY_DESCRIPTOR pSD = NULL;
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;OW)", SDDL_REVISION_1, &pSD, NULL)) {
+                    break;
+                }
+                sa.lpSecurityDescriptor = pSD;
+                current_pipe = CreateNamedPipeW(
+                    pipe_name_w.c_str(),
+                    PIPE_ACCESS_DUPLEX,
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                    PIPE_UNLIMITED_INSTANCES,
+                    4096, 4096, 2000, &sa
+                );
+                LocalFree(pSD);
+                if (current_pipe == INVALID_HANDLE_VALUE) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    continue;
+                }
             }
-            BOOL connected = ConnectNamedPipe(hInstPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
-            if (connected) {
+            BOOL connected = ConnectNamedPipe(current_pipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+            if (connected && g_single_instance_running.load()) {
                 char buf[4096];
                 DWORD bytesRead = 0;
                 std::string buffer;
+                bool oversized = false;
                 const size_t MAX_MSG_BYTES = 65536;
-                while (ReadFile(hInstPipe, buf, sizeof(buf) - 1, &bytesRead, NULL) && bytesRead > 0) {
-                    buf[bytesRead] = '\0';
-                    buffer.append(buf, bytesRead);
-                    if (buffer.size() > MAX_MSG_BYTES) {
-                        buffer.clear();
+                while (ReadFile(current_pipe, buf, sizeof(buf), &bytesRead, NULL) && bytesRead > 0) {
+                    if (buffer.size() + bytesRead > MAX_MSG_BYTES) {
+                        oversized = true;
                         break;
                     }
+                    buffer.append(buf, bytesRead);
                     if (buffer.find('\n') != std::string::npos) break;
                 }
-                DisconnectNamedPipe(hInstPipe);
-                CloseHandle(hInstPipe);
+                DisconnectNamedPipe(current_pipe);
+                CloseHandle(current_pipe);
+                current_pipe = INVALID_HANDLE_VALUE;
+                if (oversized || buffer.find('\0') != std::string::npos) {
+                    continue;
+                }
 
                 while (!buffer.empty() && (buffer.back() == '\n' || buffer.back() == '\r')) {
                     buffer.pop_back();
@@ -2082,11 +2523,14 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
                     g_single_instance_cb(buffer.c_str());
                 }
             } else {
-                CloseHandle(hInstPipe);
+                CloseHandle(current_pipe);
+                current_pipe = INVALID_HANDLE_VALUE;
             }
         }
+        if (current_pipe != INVALID_HANDLE_VALUE) {
+            CloseHandle(current_pipe);
+        }
     });
-    g_single_instance_thread.detach();
 
     return 1;
 #endif
@@ -2095,7 +2539,8 @@ int platform_single_instance_init(const char *app_id, const char *payload_json) 
 void platform_state_set_string(const char *key, const char *val) {
     if (!key || !val) return;
     std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
-    g_shared_state[key] = StateValue{StateType::String, val, 0.0};
+    g_shared_state[key] = StateValue{StateType::String, val, 0.0, false};
+    g_state_versions[key] = g_state_versions[key] + 1;
 }
 
 int platform_state_get_string(const char *key, char *out_val, int max_len) {
@@ -2119,7 +2564,8 @@ int platform_state_get_string(const char *key, char *out_val, int max_len) {
 void platform_state_set_number(const char *key, double val) {
     if (!key) return;
     std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
-    g_shared_state[key] = StateValue{StateType::Number, "", val};
+    g_shared_state[key] = StateValue{StateType::Number, "", val, false};
+    g_state_versions[key] = g_state_versions[key] + 1;
 }
 
 int platform_state_get_number(const char *key, double *out_val) {
@@ -2133,10 +2579,29 @@ int platform_state_get_number(const char *key, double *out_val) {
     return 0;
 }
 
+void platform_state_set_bool(const char *key, int val) {
+    if (!key) return;
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
+    g_shared_state[key] = StateValue{StateType::Bool, "", 0.0, val != 0};
+    g_state_versions[key] = g_state_versions[key] + 1;
+}
+
+int platform_state_get_bool(const char *key, int *out_val) {
+    if (!key || !out_val) return 0;
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
+    auto it = g_shared_state.find(key);
+    if (it != g_shared_state.end() && it->second.type == StateType::Bool) {
+        *out_val = it->second.bool_data ? 1 : 0;
+        return 1;
+    }
+    return 0;
+}
+
 void platform_state_set_json(const char *key, const char *json_val) {
     if (!key || !json_val) return;
     std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
-    g_shared_state[key] = StateValue{StateType::Json, json_val, 0.0};
+    g_shared_state[key] = StateValue{StateType::Json, json_val, 0.0, false};
+    g_state_versions[key] = g_state_versions[key] + 1;
 }
 
 int platform_state_get_json(const char *key, char *out_val, int max_len) {
@@ -2157,6 +2622,14 @@ int platform_state_get_json(const char *key, char *out_val, int max_len) {
     return 1;
 }
 
+uint64_t platform_state_get_version(const char *key) {
+    if (!key) return g_state_epoch;
+    std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
+    auto it = g_state_versions.find(key);
+    uint64_t local_v = (it != g_state_versions.end()) ? it->second : 0;
+    return (g_state_epoch << 32) ^ local_v;
+}
+
 int platform_state_has(const char *key) {
     if (!key) return 0;
     std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
@@ -2167,11 +2640,14 @@ void platform_state_delete(const char *key) {
     if (!key) return;
     std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     g_shared_state.erase(key);
+    g_state_versions[key] = g_state_versions[key] + 1;
 }
 
 void platform_state_clear() {
     std::lock_guard<std::recursive_mutex> lock(g_state_mutex);
     g_shared_state.clear();
+    g_state_versions.clear();
+    g_state_epoch++;
 }
 
 int platform_state_get_length(const char *key) {
@@ -2260,7 +2736,29 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
     DWORD path_len = GetEnvironmentVariableW(L"PATH", path_env, 32768);
     LPCWSTR search_path = (path_len > 0 && path_len < 32768) ? path_env : L"";
     DWORD found = SearchPathW(search_path, prog_w.c_str(), L".exe", MAX_PATH, abs_path_w, NULL);
-    if (found == 0) {
+    if (found == 0 || found >= MAX_PATH) {
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return nullptr;
+    }
+    std::wstring resolved_lower(abs_path_w, found);
+    while (!resolved_lower.empty() && (resolved_lower.back() == L'.' || resolved_lower.back() == L' ')) {
+        resolved_lower.pop_back();
+    }
+    for (wchar_t &wc : resolved_lower) wc = static_cast<wchar_t>(towlower(wc));
+    if (resolved_lower.find(L':', 2) != std::wstring::npos) {
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return nullptr;
+    }
+    auto has_blocked_ext = [&](const wchar_t *ext) -> bool {
+        size_t elen = wcslen(ext);
+        return resolved_lower.size() >= elen && resolved_lower.compare(resolved_lower.size() - elen, elen, ext) == 0;
+    };
+    if (has_blocked_ext(L".bat") || has_blocked_ext(L".cmd") || has_blocked_ext(L".com") ||
+        has_blocked_ext(L".vbs") || has_blocked_ext(L".vbe") || has_blocked_ext(L".js") ||
+        has_blocked_ext(L".jse") || has_blocked_ext(L".ps1") || has_blocked_ext(L".hta") ||
+        has_blocked_ext(L".scr") || has_blocked_ext(L".pif") || has_blocked_ext(L".wsf")) {
         CloseHandle(hRead);
         CloseHandle(hWrite);
         return nullptr;
@@ -2346,12 +2844,18 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
     return proc;
 #else
     int pipe_fds[2];
+#if defined(__linux__) && defined(O_CLOEXEC)
+    if (pipe2(pipe_fds, O_CLOEXEC) != 0) {
+        return nullptr;
+    }
+#else
     if (pipe(pipe_fds) != 0) {
         return nullptr;
     }
 #if defined(FD_CLOEXEC)
     fcntl(pipe_fds[0], F_SETFD, FD_CLOEXEC);
     fcntl(pipe_fds[1], F_SETFD, FD_CLOEXEC);
+#endif
 #endif
 
     posix_spawn_file_actions_t actions;
@@ -2372,13 +2876,47 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
     }
     argv.push_back(nullptr);
 
+    std::vector<std::string> clean_env_storage;
+    std::vector<char *> clean_envp;
+    auto is_dangerous_env = [](const std::string &key) -> bool {
+        if (key.rfind("LD_", 0) == 0 || key.rfind("DYLD_", 0) == 0) return true;
+        static const char *blocked[] = {
+            "NODE_OPTIONS", "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV", "ENV", "IFS",
+            "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "PERL5OPT", "PERL5LIB", "RUBYOPT",
+            "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "GCONV_PATH", "HOSTALIASES",
+            "MALLOC_TRACE", "SSLKEYLOGFILE", "SHELLOPTS", "PS4", "ZDOTDIR",
+            "DOTNET_STARTUP_HOOKS", "CDPATH"
+        };
+        for (const char *b : blocked) {
+            if (key == b) return true;
+        }
+        return false;
+    };
+    if (environ) {
+        for (char **e = environ; *e != nullptr; ++e) {
+            std::string entry(*e);
+            size_t eq = entry.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = entry.substr(0, eq);
+            std::string k_upper = k;
+            for (char &ch : k_upper) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            if (!is_dangerous_env(k_upper)) {
+                clean_env_storage.push_back(std::move(entry));
+            }
+        }
+    }
+    for (auto &s : clean_env_storage) {
+        clean_envp.push_back(const_cast<char *>(s.c_str()));
+    }
+    clean_envp.push_back(nullptr);
+
     pid_t pid = -1;
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
 #if defined(__APPLE__) && defined(POSIX_SPAWN_CLOEXEC_DEFAULT)
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
 #endif
-    int status = posix_spawnp(&pid, program, &actions, &attr, argv.data(), environ);
+    int status = posix_spawnp(&pid, program, &actions, &attr, argv.data(), clean_envp.data());
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
 
@@ -2401,6 +2939,7 @@ void *platform_process_spawn(const char *program, const char **args, int arg_cou
 int platform_process_read_line(void *handle, char *out_buf, int max_len) {
     if (!handle || !out_buf || max_len <= 0) return -1;
     ProcessHandle *proc = static_cast<ProcessHandle *>(handle);
+    static constexpr size_t MAX_LINE_BUFFER = 4 * 1024 * 1024;
 
     while (true) {
         size_t newline_pos = proc->line_buffer.find('\n');
@@ -2414,6 +2953,14 @@ int platform_process_read_line(void *handle, char *out_buf, int max_len) {
             memcpy(out_buf, line.data(), copy_len);
             out_buf[copy_len] = '\0';
             return static_cast<int>(copy_len);
+        }
+
+        if (proc->line_buffer.size() >= MAX_LINE_BUFFER) {
+            std::string line = proc->line_buffer.substr(0, static_cast<size_t>(max_len - 1));
+            proc->line_buffer.clear();
+            memcpy(out_buf, line.data(), line.size());
+            out_buf[line.size()] = '\0';
+            return static_cast<int>(line.size());
         }
 
 #if defined(_WIN32)
@@ -2434,11 +2981,14 @@ int platform_process_read_line(void *handle, char *out_buf, int max_len) {
                 out_buf[copy_len] = '\0';
                 return static_cast<int>(copy_len);
             }
-            return 0;
+            return -1;
         }
 #else
         char temp_buf[4096];
         ssize_t bytes_read = read(proc->pipe_fd, temp_buf, sizeof(temp_buf));
+        if (bytes_read < 0 && errno == EINTR) {
+            continue;
+        }
         if (bytes_read > 0) {
             proc->line_buffer.append(temp_buf, static_cast<size_t>(bytes_read));
         } else {
@@ -2453,7 +3003,7 @@ int platform_process_read_line(void *handle, char *out_buf, int max_len) {
                 out_buf[copy_len] = '\0';
                 return static_cast<int>(copy_len);
             }
-            return 0;
+            return -1;
         }
 #endif
     }
@@ -2474,7 +3024,11 @@ int platform_process_wait(void *handle) {
     if (proc->exited) return proc->exit_code;
     if (proc->pid > 0) {
         int status = 0;
-        waitpid(proc->pid, &status, 0);
+        pid_t wres;
+        do {
+            wres = waitpid(proc->pid, &status, 0);
+        } while (wres < 0 && errno == EINTR);
+        if (wres < 0) return -1;
         proc->exited = true;
         if (WIFEXITED(status)) {
             proc->exit_code = WEXITSTATUS(status);
@@ -2518,113 +3072,352 @@ void platform_process_close(void *handle) {
     delete proc;
 }
 
+static bool is_dangerous_child_env_key(const std::string &key_upper) {
+    if (key_upper.rfind("LD_", 0) == 0 || key_upper.rfind("DYLD_", 0) == 0) return true;
+    static const char *blocked[] = {
+        "NODE_OPTIONS", "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV", "ENV", "IFS",
+        "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "PERL5OPT", "PERL5LIB", "RUBYOPT",
+        "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "GCONV_PATH", "HOSTALIASES",
+        "MALLOC_TRACE", "SSLKEYLOGFILE", "SHELLOPTS", "PS4", "ZDOTDIR",
+        "DOTNET_STARTUP_HOOKS", "CDPATH", "LUA_PATH", "LUA_CPATH", "LUA_INIT"
+    };
+    for (const char *b : blocked) {
+        if (key_upper == b) return true;
+    }
+    return false;
+}
+
+long platform_sidecar_spawn(const char *program, const char **args, int arg_count, const char **env_kv, int env_count, const char *cwd, const char *log_file) {
+    if (!program || program[0] == '\0') return -1;
+    if (arg_count < 0 || arg_count > 1024 || env_count < 0 || env_count > 1024) return -1;
+
+#if defined(_WIN32)
+    auto to_wide = [](const std::string &s) -> std::wstring {
+        if (s.empty()) return L"";
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), NULL, 0);
+        if (wlen <= 0) return L"";
+        std::wstring w(static_cast<size_t>(wlen), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &w[0], wlen);
+        return w;
+    };
+
+    std::string prog_str(program);
+    std::string prog_lower = prog_str;
+    while (!prog_lower.empty() && (prog_lower.back() == '.' || prog_lower.back() == ' ')) prog_lower.pop_back();
+    for (char &c : prog_lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (prog_lower.find(':', 2) != std::string::npos) return -1;
+    auto ends_with = [&](const char *ext) {
+        size_t elen = std::strlen(ext);
+        return prog_lower.size() >= elen && prog_lower.compare(prog_lower.size() - elen, elen, ext) == 0;
+    };
+    if (ends_with(".bat") || ends_with(".cmd") || ends_with(".vbs") || ends_with(".vbe") ||
+        ends_with(".js") || ends_with(".jse") || ends_with(".ps1") || ends_with(".hta") || ends_with(".wsf")) {
+        return -1;
+    }
+
+    std::wstring prog_w = to_wide(prog_str);
+    std::wstring cmd_line_w;
+    auto append_quoted_w = [&](const std::string &arg) {
+        if (!cmd_line_w.empty()) cmd_line_w += L" ";
+        std::wstring warg = to_wide(arg);
+        bool needs_quotes = warg.empty() || (warg.find_first_of(L" \t\n\v\"") != std::wstring::npos);
+        if (!needs_quotes) {
+            cmd_line_w += warg;
+        } else {
+            cmd_line_w += L"\"";
+            size_t backslashes = 0;
+            for (wchar_t c : warg) {
+                if (c == L'\\') {
+                    backslashes++;
+                } else if (c == L'\"') {
+                    cmd_line_w.append(backslashes * 2 + 1, L'\\');
+                    cmd_line_w += L'\"';
+                    backslashes = 0;
+                } else {
+                    cmd_line_w.append(backslashes, L'\\');
+                    backslashes = 0;
+                    cmd_line_w += c;
+                }
+            }
+            cmd_line_w.append(backslashes * 2, L'\\');
+            cmd_line_w += L"\"";
+        }
+    };
+    append_quoted_w(prog_str);
+    for (int i = 0; i < arg_count; ++i) {
+        if (args && args[i]) append_quoted_w(args[i]);
+    }
+
+    std::map<std::wstring, std::wstring> env_map;
+    LPWCH raw_env = GetEnvironmentStringsW();
+    if (raw_env) {
+        const wchar_t *p = raw_env;
+        while (*p != L'\0') {
+            std::wstring entry(p);
+            p += entry.size() + 1;
+            size_t eq = entry.find(L'=');
+            if (eq == std::wstring::npos || eq == 0) continue;
+            std::wstring wk = entry.substr(0, eq);
+            std::string ku;
+            for (wchar_t wc : wk) {
+                if (wc < 128) ku.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(wc))));
+            }
+            if (!is_dangerous_child_env_key(ku)) {
+                env_map[wk] = entry.substr(eq + 1);
+            }
+        }
+        FreeEnvironmentStringsW(raw_env);
+    }
+    for (int i = 0; i < env_count; ++i) {
+        if (!env_kv || !env_kv[i]) continue;
+        std::string kv(env_kv[i]);
+        size_t eq = kv.find('=');
+        if (eq == std::string::npos || eq == 0) continue;
+        std::string k = kv.substr(0, eq);
+        std::string ku = k;
+        for (char &ch : ku) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        if (ku == "PATH" || is_dangerous_child_env_key(ku)) continue;
+        env_map[to_wide(k)] = to_wide(kv.substr(eq + 1));
+    }
+    std::vector<wchar_t> env_block;
+    for (const auto &kv : env_map) {
+        env_block.insert(env_block.end(), kv.first.begin(), kv.first.end());
+        env_block.push_back(L'=');
+        env_block.insert(env_block.end(), kv.second.begin(), kv.second.end());
+        env_block.push_back(L'\0');
+    }
+    env_block.push_back(L'\0');
+
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    HANDLE hLog = INVALID_HANDLE_VALUE;
+    if (log_file && log_file[0] != '\0' && std::strcmp(log_file, "NUL") != 0) {
+        std::wstring log_w = to_wide(log_file);
+        DWORD attrs = GetFileAttributesW(log_w.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            hLog = CreateFileW(log_w.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        }
+    }
+    if (hLog == INVALID_HANDLE_VALUE) {
+        hLog = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    HANDLE hNullIn = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    STARTUPINFOW si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = hNullIn;
+    si.hStdOutput = hLog;
+    si.hStdError = hLog;
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    std::vector<wchar_t> cmd_buf(cmd_line_w.begin(), cmd_line_w.end());
+    cmd_buf.push_back(L'\0');
+
+    std::wstring cwd_w = (cwd && cwd[0] != '\0') ? to_wide(cwd) : L"";
+    BOOL ok = CreateProcessW(
+        prog_w.c_str(),
+        cmd_buf.data(),
+        NULL,
+        NULL,
+        TRUE,
+        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+        env_block.data(),
+        cwd_w.empty() ? NULL : cwd_w.c_str(),
+        &si,
+        &pi
+    );
+
+    if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
+    if (hNullIn != INVALID_HANDLE_VALUE) CloseHandle(hNullIn);
+    if (!ok) return -1;
+
+    long pid = static_cast<long>(pi.dwProcessId);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    platform_register_child_pid(pid);
+    return pid;
+#else
+    std::vector<char *> argv;
+    argv.push_back(const_cast<char *>(program));
+    for (int i = 0; i < arg_count; ++i) {
+        if (args && args[i]) {
+            argv.push_back(const_cast<char *>(args[i]));
+        }
+    }
+    argv.push_back(nullptr);
+
+    std::map<std::string, std::string> env_map;
+    if (environ) {
+        for (char **e = environ; *e != nullptr; ++e) {
+            std::string entry(*e);
+            size_t eq = entry.find('=');
+            if (eq == std::string::npos || eq == 0) continue;
+            std::string k = entry.substr(0, eq);
+            std::string ku = k;
+            for (char &ch : ku) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            if (!is_dangerous_child_env_key(ku)) {
+                env_map[k] = entry.substr(eq + 1);
+            }
+        }
+    }
+    for (int i = 0; i < env_count; ++i) {
+        if (!env_kv || !env_kv[i]) continue;
+        std::string kv(env_kv[i]);
+        size_t eq = kv.find('=');
+        if (eq == std::string::npos || eq == 0) continue;
+        std::string k = kv.substr(0, eq);
+        bool valid_key = (std::isalpha(static_cast<unsigned char>(k[0])) || k[0] == '_');
+        for (size_t j = 1; valid_key && j < k.size(); ++j) {
+            if (!std::isalnum(static_cast<unsigned char>(k[j])) && k[j] != '_') valid_key = false;
+        }
+        if (!valid_key) continue;
+        std::string ku = k;
+        for (char &ch : ku) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        if (ku == "PATH" || is_dangerous_child_env_key(ku)) continue;
+        env_map[k] = kv.substr(eq + 1);
+    }
+
+    std::vector<std::string> env_storage;
+    std::vector<char *> envp;
+    env_storage.reserve(env_map.size());
+    for (const auto &kv : env_map) {
+        env_storage.push_back(kv.first + "=" + kv.second);
+    }
+    for (auto &s : env_storage) {
+        envp.push_back(const_cast<char *>(s.c_str()));
+    }
+    envp.push_back(nullptr);
+
+    int log_fd = -1;
+    if (log_file && log_file[0] != '\0' && std::strcmp(log_file, "/dev/null") != 0) {
+        int flags = O_WRONLY | O_CREAT | O_APPEND;
+#if defined(O_NOFOLLOW)
+        flags |= O_NOFOLLOW;
+#endif
+#if defined(O_CLOEXEC)
+        flags |= O_CLOEXEC;
+#endif
+        log_fd = ::open(log_file, flags, 0600);
+        if (log_fd >= 0) {
+            struct stat st;
+            if (fstat(log_fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+                ::close(log_fd);
+                log_fd = -1;
+            }
+        }
+    }
+    if (log_fd < 0) {
+        int flags = O_WRONLY;
+#if defined(O_CLOEXEC)
+        flags |= O_CLOEXEC;
+#endif
+        log_fd = ::open("/dev/null", flags);
+    }
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (log_fd >= 0) {
+        posix_spawn_file_actions_adddup2(&actions, log_fd, STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, log_fd, STDERR_FILENO);
+        if (log_fd != STDOUT_FILENO && log_fd != STDERR_FILENO) {
+            posix_spawn_file_actions_addclose(&actions, log_fd);
+        }
+    }
+#if defined(__APPLE__) || (defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 29)))
+    if (cwd && cwd[0] != '\0') {
+        posix_spawn_file_actions_addchdir_np(&actions, cwd);
+    }
+#endif
+
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    short spawn_flags = POSIX_SPAWN_SETPGROUP;
+#if defined(__APPLE__) && defined(POSIX_SPAWN_CLOEXEC_DEFAULT)
+    spawn_flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
+    posix_spawnattr_setflags(&attr, spawn_flags);
+    posix_spawnattr_setpgroup(&attr, 0);
+
+    pid_t pid = -1;
+    int status = posix_spawnp(&pid, program, &actions, &attr, argv.data(), envp.data());
+    posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&actions);
+    if (log_fd >= 0) {
+        ::close(log_fd);
+    }
+    if (status != 0 || pid <= 0) {
+        return -1;
+    }
+    platform_register_child_pid(static_cast<long>(pid));
+    return static_cast<long>(pid);
+#endif
+}
+
+int platform_sidecar_is_running(long pid) {
+    if (pid <= 0 || pid > std::numeric_limits<int32_t>::max()) return 0;
+#if defined(_WIN32)
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (!hProc) return 0;
+    DWORD exit_code = 0;
+    BOOL ok = GetExitCodeProcess(hProc, &exit_code);
+    CloseHandle(hProc);
+    return (ok && exit_code == STILL_ACTIVE) ? 1 : 0;
+#else
+    pid_t p = static_cast<pid_t>(pid);
+    int st = 0;
+    pid_t w = waitpid(p, &st, WNOHANG);
+    if (w == p) return 0;
+    if (kill(p, 0) == 0) return 1;
+    return (errno == EPERM) ? 1 : 0;
+#endif
+}
+
+int platform_sidecar_kill(long pid, int sig) {
+    if (pid <= 0 || pid > std::numeric_limits<int32_t>::max()) return 0;
+    platform_unregister_child_pid(pid);
+#if defined(_WIN32)
+    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
+    if (!hProc) return 0;
+    BOOL ok = TerminateProcess(hProc, 1);
+    CloseHandle(hProc);
+    return ok ? 1 : 0;
+#else
+    pid_t p = static_cast<pid_t>(pid);
+    int s = (sig > 0) ? sig : SIGTERM;
+    kill(p, s);
+    int st = 0;
+    for (int i = 0; i < 15; ++i) {
+        pid_t w = waitpid(p, &st, WNOHANG);
+        if (w == p || (w < 0 && errno == ECHILD)) {
+            return 1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (sig <= 0) {
+        pid_t w = waitpid(p, &st, WNOHANG);
+        if (w == 0) {
+            kill(p, SIGKILL);
+            while (waitpid(p, &st, 0) < 0 && errno == EINTR) {}
+        }
+    }
+    return 1;
+#endif
+}
+
 void platform_menu_set_callback(menu_callback_fn on_menu) {
     g_menu_cb = on_menu;
 }
 
 void platform_window_set_close_callback(window_close_callback_fn on_close) {
     g_window_close_cb = on_close;
-}
-
-struct JsonVal {
-    enum Type { Null, Bool, Number, String, Array, Object } type = Null;
-    bool b = false;
-    double n = 0;
-    std::string s;
-    std::vector<JsonVal> arr;
-    std::map<std::string, JsonVal> obj;
-
-    const JsonVal &operator[](const std::string &k) const {
-        static JsonVal null_val;
-        auto it = obj.find(k);
-        return it != obj.end() ? it->second : null_val;
-    }
-    std::string str(const std::string &def = "") const {
-        return type == String ? s : def;
-    }
-    bool boolean(bool def = false) const {
-        return type == Bool ? b : def;
-    }
-};
-
-static void skip_ws(const std::string &s, size_t &pos) {
-    while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\r' || s[pos] == '\n')) {
-        pos++;
-    }
-}
-
-static JsonVal parse_json_val(const std::string &s, size_t &pos);
-
-static std::string parse_json_str(const std::string &s, size_t &pos) {
-    std::string res;
-    if (pos >= s.size() || s[pos] != '"') return res;
-    pos++;
-    while (pos < s.size()) {
-        char c = s[pos++];
-        if (c == '"') break;
-        if (c == '\\' && pos < s.size()) {
-            char esc = s[pos++];
-            if (esc == '"') res += '"';
-            else if (esc == '\\') res += '\\';
-            else if (esc == 'n') res += '\n';
-            else if (esc == 'r') res += '\r';
-            else if (esc == 't') res += '\t';
-            else res += esc;
-        } else {
-            res += c;
-        }
-    }
-    return res;
-}
-
-static JsonVal parse_json_val(const std::string &s, size_t &pos) {
-    JsonVal v;
-    skip_ws(s, pos);
-    if (pos >= s.size()) return v;
-
-    if (s[pos] == '"') {
-        v.type = JsonVal::String;
-        v.s = parse_json_str(s, pos);
-    } else if (s[pos] == '{') {
-        v.type = JsonVal::Object;
-        pos++;
-        skip_ws(s, pos);
-        while (pos < s.size() && s[pos] != '}') {
-            skip_ws(s, pos);
-            std::string key = parse_json_str(s, pos);
-            skip_ws(s, pos);
-            if (pos < s.size() && s[pos] == ':') pos++;
-            v.obj[key] = parse_json_val(s, pos);
-            skip_ws(s, pos);
-            if (pos < s.size() && s[pos] == ',') pos++;
-            skip_ws(s, pos);
-        }
-        if (pos < s.size() && s[pos] == '}') pos++;
-    } else if (s[pos] == '[') {
-        v.type = JsonVal::Array;
-        pos++;
-        skip_ws(s, pos);
-        while (pos < s.size() && s[pos] != ']') {
-            v.arr.push_back(parse_json_val(s, pos));
-            skip_ws(s, pos);
-            if (pos < s.size() && s[pos] == ',') pos++;
-            skip_ws(s, pos);
-        }
-        if (pos < s.size() && s[pos] == ']') pos++;
-    } else if (s.compare(pos, 4, "true") == 0) {
-        v.type = JsonVal::Bool; v.b = true; pos += 4;
-    } else if (s.compare(pos, 5, "false") == 0) {
-        v.type = JsonVal::Bool; v.b = false; pos += 5;
-    } else if (s.compare(pos, 4, "null") == 0) {
-        v.type = JsonVal::Null; pos += 4;
-    } else {
-        size_t start = pos;
-        if (pos < s.size() && (s[pos] == '-' || s[pos] == '+')) pos++;
-        while (pos < s.size() && ((s[pos] >= '0' && s[pos] <= '9') || s[pos] == '.')) pos++;
-        v.type = JsonVal::Number;
-        try { v.n = std::stod(s.substr(start, pos - start)); } catch (...) { v.n = 0; }
-    }
-    return v;
 }
 
 #if defined(__APPLE__)
@@ -2678,12 +3471,13 @@ static void parse_accelerator(const std::string &accel, NSString *__strong *out_
     std::string key = (last_plus != std::string::npos) ? accel.substr(last_plus + 1) : accel;
     if (!key.empty()) {
         std::string lower_key = key;
-        for (char &c : lower_key) c = tolower(c);
-        *out_key = [NSString stringWithUTF8String:lower_key.c_str()];
+        for (char &c : lower_key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        *out_key = webview_nsstring_utf8(lower_key);
     }
 }
 
-static void build_nsmenu_items(NSMenu *menu, const std::vector<JsonVal> &items) {
+static void build_nsmenu_items(NSMenu *menu, const std::vector<JsonVal> &items, int depth = 0) {
+    if (depth > 16) return;
     for (const auto &item : items) {
         std::string type = item["type"].str();
         std::string role = item["role"].str();
@@ -2699,10 +3493,10 @@ static void build_nsmenu_items(NSMenu *menu, const std::vector<JsonVal> &items) 
         }
 
         if (type == "submenu" || !item["items"].arr.empty()) {
-            NSString *nsTitle = [NSString stringWithUTF8String:label.c_str()];
+            NSString *nsTitle = webview_nsstring_utf8(label);
             NSMenuItem *subParent = [[NSMenuItem alloc] initWithTitle:nsTitle action:nil keyEquivalent:@""];
             NSMenu *sub = [[NSMenu alloc] initWithTitle:nsTitle];
-            build_nsmenu_items(sub, item["items"].arr);
+            build_nsmenu_items(sub, item["items"].arr, depth + 1);
             [subParent setSubmenu:sub];
             [menu addItem:subParent];
             continue;
@@ -2771,7 +3565,7 @@ static void build_nsmenu_items(NSMenu *menu, const std::vector<JsonVal> &items) 
         }
 
         if (action != nil) {
-            NSString *nsTitle = [NSString stringWithUTF8String:label.c_str()];
+            NSString *nsTitle = webview_nsstring_utf8(label);
             NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:nsTitle action:action keyEquivalent:keyEq];
             if (modFlags != 0) {
                 [mi setKeyEquivalentModifierMask:modFlags];
@@ -2782,13 +3576,13 @@ static void build_nsmenu_items(NSMenu *menu, const std::vector<JsonVal> &items) 
             [menu addItem:mi];
         } else {
             parse_accelerator(accel, &keyEq, &modFlags);
-            NSString *nsTitle = [NSString stringWithUTF8String:label.c_str()];
+            NSString *nsTitle = webview_nsstring_utf8(label);
             NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:nsTitle action:@selector(menuItemClicked:) keyEquivalent:keyEq];
             if (modFlags != 0) {
                 [mi setKeyEquivalentModifierMask:modFlags];
             }
             [mi setTarget:[TauriMenuHandler sharedInstance]];
-            mi.representedObject = [NSString stringWithUTF8String:id.c_str()];
+            mi.representedObject = webview_nsstring_utf8(id);
             if (!enabled) {
                 [mi setEnabled:NO];
             }
@@ -2801,6 +3595,7 @@ static void build_nsmenu_items(NSMenu *menu, const std::vector<JsonVal> &items) 
 }
 #elif defined(_WIN32)
 static UINT g_next_menu_id = 20000;
+static std::mutex g_win32_menu_mutex;
 static std::map<UINT, std::string> g_win32_menu_id_to_action;
 static std::map<HWND, WNDPROC> g_original_wndprocs;
 static std::map<HWND, HMENU> g_attached_menus;
@@ -2817,9 +3612,17 @@ static std::wstring utf8_to_wide(const std::string &str) {
 static LRESULT CALLBACK Win32MenuSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_COMMAND) {
         UINT cmd = LOWORD(wp);
-        auto it = g_win32_menu_id_to_action.find(cmd);
-        if (it != g_win32_menu_id_to_action.end()) {
-            std::string action = it->second;
+        std::string action;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(g_win32_menu_mutex);
+            auto it = g_win32_menu_id_to_action.find(cmd);
+            if (it != g_win32_menu_id_to_action.end()) {
+                action = it->second;
+                found = true;
+            }
+        }
+        if (found) {
             if (action == "role:quit") {
                 PostMessage(hwnd, WM_CLOSE, 0, 0);
             } else if (action == "role:close" || action == "role:close_window") {
@@ -2850,7 +3653,6 @@ static LRESULT CALLBACK Win32MenuSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LP
                     is_full = false;
                 }
             } else if (action.rfind("role:", 0) == 0) {
-                // Native system role
             } else {
                 if (g_menu_cb) {
                     g_menu_cb(action.c_str());
@@ -2859,14 +3661,22 @@ static LRESULT CALLBACK Win32MenuSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LP
             return 0;
         }
     }
-    auto proc_it = g_original_wndprocs.find(hwnd);
-    if (proc_it != g_original_wndprocs.end() && proc_it->second) {
-        return CallWindowProcW(proc_it->second, hwnd, msg, wp, lp);
+    WNDPROC orig = NULL;
+    {
+        std::lock_guard<std::mutex> lock(g_win32_menu_mutex);
+        auto proc_it = g_original_wndprocs.find(hwnd);
+        if (proc_it != g_original_wndprocs.end()) {
+            orig = proc_it->second;
+        }
+    }
+    if (orig) {
+        return CallWindowProcW(orig, hwnd, msg, wp, lp);
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-static void build_win32_menu_items(HMENU parent, const std::vector<JsonVal> &items) {
+static void build_win32_menu_items(HMENU parent, const std::vector<JsonVal> &items, int depth = 0) {
+    if (depth > 16) return;
     for (const auto &item : items) {
         std::string type = item["type"].str();
         std::string role = item["role"].str();
@@ -2890,7 +3700,7 @@ static void build_win32_menu_items(HMENU parent, const std::vector<JsonVal> &ite
 
         if (type == "submenu" || !item["items"].arr.empty()) {
             HMENU hSub = CreatePopupMenu();
-            build_win32_menu_items(hSub, item["items"].arr);
+            build_win32_menu_items(hSub, item["items"].arr, depth + 1);
             UINT flags = MF_POPUP;
             if (!enabled) flags |= MF_GRAYED;
             AppendMenuW(parent, flags, (UINT_PTR)hSub, wtitle.c_str());
@@ -2931,8 +3741,8 @@ static void apply_menu_to_win32_window(HWND hwnd, const std::vector<JsonVal> &it
 
 void win32_attach_current_menu(HWND hwnd) {
     if (g_last_menu_json.empty() || !hwnd) return;
-    size_t pos = 0;
-    JsonVal root = parse_json_val(g_last_menu_json, pos);
+    JsonVal root;
+    if (!parse_json_strict(g_last_menu_json, root, 32)) return;
     const std::vector<JsonVal> *items_to_build = nullptr;
     if (root.type == JsonVal::Array) {
         items_to_build = &root.arr;
@@ -2983,7 +3793,8 @@ static void on_gtk_menu_item_activate(GtkMenuItem *menuitem, gpointer user_data)
     }
 }
 
-static void build_gtk_menu_items(GtkWidget *parent_shell, const std::vector<JsonVal> &items, GtkAccelGroup *accel_group) {
+static void build_gtk_menu_items(GtkWidget *parent_shell, const std::vector<JsonVal> &items, GtkAccelGroup *accel_group, int depth = 0) {
+    if (depth > 16) return;
     for (const auto &item : items) {
         std::string type = item["type"].str();
         std::string role = item["role"].str();
@@ -3004,7 +3815,7 @@ static void build_gtk_menu_items(GtkWidget *parent_shell, const std::vector<Json
             GtkWidget *sub_item = gtk_menu_item_new_with_label(label.c_str());
             GtkWidget *sub_menu = gtk_menu_new();
             gtk_menu_item_set_submenu(GTK_MENU_ITEM(sub_item), sub_menu);
-            build_gtk_menu_items(sub_menu, item["items"].arr, accel_group);
+            build_gtk_menu_items(sub_menu, item["items"].arr, accel_group, depth + 1);
             gtk_menu_shell_append(GTK_MENU_SHELL(parent_shell), sub_item);
             continue;
         }
@@ -3090,8 +3901,8 @@ static void apply_menu_to_gtk_window(GtkWindow *gtkwin, const std::vector<JsonVa
 
 void gtk_attach_current_menu(GtkWindow *gtkwin) {
     if (g_last_menu_json_linux.empty() || !gtkwin) return;
-    size_t pos = 0;
-    JsonVal root = parse_json_val(g_last_menu_json_linux, pos);
+    JsonVal root;
+    if (!parse_json_strict(g_last_menu_json_linux, root, 32)) return;
     const std::vector<JsonVal> *items_to_build = nullptr;
     if (root.type == JsonVal::Array) {
         items_to_build = &root.arr;
@@ -3107,8 +3918,8 @@ void gtk_attach_current_menu(GtkWindow *gtkwin) {
 void platform_set_menu(const char *json_menu) {
     if (!json_menu) return;
     std::string s_json(json_menu);
-    size_t pos = 0;
-    JsonVal root = parse_json_val(s_json, pos);
+    JsonVal root;
+    if (!parse_json_strict(s_json, root, 32)) return;
     const std::vector<JsonVal> *items_to_build = nullptr;
     if (root.type == JsonVal::Array) {
         items_to_build = &root.arr;
@@ -3239,35 +4050,82 @@ int platform_is_origin_allowed(const char *url) {
 
 int platform_resolve_path(const char *in_path, char *out_path, int max_len) {
     if (!in_path || in_path[0] == '\0' || !out_path || max_len <= 0) return 0;
-    std::filesystem::path p(in_path);
-    std::error_code ec;
-    std::filesystem::path resolved;
-    if (std::filesystem::exists(p, ec)) {
-        resolved = std::filesystem::canonical(p, ec);
-        if (ec) {
-            ec.clear();
-            resolved = std::filesystem::weakly_canonical(p, ec);
-        }
-    } else {
-        std::filesystem::path parent = p.parent_path();
-        std::filesystem::path filename = p.filename();
-        if (!parent.empty() && std::filesystem::exists(parent, ec)) {
-            std::filesystem::path canon_parent = std::filesystem::canonical(parent, ec);
-            if (ec) {
-                ec.clear();
-                canon_parent = std::filesystem::weakly_canonical(parent, ec);
+    out_path[0] = '\0';
+    try {
+        std::filesystem::path current(in_path);
+        std::error_code ec;
+        for (int hop = 0; hop < 40; ++hop) {
+            std::filesystem::file_status st = std::filesystem::symlink_status(current, ec);
+            if (!ec && std::filesystem::is_symlink(st)) {
+                std::filesystem::path target = std::filesystem::read_symlink(current, ec);
+                if (ec) return 0;
+                if (target.is_relative()) {
+                    current = current.parent_path() / target;
+                } else {
+                    current = target;
+                }
+                continue;
             }
-            resolved = canon_parent / filename;
-        } else {
-            resolved = std::filesystem::weakly_canonical(p, ec);
+            ec.clear();
+            break;
         }
+        std::filesystem::file_status final_st = std::filesystem::symlink_status(current, ec);
+        if (!ec && std::filesystem::is_symlink(final_st)) {
+            return 0;
+        }
+        ec.clear();
+        std::filesystem::path resolved;
+        if (std::filesystem::exists(current, ec) && !ec) {
+            resolved = std::filesystem::canonical(current, ec);
+            if (ec) return 0;
+        } else {
+            ec.clear();
+            std::vector<std::filesystem::path> tail;
+            std::filesystem::path cur = current;
+            while (!cur.empty() && cur != cur.root_path()) {
+                std::filesystem::file_status cst = std::filesystem::symlink_status(cur, ec);
+                if (!ec && std::filesystem::is_symlink(cst)) {
+                    std::filesystem::path tgt = std::filesystem::read_symlink(cur, ec);
+                    if (ec) return 0;
+                    cur = tgt.is_relative() ? (cur.parent_path() / tgt) : tgt;
+                    continue;
+                }
+                ec.clear();
+                if (std::filesystem::exists(cur, ec) && !ec) {
+                    if (!std::filesystem::is_directory(cur, ec) || ec) {
+                        return 0;
+                    }
+                    break;
+                }
+                ec.clear();
+                std::filesystem::path fname = cur.filename();
+                if (fname == ".." || fname == ".") return 0;
+                tail.push_back(fname);
+                std::filesystem::path par = cur.parent_path();
+                if (par == cur) break;
+                cur = par;
+            }
+            std::filesystem::path base = cur.empty() ? std::filesystem::path(".") : cur;
+            if (std::filesystem::exists(base, ec) && !ec) {
+                resolved = std::filesystem::canonical(base, ec);
+                if (ec) return 0;
+            } else {
+                ec.clear();
+                resolved = std::filesystem::weakly_canonical(base, ec);
+                if (ec) return 0;
+            }
+            for (auto it = tail.rbegin(); it != tail.rend(); ++it) {
+                resolved /= *it;
+            }
+        }
+        std::string s = resolved.generic_string();
+        if (s.size() >= static_cast<size_t>(max_len)) return 0;
+        memcpy(out_path, s.data(), s.size());
+        out_path[s.size()] = '\0';
+        return 1;
+    } catch (...) {
+        return 0;
     }
-    if (ec) return 0;
-    std::string s = resolved.generic_string();
-    if (s.size() >= static_cast<size_t>(max_len)) return 0;
-    strncpy(out_path, s.c_str(), max_len - 1);
-    out_path[max_len - 1] = '\0';
-    return 1;
 }
 
 }
